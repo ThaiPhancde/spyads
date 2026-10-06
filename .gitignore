@@ -1,0 +1,36 @@
+# --- secrets (NEVER commit) ---
+.env
+.env.*
+!.env.example
+**/credentials.json
+**/secrets.env
+
+# --- reference projects (not part of the app) ---
+reference/
+
+# --- data: database, media vault, raw lake, backups ---
+*.db
+*.db-*
+*.sqlite
+apps/api/data/
+apps/api/_demo_backup/
+apps/api/_stale_backup/
+
+# --- python ---
+.venv/
+__pycache__/
+*.pyc
+
+# --- node / next ---
+node_modules/
+.next/
+out/
+next-env.d.ts
+
+# --- logs / os / editor ---
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Save to Intelligence</title>
+<style>
+  body { width: 340px; font: 13px system-ui, sans-serif; margin: 0; padding: 14px; color: #0b0b0b; }
+  h1 { font-size: 14px; margin: 0 0 10px; }
+  label { display: block; margin: 8px 0 3px; color: #52514e; font-size: 12px; }
+  input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c3c2b7; border-radius: 6px; font: inherit; }
+  button { padding: 7px 10px; border: 1px solid #c3c2b7; border-radius: 6px; background: #fff; cursor: pointer; font: inherit; }
+  button.primary { background: #2a78d6; color: #fff; border-color: transparent; }
+  .row { display: flex; gap: 6px; margin-top: 10px; }
+  .row > * { flex: 1; }
+  #msg { margin-top: 10px; font-size: 12px; color: #52514e; white-space: pre-wrap; word-break: break-word; }
+  hr { border: none; border-top: 1px solid #e1e0d9; margin: 12px 0; }
+  .muted { color: #898781; font-size: 11px; }
+</style>
+</head>
+<body>
+  <h1>Market Intelligence — Save to Intelligence</h1>
+  <button class="primary" id="savePage" style="width:100%">＋ Lưu trang này vào kho</button>
+  <label>Thị trường của sản phẩm (VD: SA, VN) — tuỳ chọn</label>
+  <input id="country" placeholder="SA">
+  <div class="muted" style="margin-top:6px">Lấy tiêu đề, ảnh, video và giá (nếu trang có). Trên <b>facebook.com/ads/library</b> không cần bấm gì: cuộn trang, extension tự bắt quảng cáo.</div>
+  <hr>
+  <label>Địa chỉ app (API hoặc web)</label>
+  <input id="api" placeholder="http://localhost:8000">
+  <label>Ingest token (INGEST_TOKEN)</label>
+  <input id="token" type="password" placeholder="để trống nếu chưa đặt">
+  <label>Tên bạn</label>
+  <input id="user" placeholder="mkt.an">
+  <div class="row"><button id="save">Lưu cài đặt</button><button id="test">Test kết nối</button></div>
+  <div id="msg"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

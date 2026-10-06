@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Market Intelligence — Save to Intelligence",
+  "version": "0.1.0",
+  "description": "Bắt quảng cáo trên Meta Ad Library khi bạn duyệt và lưu vào kho Market Intelligence OS (kèm video). Có nút lưu trang sản phẩm bất kỳ.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["https://*.facebook.com/*", "http://localhost/*", "http://127.0.0.1/*", "https://*/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Save to Intelligence", "default_popup": "popup.html" },
+  "content_scripts": [
+    {
+      "matches": ["https://*.facebook.com/ads/library/*"],
+      "js": ["injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://*.facebook.com/ads/library/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

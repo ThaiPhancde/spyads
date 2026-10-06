@@ -1,0 +1,7 @@
+.venv
+__pycache__
+data
+_demo_backup
+_stale_backup
+*.db*
+*.log
