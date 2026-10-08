@@ -27,11 +27,22 @@ export function useApi<T = any>(path: string | null) {
     setLoading(true);
     api<T>(path)
       .then((d) => { setData(d); setError(null); })
-      .catch((e) => setError(String(e.message || e)))
+      .catch((e) => { setData(null); setError(String(e.message || e)); })  // drop stale data so pages render the error
       .finally(() => setLoading(false));
   }, [path]);
   useEffect(reload, [reload]);
   return { data, error, loading, reload };
+}
+
+/** Wrap a mutation (save / toggle / retry…): surfaces the thrown message instead of swallowing it. */
+export function useAction() {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = useCallback(async (fn: () => Promise<any>) => {
+    setBusy(true); setError(null);
+    try { return await fn(); } catch (e: any) { setError(String(e.message || e)); } finally { setBusy(false); }
+  }, []);
+  return { run, error, busy };
 }
 
 export const fmt = {
@@ -61,10 +72,13 @@ export function usePaged<T = any>(path: string, pageSize = 40) {
   const [error, setError] = useState<string | null>(null);
   const gen = useRef(0);
   const count = useRef(0);
+  const busy = useRef(false);
+  const lastReload = useRef(0);
   const sep = path.includes("?") ? "&" : "?";
 
   const load = useCallback(async (offset: number, replace: boolean, limit = pageSize) => {
     const my = replace ? ++gen.current : gen.current;
+    busy.current = true;
     setLoading(true);
     try {
       const d = await api(`${path}${sep}limit=${limit}&offset=${offset}`);
@@ -76,13 +90,20 @@ export function usePaged<T = any>(path: string, pageSize = 40) {
     } catch (e: any) {
       if (my === gen.current) setError(String(e.message || e));
     } finally {
-      if (my === gen.current) setLoading(false);
+      if (my === gen.current) { busy.current = false; setLoading(false); }
     }
   }, [path, pageSize, sep]);
 
   useEffect(() => { count.current = 0; setRows([]); setTotal(0); load(0, true); }, [load]);
   const loadMore = useCallback(() => { if (!loading) load(count.current, false); }, [load, loading]);
-  /** refresh what is already on screen (keeps the scroll position / loaded pages) */
-  const reload = useCallback(() => load(0, true, Math.max(count.current, pageSize)), [load, pageSize]);
+  /** refresh what is already on screen (keeps the scroll position / loaded pages). Driven by realtime events that can
+   *  fire many times a second (CREATIVE_STORED): never cancel a load in flight, at most one refresh per 15 s —
+   *  otherwise each event restarted the request and the list stayed on "Đang tải…" forever. */
+  const reload = useCallback(() => {
+    if (busy.current || Date.now() - lastReload.current < 15_000) return;
+    lastReload.current = Date.now();
+    // backend caps limit (200, /creatives 300): past that only the first pages are refreshed, the rest stays as loaded
+    load(0, true, Math.min(Math.max(count.current, pageSize), path.startsWith("/creatives") ? 300 : 200));
+  }, [load, pageSize, path]);
   return { rows, total, last, loading, error, hasMore: rows.length < total, loadMore, reload };
 }

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Connector, PipelineRun
 from .alerts import run_alerts
-from .connectors import classify_order_refusals, enrich_comments, normalize_pending, sync_connector
+from .connectors import classify_order_refusals, enrich_comments, normalize_pending
 from .engine import build_snapshots, score_all
 
 

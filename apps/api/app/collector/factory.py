@@ -1,8 +1,12 @@
 """Connector Factory (spy_app_chat_summary §10). Adding a source = add one class here."""
 from __future__ import annotations
 
+from .adapters.ad_libraries import SnapchatAdsLibraryConnector, TikTokAdLibraryConnector, TikTokTopAdsConnector
+from .adapters.apify import (Apify1688Connector, ApifyTaobaoConnector,
+                             ApifyTikTokLibraryConnector, ApifyTikTokTopAdsConnector)
 from .adapters.generic import (ApifyActorConnector, ExportFolderConnector, GenericHttpConnector,
                                TikTokCommercialConnector)
+from .adapters.marketplaces import AliExpressSearchConnector
 from .adapters.meta import ApifyMetaConnector, MetaAdsInsightsConnector, MetaGraphConnector, MetaLibraryConnector
 from .base import BaseConnector
 
@@ -12,6 +16,9 @@ class ConnectorFactory:
         c.key: c for c in (
             MetaLibraryConnector, MetaGraphConnector, ApifyMetaConnector,
             TikTokCommercialConnector, ApifyActorConnector, GenericHttpConnector, ExportFolderConnector, MetaAdsInsightsConnector,
+            SnapchatAdsLibraryConnector, TikTokAdLibraryConnector, TikTokTopAdsConnector,
+            AliExpressSearchConnector, Apify1688Connector, ApifyTaobaoConnector, ApifyTikTokTopAdsConnector,
+            ApifyTikTokLibraryConnector,
         )
     }
 

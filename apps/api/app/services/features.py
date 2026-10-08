@@ -11,7 +11,10 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..markets import priority_markets
 from ..models import Ad, ad_markets, AdMetric, Comment, Experiment, Order, Product, Store
+from ..platforms import REMOVED_NETWORKS
+from .enrichment import to_usd
 
 
 @dataclass
@@ -73,7 +76,9 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
     d7, d14, d30 = end - timedelta(days=7), end - timedelta(days=14), end - timedelta(days=30)
     p = data.product
 
-    ext_ads = [a for a in data.ads if not a.is_internal and a.first_seen_at <= end]
+    seen_by = [a for a in data.ads if not a.is_internal and a.first_seen_at <= end]
+    # ad metrics come from ad libraries only: a marketplace listing or a viral post is not an ad (platforms.py)
+    ext_ads = [a for a in seen_by if a.channel in (None, "ads") and a.network not in REMOVED_NETWORKS]
     active = [a for a in ext_ads if _active_at(a, as_of)]
     new_7d = [a for a in ext_ads if a.first_seen_at > d7]
     new_prev7 = [a for a in ext_ads if d14 < a.first_seen_at <= d7]
@@ -106,9 +111,10 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
     traffic_growth = _safe_div(sum((s.traffic_growth or 0) * (s.estimated_traffic or 1) for s in stores),
                                sum((s.estimated_traffic or 1) for s in stores), 0.0)
 
-    prices_recent = [a.price for a in ext_ads if a.price and a.first_seen_at > d14]
-    prices_old = [a.price for a in ext_ads if a.price and a.first_seen_at <= d14]
-    avg_price = _safe_div(sum(prices_recent + prices_old), len(prices_recent + prices_old), None) if (prices_recent or prices_old) else p.price
+    # prices in USD: ads of one product come in PHP / SAR / AUD … (readers: margin_potential, internal AOV, alerts ratio)
+    prices_recent = [to_usd(a.price, a.currency) for a in ext_ads if a.price and a.first_seen_at > d14]
+    prices_old = [to_usd(a.price, a.currency) for a in ext_ads if a.price and a.first_seen_at <= d14]
+    avg_price = _safe_div(sum(prices_recent + prices_old), len(prices_recent + prices_old), None) if (prices_recent or prices_old) else to_usd(p.price, p.currency)
     price_trend = (_safe_div(sum(prices_recent), len(prices_recent)) / _safe_div(sum(prices_old), len(prices_old)) - 1) \
         if prices_recent and prices_old else 0.0
 
@@ -126,6 +132,9 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
     neg_rate_7d = _safe_div(sum(1 for c in c7 if c.overall == "negative"), len(c7), None) if c7 else None
     neg_rate_prev = _safe_div(sum(1 for c in cprev if c.overall == "negative"), len(cprev), None) if cprev else None
 
+    var = _variation(active)
+    fp_groups = Counter(fps)
+    prim = priority_markets()
     first_seen = min((a.first_seen_at for a in ext_ads), default=p.first_seen_at)
     data_days = max(0, (end - first_seen).days)
     sources = {a.source for a in ext_ads} | ({"stores"} if stores else set()) | ({"comments"} if comments else set())
@@ -143,9 +152,13 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
         "force_top": round(sum(sorted((a.force_score or 0 for a in active), reverse=True)[:5]) / max(1, min(5, len(active))), 1),
         "force_max": max((a.force_score or 0 for a in active), default=0),
         "strong_ads": sum(1 for a in active if (a.force_score or 0) >= 45),
-        **{f"variation_{k}": v for k, v in _variation(active).items()},
+        **{f"variation_{k}": v for k, v in var.items()},
+        # what marketers trust most: days the strongest ad has run, copies of the same creative, sellers at the priority market
+        "longevity_days": max(((end - a.first_seen_at).days for a in active), default=0),
+        "variants": max([var["max_group"], *fp_groups.values()]),  # largest group of live ads sharing page+copy or creative
+        "advertisers_at_primary_market": len({a.advertiser_id or a.page_id for a in active if prim & set(ad_markets(a))}),
         "creative_count": len(set(fps)) or len(active),
-        "creative_growth_7d": round(_safe_div(len(new_7d), max(1, len(active) - len(new_7d))), 3),
+        "creative_growth_7d": round(_safe_div(len(new_7d), max(3, len(active))), 3),  # 1 new ad on 1 ad is not +100 %
         "creative_growth_30d": round(_safe_div(len(new_30d), max(1, len(active) - len(new_30d))), 3),
         "creative_acceleration": len(new_7d) - len(new_prev7),
         "creative_duplication": round(duplication, 3),
@@ -176,8 +189,35 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
         "data_days": data_days,
         "source_count": len(sources),
     }
+    feats.update(compute_channel_features(seen_by, end))
     feats.update(compute_internal_features(data, as_of))
     return feats
+
+
+def compute_channel_features(rows: list, end: datetime) -> dict:
+    """Cross-platform evidence: where else the product shows up. China-source demand (AliExpress sold / reviews),
+    supplier price (AliExpress / 1688 / Taobao) and viral organic reach."""
+    from ..platforms import REMOVED_NETWORKS
+    from .enrichment import to_usd
+
+    rows = [a for a in rows if a.network not in REMOVED_NETWORKS]
+    listings = [a for a in rows if a.channel == "commerce"]
+    organic = [a for a in rows if a.channel == "organic"]
+    ads = [a for a in rows if a.channel in (None, "ads")]
+    supplier = [to_usd(a.price, a.currency) for a in listings if a.price]
+    return {
+        "ad_networks": sorted({a.network or "meta" for a in ads}),
+        "networks": sorted({a.network for a in rows if a.network}),
+        "listings": len(listings),
+        "marketplaces": sorted({a.network for a in listings if a.network}),
+        "reviews_total": sum(a.review_count or 0 for a in listings),
+        "rating_avg": round(sum(a.rating for a in listings if a.rating) / max(1, sum(1 for a in listings if a.rating)), 2)
+        if any(a.rating for a in listings) else None,
+        "sold_total": sum(a.sold_count or 0 for a in listings),
+        "supplier_price_usd": round(min(supplier), 2) if supplier else None,
+        "organic_posts": len(organic),
+        "organic_views": sum(a.views or 0 for a in organic),
+    }
 
 
 def compute_internal_features(data: ProductData, as_of: date) -> dict:

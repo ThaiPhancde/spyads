@@ -17,6 +17,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..markets import priority_boost
 from ..models import Ad, Creative, Product, Vote
 from .scoring import lin
 
@@ -28,16 +29,19 @@ VOTE_REASONS = ["Visual mạnh", "Hook dễ", "Demo được", "Before/After", "
 COMPLIANCE_PATTERNS = [
     (r"\b(replica|1:1|aaa\+?|super ?fake|mirror quality|master copy|first copy|rep)\b|hàng fake|hàng nhái|like auth", 45, "counterfeit"),
     (r"\b(rolex|cartier|louis vuitton|\blv\b|gucci|chanel|dior|hermes|hermès|prada|van cleef|bvlgari|tiffany|apple watch|airpods|dyson)\b", 25, "brand"),
-    (r"chữa (khỏi|dứt điểm)|trị dứt|cure[sd]?\b|100% (hiệu quả|effective)|guaranteed results|cam kết khỏi|يعالج نهائيا", 35, "medical_claim"),
+    (r"chữa (khỏi|dứt điểm)|trị dứt|\bcures?\b|(?<!semi[ -])\bcured\b|100% (hiệu quả|effective)|guaranteed results|cam kết khỏi|يعالج نهائيا", 35, "medical_claim"),
     (r"giảm \d+ ?kg|lose \d+ ?(kg|lbs|pounds)|weight loss in \d+ days|tan mỡ cấp tốc", 30, "weight_loss_claim"),
     (r"\b(viagra|cialis|sex|tăng size|enlarge(ment)?|kéo dài thời gian)\b", 35, "adult"),
-    (r"\b(gun|vape|cbd|thc|nicotine|e-?cig)\b|thuốc lá điện tử", 40, "restricted"),
+    (r"\b(air gun|pistol|firearm|rifle|vape|cbd|thc|nicotine|e-?cig)\b|thuốc lá điện tử", 40, "restricted"),
     (r"before\s*/?\s*after|trước và sau", 10, "before_after"),
 ]
 
 
+TOOL_GUNS = re.compile(r"\b(massage|fascia|glue|nail|heat|spray|paint|tattoo|caulk|staple|grease) guns?\b")
+
+
 def compliance_risk(texts: list[str], rejected_rate: float | None = None) -> tuple[float, list[str]]:
-    blob = " ".join(texts).lower()
+    blob = TOOL_GUNS.sub(" ", " ".join(texts).lower())  # "massage gun" is a tool, not a weapon
     score, flags = 0.0, []
     for pat, w, flag in COMPLIANCE_PATTERNS:
         if re.search(pat, blob):
@@ -107,12 +111,18 @@ class TasteModel:
         if not pids:
             return out
         for pid, hook, angle, funnel in db.execute(select(Ad.product_id, Ad.hook, Ad.angle, Ad.funnel).where(Ad.product_id.in_(pids))):
-            out[pid] |= {f"hook:{hook}", f"angle:{angle}", f"funnel:{funnel}"}
+            out[pid] |= ad_feature_set(hook, angle, funnel)
         return out
+
+    MIN_VOTES = 3  # a feature needs this many votes before it says anything (2 votes used to move ~4,800 products)
 
     @staticmethod
     def features(p: Product, ad_feats: set[str], market: str | None = None) -> list[str]:
-        feats = [f"category:{p.category}", f"market:{market or p.country}", *ad_feats]
+        feats = [*ad_feats]
+        if p.category:
+            feats.append(f"category:{p.category}")
+        if market or p.country:
+            feats.append(f"market:{market or p.country}")
         if p.category and (market or p.country):
             feats.append(f"cat_market:{p.category}|{market or p.country}")
         return feats
@@ -121,11 +131,19 @@ class TasteModel:
         vals = []
         for f in self.features(p, ad_feats, market):
             w = self.weights.get(f)
-            if w:
+            if w and len(w) >= self.MIN_VOTES:
                 # shrink towards neutral 50 when few votes
                 k = len(w)
                 vals.append((sum(w) + 50 * 2) / (k + 2))
         return round(sum(vals) / len(vals), 1) if vals else None
+
+
+_GENERIC = {"hook:statement", "angle:general"}  # classifier defaults, not taste signals
+
+
+def ad_feature_set(hook, angle, funnel) -> set[str]:
+    return {f for f in (f"hook:{hook}" if hook else None, f"angle:{angle}" if angle else None,
+                        f"funnel:{funnel}" if funnel else None) if f and f not in _GENERIC}
 
 
 def market_dna(db: Session) -> dict[str, dict]:
@@ -135,7 +153,7 @@ def market_dna(db: Session) -> dict[str, dict]:
     for country, cat, angle, funnel, price in db.execute(
             select(Ad.country, Product.category, Ad.angle, Ad.funnel, Ad.price).join(Product, Product.id == Ad.product_id)
             .where(Ad.is_active.is_(True), Ad.is_internal.is_(False))):
-        if not country:
+        if not country or cat is None:  # unclassified products are not a category (H13)
             continue
         d = dna[country]
         d["categories"][cat] += 1
@@ -165,7 +183,7 @@ def market_dna(db: Session) -> dict[str, dict]:
 
 def market_fit_score(dna: dict, market: str, category: str | None, angle: str | None) -> float:
     d = dna.get(market)
-    if not d:
+    if not d or category is None:
         return 50.0
     weight = min(1.0, d["active_ads"] / 150)  # little market data → stay near neutral
     cats = dict(d["top_categories"])
@@ -189,16 +207,21 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     cs = creative_signals(ext_ads, creatives)
     age_days = (now - p.first_seen_at).days if p.first_seen_at else 0
 
-    demand = 0.35 * lin(f.get("active_ads", 0), 0, 120) + 0.25 * lin(f.get("advertiser_count", 0), 1, 30) \
-        + 0.25 * lin(f.get("ads_running_30d", 0), 0, 15) + 0.15 * lin(f.get("market_count", 0), 1, 4)
-    novelty = 0.30 * (100 - lin(f.get("advertiser_count", 0), 2, 40)) + 0.20 * (100 - lin(f.get("store_count", 0), 1, 25)) \
-        + 0.20 * lin(60 - age_days, 0, 60) + 0.15 * (100 - (f.get("keyword_competition") or 0.5) * 100) \
-        + 0.15 * (100 - lin(f.get("market_count", 0), 1, 6))
+    # Calibrated on the real DB 2026-10-07 (3,213 products with ≥1 ad-library ad). Measured percentiles p50/p90/p99:
+    #   active_ads 1/2/12 · advertiser_count 1/1/3 · ads_running_30d 1/2/9 · market_count 1/1/6 · longevity_days 131/524/1351
+    #   · variants (max same-copy group) 1/2/6. 82 % of products have a single ad, so p90 sits near 0 whatever the range;
+    #   ranges are set so p99 ≈ 100 and the marketer thresholds (≥14/30 days, 2-10 sellers) land in the 60-80 band.
+    demand = 0.30 * lin(f.get("active_ads", 0), 1, 12) + 0.25 * lin(f.get("advertiser_count", 0), 1, 4) \
+        + 0.15 * lin(f.get("ads_running_30d", 0), 0, 9) + 0.10 * lin(f.get("market_count", 0), 1, 6) \
+        + 0.10 * lin(f.get("longevity_days", 0), 14, 120) + 0.10 * lin(f.get("variants", 1), 1, 6)
+    # keyword_competition dropped (weight 0): no source fills it yet — remaining weights renormalised to 100
+    novelty = (0.30 * (100 - lin(f.get("advertiser_count", 0), 2, 15)) + 0.20 * (100 - lin(f.get("store_count", 0), 1, 4))
+               + 0.20 * lin(60 - age_days, 0, 60) + 0.15 * (100 - lin(f.get("market_count", 0), 1, 6))) / 0.85
     wave_parts = {
         "scroll_stop_curiosity": lin(cs["curiosity"], 0, 0.5),
         "demo_strength": lin(cs["demo"], 0, 0.5),
         "transformation": lin(cs["transformation"], 0, 0.4),
-        "commentability": lin(cs["commentability"], 0, 0.08) if cs["commentability"] is not None else lin(f.get("purchase_intent_rate", 0), 0, 0.2),
+        # ponytail: no source fills comments / purchase_intent yet — commentability dropped (weight 0)
         "shareability": lin(cs["shareability"], 0, 0.05) if cs["shareability"] is not None else 40.0,
         "velocity": lin(f.get("creative_growth_7d", 0), 0, 1.0),
         "scaling_variants": max(lin(cs["variants_per_ad"], 1, 4), lin(f.get("variation_max_group", 1), 1, 5)),
@@ -216,7 +239,7 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     creative = sum(creative_parts.values()) / len(creative_parts)
 
     voted = [VOTE_VALUE.get(v.decision, 50) for v in votes]
-    ad_feats = {f"hook:{a.hook}" for a in ext_ads} | {f"angle:{a.angle}" for a in ext_ads} | {f"funnel:{a.funnel}" for a in ext_ads}
+    ad_feats = set().union(*(ad_feature_set(a.hook, a.angle, a.funnel) for a in ext_ads)) if ext_ads else set()
     predicted = taste.predict(p, ad_feats)
     if voted:
         mkt_appeal, appeal_src = sum(voted) / len(voted), f"{len(voted)} votes"
@@ -239,7 +262,9 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
 
     raw = (0.16 * market_fit + 0.10 * mkt_appeal + 0.08 * operational + 0.14 * novelty + 0.18 * wave + 0.14 * creative
            + 0.10 * economics + 0.10 * demand) - 0.12 * max(0, competition - 30) - 0.5 * max(0, risk - 20)
-    opportunity = max(0.0, min(100.0, raw * (0.75 + 0.25 * conf / 100)))
+    opportunity_raw = max(0.0, min(100.0, raw * (0.75 + 0.25 * conf / 100)))
+    boost = priority_boost(markets)  # PH first — applied once here (engine.compute_scores does the same for opportunity_score)
+    opportunity = min(100.0, opportunity_raw + boost)
 
     quadrant = ("BREAKOUT" if wave >= 55 and demand >= 50 else "EXPERIMENTAL" if wave >= 55 else
                 "STABLE_WINNER" if demand >= 50 else "LOW_SIGNAL")
@@ -247,7 +272,7 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
         "market_demand": demand, "novelty": novelty, "wave_potential": wave, "creative_potential": creative,
         "market_fit": market_fit, "mkt_appeal": mkt_appeal, "competition": competition, "saturation": p.saturation_score,
         "economics": economics, "operational_fit": operational, "compliance_risk": risk, "confidence": conf,
-        "company_fit": company_fit, "opportunity": opportunity,
+        "company_fit": company_fit, "opportunity": opportunity, "opportunity_raw": opportunity_raw, "priority_boost": boost,
     }
     vec = {k: (round(v, 1) if isinstance(v, (int, float)) else v) for k, v in vec.items()}
     return {
@@ -261,7 +286,7 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
 
 
 def discovery_decision(v: dict, quadrant: str) -> tuple[str, list[str]]:
-    """Discovery §20 — actions beyond win/lose."""
+    """Before a test (market signals only): TEST_NOW · TEST · WATCH · REVIEW · SKIP."""
     if v["compliance_risk"] >= 60:
         return "REVIEW", [f"Compliance risk {v['compliance_risk']:.0f} — kiểm tra hàng nhái / claim trước khi test"]
     if quadrant == "BREAKOUT" and v["opportunity"] >= 62 and v["market_fit"] >= 55:
@@ -269,14 +294,14 @@ def discovery_decision(v: dict, quadrant: str) -> tuple[str, list[str]]:
     if v["novelty"] >= 70 and v["wave_potential"] >= 60 and v["creative_potential"] >= 55 and v["market_fit"] >= 50:
         return "TEST", [f"Novelty {v['novelty']:.0f}, Wave {v['wave_potential']:.0f}, Creative {v['creative_potential']:.0f}"]
     if quadrant == "EXPERIMENTAL" and v["confidence"] < 60:
-        return "EXPERIMENT", [f"Wave {v['wave_potential']:.0f} cao nhưng thị trường chưa xác nhận — test nhỏ"]
+        return "TEST", [f"Wave {v['wave_potential']:.0f} cao nhưng thị trường chưa xác nhận — test nhỏ ngân sách"]
     if v["competition"] >= 70:
         return "SKIP", [f"Bão hoà {v['competition']:.0f}"]
     if quadrant == "STABLE_WINNER":
         return "WATCH", ["Đã được xác nhận nhưng ít tín hiệu sóng mới — theo dõi đối thủ"]
     if v["opportunity"] < 30:
         return "SKIP", [f"Opportunity {v['opportunity']:.0f}"]
-    return "DISCOVER", ["Mới phát hiện — cần thêm dữ liệu"]
+    return "WATCH", ["Mới phát hiện — cần thêm dữ liệu"]
 
 
 # ------------------------------------------------------------ Company Product Fit (realtime §19)

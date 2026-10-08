@@ -25,7 +25,7 @@ function Radar() {
 
   return (
     <div>
-      <PageHeader title="Product Radar" subtitle="Sản phẩm đang chạy theo thị trường + khung thời gian — xu hướng tính trực tiếp từ ngày bắt đầu chạy của quảng cáo trên Meta">
+      <PageHeader title="Product Radar" subtitle="Sản phẩm đang chạy theo thị trường + khung thời gian — xu hướng tính trực tiếp từ ngày bắt đầu chạy của quảng cáo trên mọi nền tảng (Meta, TikTok, Snapchat)">
         <div className="flex rounded-lg border overflow-hidden" style={{ borderColor: "var(--border)" }}>
           {[7, 14, 30].map((w) => (
             <button key={w} onClick={() => setWindow(w)} className="text-xs px-3 py-1.5"

@@ -1,32 +1,15 @@
 """Data model — Product is the central entity (blueprint §4, §6)."""
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import and_, or_, JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+from .platforms import REMOVED_NETWORKS
 
 
 def now():
     return datetime.utcnow()
-
-
-# ---------------------------------------------------------------- Market (§7)
-class Market(Base):
-    __tablename__ = "markets"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(64), unique=True)  # e.g. SA-beauty-meta
-    country: Mapped[str] = mapped_column(String(64))
-    region: Mapped[str | None] = mapped_column(String(64))
-    language: Mapped[str | None] = mapped_column(String(32))
-    platform: Mapped[str | None] = mapped_column(String(32))
-    category: Mapped[str | None] = mapped_column(String(64))
-    subcategory: Mapped[str | None] = mapped_column(String(64))
-    price_segment: Mapped[str | None] = mapped_column(String(64))
-    persona: Mapped[str | None] = mapped_column(String(64))
-    offer_type: Mapped[str | None] = mapped_column(String(64))
-    funnel_type: Mapped[str | None] = mapped_column(String(32))
-    currency: Mapped[str | None] = mapped_column(String(8))
 
 
 # ---------------------------------------------------------------- Product (§6)
@@ -38,6 +21,8 @@ class Product(Base):
     category: Mapped[str | None] = mapped_column(String(64))
     subcategory: Mapped[str | None] = mapped_column(String(64))
     brand: Mapped[str | None] = mapped_column(String(128))
+    # unused since the demo seed was removed, but existing DBs have it NOT NULL: without it every new product INSERT failed
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     image_url: Mapped[str | None] = mapped_column(String(512))
 
     market: Mapped[str | None] = mapped_column(String(64))  # primary country
@@ -84,7 +69,6 @@ class Product(Base):
     company_fit_score: Mapped[float | None] = mapped_column(Float)
     funnel_mix: Mapped[dict] = mapped_column(JSON, default=dict)  # {"mess": n, "ladi": n, ...}
     cover_creative_id: Mapped[int | None] = mapped_column(Integer)
-    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     in_target: Mapped[bool | None] = mapped_column(Boolean, index=True)
     scored_at: Mapped[datetime | None] = mapped_column(DateTime)
 
@@ -154,6 +138,9 @@ class Ad(Base):
     media_type: Mapped[str | None] = mapped_column(String(16))  # video / image / carousel
     media_url: Mapped[str | None] = mapped_column(String(512))
     price: Mapped[float | None] = mapped_column(Float)
+    price_source: Mapped[str | None] = mapped_column(String(16))  # source (adapter) / ad_text (regex) / landing (fetched page)
+    landing_checked_at: Mapped[datetime | None] = mapped_column(DateTime)  # services/spy.py: last landing-page fetch
+    reviews_checked_at: Mapped[datetime | None] = mapped_column(DateTime)  # services/spy.py: last marketplace review fetch
     likes: Mapped[int] = mapped_column(Integer, default=0)
     comments_count: Mapped[int] = mapped_column(Integer, default=0)
     shares: Mapped[int] = mapped_column(Integer, default=0)
@@ -197,6 +184,22 @@ class Ad(Base):
     spend_text: Mapped[str | None] = mapped_column(String(64))
     reach: Mapped[int | None] = mapped_column(Integer)
     page_likes: Mapped[int | None] = mapped_column(Integer)
+    # multi-platform (platforms.py): network = meta / tiktok / snapchat / aliexpress / 1688 / taobao …; channel = ads | commerce | organic
+    network: Mapped[str | None] = mapped_column(String(24), index=True)
+    channel: Mapped[str | None] = mapped_column(String(12), index=True)
+    # commerce listings (China source / competitor stores)
+    rating: Mapped[float | None] = mapped_column(Float)
+    review_count: Mapped[int | None] = mapped_column(Integer)
+    sold_count: Mapped[int | None] = mapped_column(Integer)
+    rank: Mapped[int | None] = mapped_column(Integer)  # search position at the source
+    original_price: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str | None] = mapped_column(String(8))  # of price / original_price, as the source reported it
+
+
+# market aggregates (ad counts, advertisers, new ads…) read ad-library rows only — never marketplace listings or
+# viral posts, which share the `ads` table for product matching (platforms.py). NULL = rows from before channels.
+# ponytail: REMOVED_NETWORKS rows (google/amazon/… , purge_removed.py) are still in the DB — keep them out of every aggregate
+ADS_ONLY = and_(or_(Ad.channel == "ads", Ad.channel.is_(None)), or_(Ad.network.is_(None), Ad.network.not_in(REMOVED_NETWORKS)))
 
 
 def ad_markets(a) -> list[str]:
@@ -239,6 +242,7 @@ class Creative(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     source: Mapped[str | None] = mapped_column(String(64))
     source_platform: Mapped[str | None] = mapped_column(String(32))
+    network: Mapped[str | None] = mapped_column(String(24), index=True)  # platforms.network_of → storage budget per network
     source_ad_id: Mapped[str | None] = mapped_column(String(128))
     source_url: Mapped[str] = mapped_column(Text)  # original CDN url (expires)
     preview_source_url: Mapped[str | None] = mapped_column(Text)
@@ -261,6 +265,11 @@ class Creative(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     stored_at: Mapped[datetime | None] = mapped_column(DateTime)
     pinned: Mapped[bool | None] = mapped_column(Boolean, default=False)  # never auto-archive
+    # Video on Demand (HLS adaptive ladder) — see app/hls.py
+    hls_key: Mapped[str | None] = mapped_column(String(255))  # hls/<sha>/master.m3u8
+    download_key: Mapped[str | None] = mapped_column(String(255))  # top rendition (playable fMP4) for "download"
+    renditions: Mapped[list | None] = mapped_column(JSON)  # ["360p", "540p"]
+    stored_bytes: Mapped[int | None] = mapped_column(Integer)  # bytes this asset occupies in storage
     archived_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
@@ -302,6 +311,9 @@ class SearchJob(Base):
     media_type: Mapped[str | None] = mapped_column(String(8))
     state: Mapped[dict] = mapped_column(JSON, default=dict)  # per connector+country resume cursors
     has_more: Mapped[bool] = mapped_column(Boolean, default=False)
+    # per source: {name: {"network", "fetched", "new", "failed", "error"}} — "found" alone mixed re-seen ads, duplicates
+    # and rows that never reached the library, so 284 "found" could show as 22 products
+    sources: Mapped[dict | None] = mapped_column(JSON)
 
 
 class Vote(Base):
@@ -332,9 +344,12 @@ class Comment(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), index=True)
     ad_id: Mapped[int | None] = mapped_column(ForeignKey("ads.id"))
-    source: Mapped[str] = mapped_column(String(32), default="ad_comment")  # ad_comment/review/inbox/call
+    source: Mapped[str] = mapped_column(String(32), default="ad_comment")  # ad_comment/review/landing_review/inbox/call
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    external_id: Mapped[str | None] = mapped_column(String(64), index=True)  # "ali:<evaluationId>" / "lp:<hash>" — dedupe
+    rating: Mapped[float | None] = mapped_column(Float)  # stars 1-5 when the source has them (ground truth for `overall`)
+    country: Mapped[str | None] = mapped_column(String(8))
     # Aspect-based sentiment (§17)
     overall: Mapped[str | None] = mapped_column(String(16))
     aspects: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -478,17 +493,6 @@ class AdvertiserDailySnapshot(Base):
     countries: Mapped[int] = mapped_column(Integer, default=0)
 
 
-class CreativeDailySnapshot(Base):
-    __tablename__ = "creative_daily_snapshots"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
-    date: Mapped[date] = mapped_column(Date, index=True)
-    unique_creatives: Mapped[int] = mapped_column(Integer, default=0)
-    duplicated_creatives: Mapped[int] = mapped_column(Integer, default=0)
-    top_hooks: Mapped[dict] = mapped_column(JSON, default=dict)
-    top_angles: Mapped[dict] = mapped_column(JSON, default=dict)
-
-
 # ---------------------------------------------------------------- Alerts & Connectors
 class Alert(Base):
     __tablename__ = "alerts"
@@ -548,7 +552,7 @@ class PipelineRun(Base):
 
 
 class AdMetric(Base):
-    """Own ad-account performance per ad per day (Tier 1: Meta / TikTok / Google Ads APIs)."""
+    """Own ad-account performance per ad per day (Tier 1: Meta / TikTok ad-account APIs)."""
     __tablename__ = "ad_metrics"
     id: Mapped[int] = mapped_column(primary_key=True)
     date: Mapped[date] = mapped_column(Date, index=True)

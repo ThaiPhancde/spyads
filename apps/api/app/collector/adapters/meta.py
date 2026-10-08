@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import itertools
 import re
 from datetime import datetime, timezone
 from typing import Iterator
@@ -80,6 +79,7 @@ def extract_ads(payload) -> list[dict]:
 def map_library_ad(raw: dict, source: str, country: str | None) -> AdRecord:
     """Map one Ad Library `collated_results[]` item (or Apify item, same shape) to the contract."""
     s = {**raw, **(raw.get("snapshot") or {})}
+    country = country.upper() if country else None
     body = s.get("body")
     text = _clean(body.get("text") if isinstance(body, dict) else body)
     cards = s.get("cards") or []
@@ -99,7 +99,7 @@ def map_library_ad(raw: dict, source: str, country: str | None) -> AdRecord:
     ctype = "video" if fmt == "VIDEO" or (media and media[0].type == "video") else \
         "carousel" if fmt in ("CAROUSEL", "DPA", "DCO") and len(cards) > 1 else "image" if media else None
     platforms = s.get("publisher_platform") or s.get("publisher_platforms") or []
-    countries = s.get("targeted_or_reached_countries") or []
+    countries = [str(c).upper() for c in s.get("targeted_or_reached_countries") or []]
     title = _clean(s.get("title")) or (_clean(cards[0].get("title")) if cards else None)
     link = s.get("link_url") or (cards[0].get("link_url") if cards else None)
     ad_id = str(s.get("ad_archive_id") or s.get("adArchiveID") or s.get("id"))
@@ -152,24 +152,22 @@ class MetaLibraryConnector(BaseConnector):
         return MetaAdsCollector(proxy=self.config.get("proxy") or None, rate_limit_delay=2.0, jitter=1.0, max_retries=3)
 
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
-        self.authenticate()
-        col = self._collector()
-        countries = params.countries or ["ALL"]
-        status = "ACTIVE" if params.active_only else "ALL"
-        for country in countries:
-            kwargs = dict(country=country, status=status, max_results=params.limit, page_size=30)
-            if params.page_ids:
-                it = col.search(query="", search_type="PAGE", page_ids=params.page_ids, **kwargs)
-            else:
-                it = col.search(query=params.query or "", **kwargs)
-            try:
-                for ad in itertools.islice(it, params.limit):
-                    rec = map_library_ad(ad.raw_data or ad.api_fields or {}, self.key, country)
+        """Scheduled / single-shot path = fetch_page in a loop: the collector's own `search()` rejects country 'ALL'
+        (tracked queries on 'ALL' failed every run) and skipped the token bucket."""
+        for country in params.countries or ["ALL"]:
+            st, got, empty = {}, 0, 0
+            while got < params.limit and not st.get("done"):
+                recs, st = self.fetch_page(params, country, st)
+                empty = 0 if recs else empty + 1  # Meta sends empty pages mid-stream; a run of them is the end
+                if empty >= 3:
+                    break
+                for rec in recs:
                     if params.media_type and rec.creative_type != params.media_type:
                         continue
+                    got += 1
                     yield rec
-            except Exception as e:  # surface as connector error (doc_id changed, blocked…)
-                raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}") from e
+                    if got >= params.limit:
+                        break
 
     def fetch_page(self, params: FetchParams, country: str, state: dict | None = None) -> tuple[list[AdRecord], dict]:
         """One page (~10 ads) with a resume cursor, so the UI can 'load more' from where it stopped.
@@ -196,7 +194,12 @@ class MetaLibraryConnector(BaseConnector):
         except Exception as e:
             raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}") from e
         items = resp.get("ads") or extract_ads(resp.get("raw"))
-        recs = [map_library_ad(raw, self.key, country) for raw in items]
+        # Meta shows one card per collation group (the first item carries collation_count); siblings are the same creative
+        # ponytail: dedupe within a page only — siblings split across pages become extra ads
+        seen: set = set()
+        keep = [r for r in items if not (r.get("collation_id") and (r["collation_id"] in seen or seen.add(r["collation_id"])))]
+        st["siblings"] = [str(r.get("ad_archive_id")) for r in items if r not in keep]  # still running: liveness counts them as seen
+        recs = [map_library_ad(raw, self.key, country) for raw in keep]
         st["cursor"] = cursor
         st["done"] = not cursor or not (resp.get("page_info") or {}).get("has_next_page", bool(cursor))
         return recs, st

@@ -91,7 +91,7 @@ export default function MarketRadar() {
         ))}
       </div>
 
-      <Card title={`Theo nước — ads mới ${window} ngày gần nhất so với ${window} ngày trước đó (theo ngày bắt đầu chạy trên Meta)`} pad={false} className="mb-4">
+      <Card title={`Theo nước — ads mới ${window} ngày gần nhất so với ${window} ngày trước đó (theo ngày bắt đầu chạy, mọi nền tảng quảng cáo)`} pad={false} className="mb-4">
         <Table rows={data.rows} />
       </Card>
 
@@ -103,7 +103,7 @@ export default function MarketRadar() {
         </Card>
       )}
       <p className="text-xs text-muted mt-3">
-        “Ads mạnh” = điểm độ mạnh ≥ 45 (chạy lâu · nhiều biến thể · nhiều nền tảng). Độ tươi = lần gần nhất app xác nhận lại với Meta rằng quảng cáo còn chạy.
+        “Ads mạnh” = điểm độ mạnh ≥ 45 (chạy lâu · nhiều biến thể · nhiều nền tảng). Độ tươi = lần gần nhất app xác nhận lại với nguồn rằng quảng cáo còn chạy.
         Thị trường mục tiêu cấu hình bằng <code>TARGET_MARKETS</code> trong .env.
       </p>
     </div>

@@ -71,7 +71,9 @@ def refresh(db: Session, ad_ids: list[int] | None = None) -> int:
     for a in db.scalars(q):
         a.force_score, a.force_tier = force(a, now)
         a.variation_key = variation_key(a)
-        a.in_target = ad_in_targets(ad_markets(a))
+        markets = ad_markets(a)
+        # a listing with no country (AliExpress, 1688) sells worldwide: it belongs to every target market
+        a.in_target = ad_in_targets(markets) or (a.channel == "commerce" and not markets)
         n += 1
     db.flush()
     return n

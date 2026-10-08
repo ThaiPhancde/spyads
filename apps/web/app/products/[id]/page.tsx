@@ -7,6 +7,101 @@ import { api, fmt, useApi } from "@/lib/api";
 import { ExperimentCard } from "@/components/ExperimentCard";
 import { CommentsPanel } from "@/components/CommentsPanel";
 import { DiscoveryPanel } from "@/components/DiscoveryPanel";
+import { NetworkBadge, NetworkStrip, usePlatforms } from "@/components/platforms";
+
+/** Where else the product shows up: networks, China-source / store listings (price / reviews / sold) and the
+ *  supplier-price margin estimate (AliExpress price × 1.6 ≈ landed cost: shipping + fees not included). */
+function CrossPlatformCard({ productId, f }: { productId: number; f: any }) {
+  const { byKey } = usePlatforms();
+  const { data } = useApi(`/ads?product_id=${productId}&channel=commerce&sort=price&limit=50`);
+  const rows: any[] = data?.rows || [];
+  const sell = f.avg_price;
+  const margin = f.supplier_price_usd && sell ? 1 - (f.supplier_price_usd * 1.6) / sell : null;
+  return (
+    <Card title="Đa nền tảng — sản phẩm xuất hiện ở đâu" className="xl:col-span-2" pad={false}>
+      <div className="px-4 pb-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+        <NetworkStrip networks={f.networks} byKey={byKey} />
+        {f.reviews_total ? <span><b>{fmt.n(f.reviews_total)}</b> đánh giá{f.rating_avg ? ` · ★ ${f.rating_avg}` : ""}</span> : null}
+        {f.sold_total ? <span><b>{fmt.n(f.sold_total)}</b> đã bán</span> : null}
+        {f.organic_views ? <span><b>{fmt.n(f.organic_views)}</b> view viral</span> : null}
+        {f.supplier_price_usd ? <span title="Giá AliExpress thấp nhất — mốc giá nhập">Giá nhập ~<b>${f.supplier_price_usd}</b></span> : null}
+        {margin !== null && <span title="1 − giá nhập × 1.6 / giá bán (chưa gồm ads, COD, hoàn)">Biên gộp ước tính <b style={{ color: margin > 0.5 ? "var(--good-text)" : undefined }}>{Math.round(margin * 100)}%</b></span>}
+      </div>
+      {rows.length > 0 ? (
+        <div className="max-h-80 overflow-y-auto">
+          <table className="data"><thead><tr><th>Nguồn</th><th>Listing</th><th className="text-right">Giá</th><th className="text-right">Đánh giá</th><th className="text-right">Đã bán</th><th>Seller</th></tr></thead>
+            <tbody>{rows.map((l) => (
+              <tr key={l.id}>
+                <td><NetworkBadge network={l.network} byKey={byKey} small /></td>
+                <td className="max-w-md text-xs"><a href={l.landing_url} target="_blank" rel="noreferrer" className="hover:underline">{l.title || l.text}</a></td>
+                <td className="text-right tnum whitespace-nowrap">{fmt.n(l.price, 2)} {l.currency || ""}{l.original_price && l.original_price > l.price ? <div className="text-[10px] text-muted line-through">{fmt.n(l.original_price, 2)}</div> : null}</td>
+                <td className="text-right tnum">{l.review_count ? `${fmt.n(l.review_count)}${l.rating ? ` · ★${l.rating}` : ""}` : "—"}</td>
+                <td className="text-right tnum">{l.sold_count ? fmt.n(l.sold_count) : "—"}</td>
+                <td className="text-xs truncate max-w-[160px]">{l.advertiser || "—"}</td>
+              </tr>
+            ))}</tbody></table>
+        </div>
+      ) : <div className="px-4 pb-4 text-xs text-muted">Chưa thấy nguồn hàng. Tìm từ khoá ở “Tìm sản phẩm” để quét AliExpress (1688 / Taobao khi đã gắn Apify).</div>}
+    </Card>
+  );
+}
+
+/** First thing a marketer needs: floor price on each marketplace, landed cost → margin, engagement on competitor ads,
+ *  marketplace proof and how long the ads have been running. */
+function MktCard({ m }: { m: any }) {
+  const { byKey } = usePlatforms();
+  if (!m) return null;
+  const e = m.engagement || {}, mp = m.marketplace || {}, ads = m.ads || {};
+  const usd = (v: any) => (v === null || v === undefined ? "—" : `$${fmt.n(v, 2)}`);
+  const Item = ({ l, v, sub }: { l: string; v: any; sub?: any }) => (
+    <div><div className="text-[11px] text-muted">{l}</div><div className="text-lg font-semibold tnum leading-tight">{v}</div>{sub && <div className="text-[11px] text-ink2">{sub}</div>}</div>
+  );
+  return (
+    <Card title="Thông tin cho MKT — giá, tương tác, bằng chứng bán" className="mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-4">
+        <Item l="Giá sàn (thấp nhất trên sàn)" v={usd(m.floor_usd)} sub={m.floor?.[0] && m.floor[0].network !== "aliexpress" ? byKey[m.floor[0].network]?.label : m.floor_usd ? undefined : "chưa thấy trên sàn"} />
+        <Item l="Giá nhập (AliExpress)" v={usd(m.supplier_usd)} sub="landed ≈ ×1.6" />
+        <Item l="Giá đối thủ đang bán" v={usd(m.sell_usd)} sub={m.ad_price_range_usd ? `${usd(m.ad_price_range_usd[0])} – ${usd(m.ad_price_range_usd[1])}` : undefined} />
+        <Item l="Biên gộp ước tính" v={m.margin_est === null || m.margin_est === undefined ? "—" : <span style={{ color: m.margin_est > 0.5 ? "var(--good-text)" : m.margin_est < 0.3 ? "var(--critical)" : undefined }}>{Math.round(m.margin_est * 100)}%</span>} sub="chưa gồm ads, COD, hoàn" />
+        <Item l="👍 Like / 💬 Comment" v={`${fmt.n(e.likes)} / ${fmt.n(e.comments)}`} sub={`↗ ${fmt.n(e.shares)} share${e.views ? ` · ▶ ${fmt.n(e.views)} view` : ""}`} />
+        <Item l="Đánh giá trên sàn" v={mp.reviews ? fmt.n(mp.reviews) : "—"} sub={mp.rating ? `★ ${mp.rating}` : undefined} />
+        <Item l="Đã bán (sàn)" v={mp.sold ? fmt.n(mp.sold) : "—"} sub={`${fmt.n(mp.listings)} listing`} />
+        <Item l="Ads đang chạy" v={`${fmt.n(ads.active)} / ${fmt.n(ads.total)}`} sub={`${fmt.n(ads.advertisers)} advertiser · lâu nhất ${ads.longest_days ?? "—"} ngày`} />
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mt-4 text-xs">
+        <div>
+          <div className="font-medium mb-1">Giá sàn theo từng sàn</div>
+          {m.floor?.length ? m.floor.map((r: any) => (
+            <div key={r.network} className="flex items-center justify-between gap-2 border-b py-1" style={{ borderColor: "var(--grid)" }}>
+              <NetworkBadge network={r.network} byKey={byKey} small />
+              <a href={r.url} target="_blank" rel="noreferrer" className="truncate flex-1 hover:underline" title={r.title}>{r.title}</a>
+              <span className="tnum font-medium whitespace-nowrap">{fmt.n(r.price, 2)} {r.currency || ""}</span>
+            </div>
+          )) : <div className="text-muted">Chưa thấy nguồn hàng — bấm “Tìm trực tiếp trên nguồn” để quét AliExpress.</div>}
+        </div>
+        <div>
+          <div className="font-medium mb-1">Quảng cáo nhiều tương tác nhất</div>
+          {m.top_ads?.length ? m.top_ads.map((a: any) => (
+            <a key={a.id} href={a.url || undefined} target="_blank" rel="noreferrer" className="block border-b py-1 hover:underline" style={{ borderColor: "var(--grid)" }}>
+              <span className="text-muted">{a.advertiser || "—"} · {a.days ?? "?"} ngày{a.active ? "" : " · đã dừng"} · </span>
+              👍 {fmt.n(a.likes)} 💬 {fmt.n(a.comments)} ↗ {fmt.n(a.shares)}{a.views ? ` ▶ ${fmt.n(a.views)}` : ""}
+              <div className="line-clamp-1 text-ink2">{a.text}</div>
+            </a>
+          )) : <div className="text-muted">Nguồn chưa trả số like / comment cho các ads này (Meta Ad Library không công khai tương tác).</div>}
+        </div>
+        <div>
+          <div className="font-medium mb-1">Landing page đối thủ dùng</div>
+          {m.landing_domains?.length ? m.landing_domains.map((d: any) => (
+            <div key={d.domain} className="flex justify-between border-b py-1" style={{ borderColor: "var(--grid)" }}>
+              <a href={`https://${d.domain}`} target="_blank" rel="noreferrer" className="hover:underline truncate">{d.domain}</a><span className="tnum text-muted">{d.ads} ads</span>
+            </div>
+          )) : <div className="text-muted">Chưa có landing page (ads dẫn về inbox / form).</div>}
+          {ads.funnels && <div className="mt-2 text-muted">Funnel: {Object.entries(ads.funnels).map(([k, v]) => `${k} ${v}`).join(" · ")}</div>}
+        </div>
+      </div>
+    </Card>
+  );
+}
 
 const TABS = ["Video & Discovery", "Overview", "Market & Ads", "Creative Library", "Comments", "Internal & Profit"];
 
@@ -44,6 +139,8 @@ export default function Product360({ params }: { params: { id: string } }) {
         <Stat label="Confidence" value={`${fmt.n(p.confidence_score)}%`} sub={p.confidence_label} />
         <Stat label="Customer rejection" value={p.customer_rejection_score === null ? "—" : fmt.n(p.customer_rejection_score)} sub={`Refusal ${fmt.pct(f.refusal_rate)}`} />
       </div>
+
+      <MktCard m={data.mkt} />
 
       <div className="flex gap-1 mb-4 border-b" style={{ borderColor: "var(--grid)" }}>
         {TABS.map((t) => (
@@ -94,6 +191,7 @@ export default function Product360({ params }: { params: { id: string } }) {
 
       {tab === "Market & Ads" && (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <CrossPlatformCard productId={p.id} f={f} />
           <Card title="Active ads theo ngày"><TrendChart data={data.timeseries} series={[{ key: "active_ads", label: "Active ads" }]} /></Card>
           <Card title="Scores theo ngày"><TrendChart data={data.timeseries} series={[{ key: "external_win", label: "External Win" }, { key: "saturation", label: "Saturation" }, { key: "opportunity", label: "Opportunity" }]} /></Card>
           <Card title="Market performance (active ads)">

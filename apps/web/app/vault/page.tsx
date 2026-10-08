@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { CreativeMedia, DownloadButton, PinButton } from "@/components/media";
 import { Card, Empty, Loading, PageHeader, Pill } from "@/components/ui";
 import { LoadMore } from "@/components/paging";
-import { api, fmt, qs, usePaged } from "@/lib/api";
+import { api, fmt, qs, useAction, usePaged } from "@/lib/api";
 import { useEvents, useTeam } from "@/lib/realtime";
 
 export default function Vault() {
@@ -15,11 +15,14 @@ export default function Vault() {
   useEffect(() => { setFunnel(team); }, [team]);
   const [country, setCountry] = useState("");
   const [q, setQ] = useState("");
+  const [qd, setQd] = useState("");  // q debounced 300 ms: one request per pause, not per keystroke
+  useEffect(() => { const t = setTimeout(() => setQd(q), 300); return () => clearTimeout(t); }, [q]);
   const [family, setFamily] = useState<number | null>(null);
   const [status, setStatus] = useState("stored");
-  const { rows, total, last, loading, error, hasMore, loadMore, reload } = usePaged(`/creatives${qs({ type, funnel, country, q, status, family_id: family })}`, 36);
+  const { rows, total, last, loading, error, hasMore, loadMore, reload } = usePaged(`/creatives${qs({ type, funnel, country, q: qd, status, family_id: family })}`, 36);
   useEvents((e) => { if (e.type === "CREATIVE_STORED") reload(); });
-  const retry = async (id: number) => { await api(`/creatives/${id}/retry`, { method: "POST" }); reload(); };
+  const act = useAction();
+  const retry = (id: number) => act.run(async () => { await api(`/creatives/${id}/retry`, { method: "POST" }); reload(); });
 
   return (
     <div>
@@ -38,6 +41,7 @@ export default function Vault() {
           {family && <button className="btn text-xs" onClick={() => setFamily(null)}>× Bỏ lọc family #{family}</button>}
         </div>
       )}
+      {act.error && <div className="text-sm mb-2" style={{ color: "var(--critical)" }}>Lỗi: {act.error}</div>}
       {error ? <Loading error={error} /> : rows.length === 0 && loading ? <Loading /> : rows.length === 0 ? <Card><Empty>Chưa có creative. Dùng trang Tìm sản phẩm để quét nguồn.</Empty></Card> : (
         <>
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">

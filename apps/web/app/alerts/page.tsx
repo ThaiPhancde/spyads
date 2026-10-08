@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { Card, Empty, Loading, PageHeader, SeverityIcon } from "@/components/ui";
-import { api, fmt, qs, useApi } from "@/lib/api";
+import { api, fmt, qs, useAction, useApi } from "@/lib/api";
 
 const LABELS: Record<string, string> = {
   hidden_winner: "New Hidden Winner", competitor_scaling: "Competitor scaling", new_market: "New market", creative_velocity_spike: "Creative velocity spike",
@@ -15,11 +15,13 @@ export default function Alerts() {
   const [type, setType] = useState("");
   const [unread, setUnread] = useState(false);
   const { data, error, reload } = useApi(`/alerts${qs({ type, unread })}`);
+  const act = useAction();
   if (!data) return <Loading error={error} />;
-  const markAll = async () => { await api("/alerts/read-all", { method: "POST" }); reload(); };
-  const mark = async (id: number) => { await api(`/alerts/${id}/read`, { method: "POST" }); reload(); };
+  const markAll = () => act.run(async () => { await api("/alerts/read-all", { method: "POST" }); reload(); });
+  const mark = (id: number) => act.run(async () => { await api(`/alerts/${id}/read`, { method: "POST" }); reload(); });
   return (
     <div>
+      {act.error && <div className="text-sm mb-2" style={{ color: "var(--critical)" }}>Lỗi: {act.error}</div>}
       <PageHeader title="Alert Engine" subtitle={`${data.unread} chưa đọc`}>
         <label className="text-sm flex items-center gap-1.5"><input type="checkbox" checked={unread} onChange={(e) => setUnread(e.target.checked)} /> Chưa đọc</label>
         <button className="btn" onClick={markAll}>Đánh dấu đã đọc tất cả</button>

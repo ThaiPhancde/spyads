@@ -4,7 +4,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { TrendChart } from "@/components/charts";
 import { Card, Loading, PageHeader, Pill, Stat } from "@/components/ui";
-import { api, fmt, qs, useApi } from "@/lib/api";
+import { api, fmt, qs, useAction, useApi } from "@/lib/api";
 
 function Radar() {
   const sp = useSearchParams();
@@ -15,12 +15,14 @@ function Radar() {
   const [focus, setFocus] = useState<number | null>(sp.get("focus") ? Number(sp.get("focus")) : null);
   const detail = useApi(focus ? `/competitors/${focus}` : null);
   useEffect(() => { if (focus) window.scrollTo({ top: 0, behavior: "smooth" }); }, [focus]);
-  const toggleWatch = async (id: number, w: boolean) => { await api(`/competitors/${id}/watch?watched=${w}`, { method: "POST" }); reload(); detail.reload(); };
+  const act = useAction();
+  const toggleWatch = (id: number, w: boolean) => act.run(async () => { await api(`/competitors/${id}/watch?watched=${w}`, { method: "POST" }); reload(); detail.reload(); });
 
   return (
     <div>
+      {act.error && <div className="text-sm mb-2" style={{ color: "var(--critical)" }}>Lỗi: {act.error}</div>}
       <PageHeader title="Competitor Radar" subtitle="Theo dõi advertiser / store — ai đang scale nhanh">
-        <select className="input" value={country} onChange={(e) => setCountry(e.target.value)}><option value="">Mọi thị trường mục tiêu</option><option value="ME">Trung Đông</option><option value="US">Mỹ</option><option value="EU">Châu Âu + UK</option><option value="AU">Úc / NZ</option><option value="WW">Toàn cầu</option>{meta.data?.countries.map((c: string) => <option key={c}>{c}</option>)}</select>
+        <select className="input" value={country} onChange={(e) => setCountry(e.target.value)}><option value="">Mọi thị trường mục tiêu</option><option value="PH">Philippines ★</option><option value="ME">Trung Đông</option><option value="US">Mỹ</option><option value="EU">Châu Âu + UK</option><option value="AU">Úc / NZ</option><option value="VN">Việt Nam</option><option value="WW">Toàn cầu</option>{meta.data?.countries.map((c: string) => <option key={c}>{c}</option>)}</select>
         <label className="text-sm flex items-center gap-1.5"><input type="checkbox" checked={watched} onChange={(e) => setWatched(e.target.checked)} /> Chỉ đối thủ đang theo dõi</label>
       </PageHeader>
       {focus && detail.data && (

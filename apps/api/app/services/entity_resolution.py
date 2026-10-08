@@ -5,8 +5,8 @@ landing-page / product URL slug, price range, category and brand.
 Image/video embedding (pgvector) can be plugged into `_extra_similarity`.
 """
 import re
-import unicodedata
 from difflib import SequenceMatcher
+from functools import lru_cache
 from urllib.parse import urlparse
 
 from sqlalchemy import func, select
@@ -46,10 +46,6 @@ SYNONYMS = {
 }
 
 
-def strip_accents(s: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-
-
 def tokenize(name: str) -> list[str]:
     s = (name or "").lower()
     s = re.sub(r"[^\w\s]", " ", s)
@@ -67,10 +63,6 @@ def tokenize(name: str) -> list[str]:
     return out
 
 
-def normalize_name(name: str) -> str:
-    return " ".join(sorted(set(tokenize(name))))
-
-
 def url_slug_tokens(url: str | None) -> set[str]:
     if not url:
         return set()
@@ -84,6 +76,8 @@ def title_similarity(a: str, b: str) -> float:
         return 0.0
     jacc = len(ta & tb) / len(ta | tb)
     contain = len(ta & tb) / min(len(ta), len(tb))
+    if min(len(ta), len(tb)) <= 2:  # "Back Brace" used to absorb 45 aliases: a 1-2 token name is contained in everything
+        contain *= 0.5
     seq = SequenceMatcher(None, " ".join(sorted(ta)), " ".join(sorted(tb))).ratio()
     return 0.4 * jacc + 0.35 * contain + 0.25 * seq
 
@@ -135,32 +129,83 @@ def next_product_code(db: Session) -> str:
     return f"PRD_{max_id + 1:07d}"
 
 
+@lru_cache(maxsize=100_000)
+def _toks(name: str) -> frozenset[str]:
+    return frozenset(tokenize(name))
+
+
+# token → product ids, built once per process and topped up with rows added since (by id)
+# ponytail: renamed products keep their old tokens until restart — fine while names are only set at creation / merge
+_idx = {"pid": 0, "aid": 0, "names": {}, "inv": {}}
+
+
+def _index(db: Session) -> dict:
+    def add(pid: int, name: str):
+        _idx["names"].setdefault(pid, []).append(name)
+        for t in _toks(name):
+            _idx["inv"].setdefault(t, set()).add(pid)
+
+    for pid, name in db.execute(select(Product.id, Product.canonical_name).where(Product.id > _idx["pid"])):
+        add(pid, name)
+        _idx["pid"] = max(_idx["pid"], pid)
+    for aid, pid, name in db.execute(select(ProductAlias.id, ProductAlias.product_id, ProductAlias.name)
+                                     .where(ProductAlias.id > _idx["aid"])):
+        add(pid, name)
+        _idx["aid"] = max(_idx["aid"], aid)
+    return _idx
+
+
 def find_best_match(db: Session, candidate: dict) -> tuple[Product | None, float]:
     toks = set(tokenize(candidate["name"]))
     if not toks:
         return None, 0.0
-    products = db.scalars(select(Product)).all()
+    idx = _index(db)
+
+    def pre(name: str) -> float:  # cheap token overlap (jaccard + containment) — the bulk of title_similarity
+        t = _toks(name)
+        common = len(toks & t)
+        return common / len(toks | t) + common / min(len(toks), len(t)) if common else 0.0
+
+    pids = set().union(*(idx["inv"].get(t, ()) for t in toks))
+    scored = sorted(((max(pre(n) for n in idx["names"][pid]), pid) for pid in pids), reverse=True)
+    # ponytail: full scoring (difflib) only for the 25 best token matches — a generic word like "bracelet" used to send
+    # thousands of products through it (~1 s / ad). Raise the cap if matches get missed.
+    cand = [pid for _, pid in scored[:25]]
     alias_map: dict[int, list[str]] = {}
-    for a in db.scalars(select(ProductAlias)).all():
-        alias_map.setdefault(a.product_id, []).append(a.name)
+    for pid, name in db.execute(select(ProductAlias.product_id, ProductAlias.name).where(ProductAlias.product_id.in_(cand))) if cand else []:
+        alias_map.setdefault(pid, []).append(name)
     best, best_score = None, 0.0
-    for p in products:
-        ptoks = set(tokenize(p.canonical_name))
-        for n in alias_map.get(p.id, []):
-            ptoks |= set(tokenize(n))
-        if not (toks & ptoks):  # blocking: must share at least one canonical token
-            continue
+    # light rows (the fields match_score reads) — the full Product with its JSON columns is loaded for the winner only
+    for p in db.execute(select(Product.id, Product.canonical_name, Product.price, Product.category, Product.brand)
+                        .where(Product.id.in_(cand))) if cand else []:
         s = match_score(candidate, p, alias_map.get(p.id, []))
         if s > best_score:
-            best, best_score = p, s
-    return best, best_score
+            best, best_score = p.id, s
+    return (db.get(Product, best) if best else None), best_score
+
+
+JUNK_NAME = re.compile(r"[₱$€£¥]\s?\d[\d.,]*|\d[\d.,]*\s?(php|sar|aed|usd|kwd|egp|aud|gbp|eur|đ)\b|\d{1,2}\s?%\s?(off|discount|giảm)?"
+                       r"|\b(sale|discount|promo|free ?shipping|cod|buy now|order now|giảm giá|freeship|only|lang|فقط)\b", re.I)
+
+
+def clean_name(name: str | None, advertiser: str | None = None) -> str | None:
+    """Ad-copy junk is not a product name: price / discount fragments are stripped, the advertiser's own name is rejected."""
+    n = re.sub(r"\s+", " ", JUNK_NAME.sub(" ", name or "")).strip(" -,.|:!")
+    if len(n) < 3 or n.lower() == (advertiser or "").strip().lower():
+        return None
+    return n
 
 
 def resolve_product(db: Session, candidate: dict, source: str | None = None) -> tuple[Product, bool, float]:
-    """candidate = {name, price?, category?, brand?, landing_url?, country?, currency?}.
+    """candidate = {name, price?, category?, brand?, landing_url?, country?, currency?, advertiser?}.
 
     Returns (product, created, score). Existing → attach alias. New → create canonical product.
     """
+    adv = candidate.get("advertiser")
+    # ponytail: a junk name falls back to one bucket per advertiser (never matched against the catalogue, never an alias);
+    # ingest can pass `advertiser` to enable the equal-to-page-name check
+    name = clean_name(candidate["name"], adv) or (f"{adv} creative" if adv else candidate["name"].strip())
+    candidate = {**candidate, "name": name}
     product, score = find_best_match(db, candidate)
     created = False
     if product is None or score < MATCH_THRESHOLD:
@@ -193,12 +238,12 @@ def resolve_product(db: Session, candidate: dict, source: str | None = None) -> 
 
 def merge_products(db: Session, source: Product, target: Product):
     """Manual correction: merge `source` into `target` (all child rows re-pointed)."""
-    from ..models import Ad, Comment, Experiment, Order, ProductDailySnapshot, Store, CreativeDailySnapshot, Alert, LifecycleEvent
+    from ..models import Ad, Comment, Experiment, Order, ProductDailySnapshot, Store, Alert, LifecycleEvent
 
     for model in (Ad, Comment, Experiment, Order, Store, Alert):
         for row in db.scalars(select(model).where(model.product_id == source.id)).all():
             row.product_id = target.id
-    for model in (ProductDailySnapshot, CreativeDailySnapshot, LifecycleEvent):
+    for model in (ProductDailySnapshot, LifecycleEvent):
         for row in db.scalars(select(model).where(model.product_id == source.id)).all():
             db.delete(row)
     db.add(ProductAlias(product_id=target.id, name=source.canonical_name, source="manual_merge", match_score=1.0))

@@ -1,36 +1,36 @@
 "use client";
 import { useState } from "react";
 import { Card, Loading, PageHeader, Pill } from "@/components/ui";
-import { api, fmt, useApi } from "@/lib/api";
+import { api, fmt, useAction, useApi } from "@/lib/api";
 import { getUser, useEvents } from "@/lib/realtime";
+import { NetworkBadge, usePlatforms } from "@/components/platforms";
 
-const GROUPS: Record<string, string> = {
-  transparency: "Official / public ad libraries", ad_intel: "Spy tools & providers", internal_ads: "Ads nội bộ (Tier 1)",
-  business: "Business (CRM / vận đơn)", feedback: "Feedback",
-};
+const CHANNEL_ORDER: [string, string][] = [["ads", "Thư viện quảng cáo"], ["commerce", "Nguồn hàng & store"]];
+const INTERNAL = new Set(["internal_ads", "business", "feedback"]);
 const HEALTH: Record<string, ["good" | "warn" | "bad" | "neutral" | "info", string]> = {
   healthy: ["good", "🟢 Healthy"], slow: ["warn", "🟡 Slow"], auth_expired: ["bad", "🔴 Auth expired"], error: ["bad", "🔴 Error"],
   degraded: ["warn", "🟡 Degraded"], unknown: ["neutral", "⚪ Chưa chạy"],
 };
 
-function ConnectorRow({ c, onChange }: { c: any; onChange: () => void }) {
+function ConnectorRow({ c, onChange, byKey }: { c: any; onChange: () => void; byKey: any }) {
   const [open, setOpen] = useState(false);
   const [cfg, setCfg] = useState<Record<string, any>>(c.config || {});
   const [every, setEvery] = useState(c.every_minutes ?? "");
   const [msg, setMsg] = useState("");
-  const save = async () => {
+  const act = useAction();
+  const save = () => act.run(async () => {
     await api(`/collector/connectors/${c.id}`, { method: "PATCH", body: JSON.stringify({ config: cfg, every_minutes: every === "" ? 0 : Number(every) }) });
     setMsg("Đã lưu"); onChange();
-  };
-  const toggle = async () => { await api(`/collector/connectors/${c.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !c.enabled }) }); onChange(); };
-  const test = async () => { setMsg("Đang kiểm tra…"); const r = await api(`/collector/connectors/${c.id}/test`, { method: "POST" }); setMsg(JSON.stringify(r)); onChange(); };
-  const sync = async () => { await api(`/collector/connectors/${c.id}/sync`, { method: "POST" }); setMsg("Đã đưa vào hàng đợi — kết quả hiện ở feed realtime"); };
+  });
+  const toggle = () => act.run(async () => { await api(`/collector/connectors/${c.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !c.enabled }) }); onChange(); });
+  const test = () => act.run(async () => { setMsg("Đang kiểm tra…"); const r = await api(`/collector/connectors/${c.id}/test`, { method: "POST" }); setMsg(JSON.stringify(r)); onChange(); });
+  const sync = () => act.run(async () => { await api(`/collector/connectors/${c.id}/sync`, { method: "POST" }); setMsg("Đã đưa vào hàng đợi — kết quả hiện ở feed realtime"); });
   const [tone, label] = HEALTH[c.health] || HEALTH.unknown;
   return (
     <div className="px-4 py-3 border-b" style={{ borderColor: "var(--grid)" }}>
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex-1 min-w-[240px]">
-          <div className="text-sm font-medium">{c.name} <span className="text-[11px] text-muted">· {c.adapter} · {c.kind} · tier {c.tier}</span></div>
+          <div className="text-sm font-medium flex flex-wrap items-center gap-1.5"><NetworkBadge network={c.network} byKey={byKey} small />{c.name} <span className="text-[11px] text-muted">· {c.adapter} · {c.kind}</span></div>
           <div className="text-[11px] text-muted">
             Lần chạy: {fmt.dt(c.last_sync_at)} · {c.last_sync_count} bản ghi{c.last_duration_ms ? ` · ${(c.last_duration_ms / 1000).toFixed(1)}s` : ""}
             {c.every_minutes ? ` · tự chạy mỗi ${c.every_minutes} phút` : " · chạy khi tìm kiếm / theo dõi từ khoá"}
@@ -43,7 +43,8 @@ function ConnectorRow({ c, onChange }: { c: any; onChange: () => void }) {
         <button className="btn text-xs" onClick={test}>Test</button>
         <button className="btn text-xs" onClick={sync}>Sync ngay</button>
       </div>
-      {msg && <div className="text-[11px] text-ink2 mt-1 break-all">{msg}</div>}
+      {act.error ? <div className="text-[11px] mt-1 break-all" style={{ color: "var(--critical)" }}>Lỗi: {act.error}</div>
+        : msg && <div className="text-[11px] text-ink2 mt-1 break-all">{msg}</div>}
       {open && (
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
           {(c.config_fields || []).map((f: any) => (
@@ -67,6 +68,38 @@ function ConnectorRow({ c, onChange }: { c: any; onChange: () => void }) {
   );
 }
 
+/** Is every platform flowing? One row per network: records held, new in 24 h, connectors on / healthy, last error. */
+function SourcesCard({ sources, byKey }: { sources: any[]; byKey: any }) {
+  if (!sources.length) return null;
+  return (
+    <Card title="Nguồn theo nền tảng" pad={false} className="mb-4">
+      <div className="overflow-x-auto">
+        <table className="data">
+          <thead><tr><th>Nền tảng</th><th>Kênh</th><th className="text-right">Bản ghi</th><th className="text-right">Mới 24h</th><th>Connector</th><th>Lần chạy</th><th>Ghi chú</th></tr></thead>
+          <tbody>
+            {CHANNEL_ORDER.flatMap(([ch]) => sources.filter((s) => s.channel === ch)).map((s) => {
+              const tone = s.enabled === 0 ? "var(--muted)" : s.healthy === s.enabled ? "var(--good)" : s.healthy ? "var(--warning)" : "var(--critical)";
+              return (
+                <tr key={s.network}>
+                  <td><NetworkBadge network={s.network} byKey={byKey} /></td>
+                  <td className="text-xs text-ink2">{s.channel_label}</td>
+                  <td className="text-right tnum">{fmt.n(s.records)}</td>
+                  <td className="text-right tnum">{s.new_24h ? `+${fmt.n(s.new_24h)}` : "—"}</td>
+                  <td className="text-xs whitespace-nowrap"><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: tone }} />
+                    {s.connectors ? `${s.enabled}/${s.connectors} bật · ${s.healthy} ổn` : "chưa có connector"}</td>
+                  <td className="text-xs whitespace-nowrap">{fmt.dt(s.last_sync_at)}</td>
+                  <td className="text-[11px] max-w-[360px]" style={{ color: s.errors.length ? "var(--critical)" : undefined }}>
+                    {s.errors.length ? s.errors.join(" · ") : s.enabled ? "" : "Tắt — bật ở danh sách connector bên dưới"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
 const mb = (b: number) => (b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`);
 
 function StorageCard() {
@@ -75,6 +108,7 @@ function StorageCard() {
   const [busy, setBusy] = useState(false);
   if (!data) return null;
   const c = data.config;
+  const buckets: any[] = data.buckets || [];
   const run = async (dry: boolean) => {
     setBusy(true);
     try {
@@ -86,23 +120,44 @@ function StorageCard() {
   return (
     <Card title="Dung lượng & tự dọn dẹp" className="mb-4">
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
-        <div><div className="text-xs text-muted">Video trong kho</div><div className="font-semibold tnum">{mb(data.video.bytes)}</div><div className="text-xs text-ink2">{data.video.count} file</div></div>
+        <div><div className="text-xs text-muted">Video hôm nay</div><div className="font-semibold tnum">{data.today.videos}{c.video_daily_quota ? ` / ${c.video_daily_quota}` : ""}</div><div className="text-xs text-ink2">kho {mb(data.video.bytes)} · {data.video.count} file</div></div>
         <div><div className="text-xs text-muted">Ảnh</div><div className="font-semibold tnum">{mb(data.image.bytes)}</div><div className="text-xs text-ink2">{data.image.count} file</div></div>
         <div><div className="text-xs text-muted">Dữ liệu thô (raw)</div><div className="font-semibold tnum">{mb(data.raw_bytes)}</div></div>
         <div><div className="text-xs text-muted">Đã dọn (giữ ảnh bìa)</div><div className="font-semibold tnum">{data.archived}</div></div>
         <div><div className="text-xs text-muted">Đang ghim 📌</div><div className="font-semibold tnum">{data.pinned}</div></div>
       </div>
+      {buckets.length > 0 && (
+        <div className="mt-4 space-y-2">
+          <div className="text-xs text-muted">Ngân sách kho theo nền tảng — tổng {mb(data.max_bytes)} (R2_MAX_GB), chia bằng <code>STORAGE_SHARES</code>. Một nền tảng không bao giờ chiếm chỗ của nền tảng khác.</div>
+          {buckets.map((b) => {
+            const pct = b.budget_bytes ? Math.min(1, b.bytes / b.budget_bytes) : 0;
+            const over = b.bytes > b.budget_bytes;
+            return (
+              <div key={b.key} className="grid grid-cols-[150px_1fr_auto] gap-3 items-center text-xs">
+                <span className="font-medium truncate">{b.label} <span className="text-muted">{Math.round(b.share * 100)}%</span></span>
+                <div className="h-2.5 rounded-full overflow-hidden" style={{ background: "var(--surface-2)" }}>
+                  <div className="h-full rounded-full" style={{ width: `${pct * 100}%`, background: over ? "var(--critical)" : pct > 0.85 ? "var(--warning)" : "var(--series-1)" }} />
+                </div>
+                <span className="tnum text-ink2 whitespace-nowrap">{mb(b.bytes)} / {mb(b.budget_bytes)} · {b.videos} video · {b.images} ảnh · hôm nay {b.videos_today}{b.video_quota ? `/${b.video_quota}` : ""} video{over ? " · vượt → dọn video yếu nhất" : ""}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="text-xs text-ink2 mt-3 leading-relaxed">
-        Tự dọn mỗi 6 giờ: video sau <b>{c.media_days || "∞"}</b> ngày · ảnh sau <b>{c.image_days || "∞"}</b> ngày · dữ liệu thô sau <b>{c.raw_days || "∞"}</b> ngày · nhật ký sự kiện sau <b>{c.event_days || "∞"}</b> ngày.
+        <b>Video theo lứa mỗi ngày:</b> mỗi ngày lưu tối đa <b>{c.video_daily_quota || "∞"}</b> video, ưu tiên quảng cáo mạnh nhất (chạy lâu, nhiều biến thể, nhiều vị trí) ở thị trường mục tiêu.
+        Hết ngày (0h, UTC{c.day_tz_offset >= 0 ? "+" : ""}{c.day_tz_offset}) video cũ hơn <b>{c.video_keep_days || "∞"}</b> ngày bị xoá để nhường chỗ cho lứa mới — lần làm mới tới: <b>{new Date(data.today.next_rollover + "Z").toLocaleString("vi-VN")}</b>.
+        Muốn giữ video nào lâu hơn thì ghim 📌 hoặc vote sản phẩm.<br />
+        Dọn thêm mỗi 6 giờ: ảnh sau <b>{c.image_days || "∞"}</b> ngày · dữ liệu thô sau <b>{c.raw_days || "∞"}</b> ngày · nhật ký sự kiện sau <b>{c.event_days || "∞"}</b> ngày.
         Thông tin quảng cáo, điểm số, ảnh bìa và lịch sử luôn được giữ. <b>Không bao giờ dọn:</b> video đã ghim, sản phẩm đã vote LOVE/TEST/WATCH, sản phẩm có đơn hàng / experiment / chi tiêu, và quảng cáo lưu bằng extension.
-        Đổi số ngày bằng biến môi trường <code>MEDIA_RETENTION_DAYS</code>, <code>IMAGE_RETENTION_DAYS</code>, <code>RAW_RETENTION_DAYS</code>, <code>EVENT_RETENTION_DAYS</code> (0 = tắt).
+        Đổi bằng biến môi trường <code>VIDEO_DAILY_QUOTA</code>, <code>VIDEO_KEEP_DAYS</code>, <code>DAY_TZ_OFFSET</code>, <code>IMAGE_RETENTION_DAYS</code>, <code>RAW_RETENTION_DAYS</code>, <code>EVENT_RETENTION_DAYS</code> (0 = tắt).
       </div>
       <div className="flex flex-wrap items-center gap-2 mt-3">
         <button className="btn text-xs" onClick={() => run(true)} disabled={busy}>Xem trước sẽ dọn gì</button>
         {preview && (
           <>
-            <span className="text-xs text-ink2">Sẽ dọn <b>{preview.archived}</b> file, giải phóng <b>{mb(preview.freed_bytes)}</b> · giữ lại {preview.kept_protected} file được bảo vệ · xoá {preview.raw_deleted} file raw, {preview.events_deleted} sự kiện cũ</span>
-            {preview.archived + preview.raw_deleted + preview.events_deleted > 0 && <button className="btn btn-primary text-xs" onClick={() => run(false)} disabled={busy}>Dọn ngay</button>}
+            <span className="text-xs text-ink2">Sẽ dọn <b>{preview.archived + (preview.trimmed || 0)}</b> file{preview.trimmed ? ` (${preview.trimmed} do vượt ngân sách nền tảng)` : ""}, giải phóng <b>{mb(preview.freed_bytes)}</b> · giữ lại {preview.kept_protected} file được bảo vệ · xoá {preview.raw_deleted} file raw, {preview.events_deleted} sự kiện cũ</span>
+            {preview.archived + (preview.trimmed || 0) + preview.raw_deleted + preview.events_deleted > 0 && <button className="btn btn-primary text-xs" onClick={() => run(false)} disabled={busy}>Dọn ngay</button>}
           </>
         )}
       </div>
@@ -116,6 +171,7 @@ export default function Collector() {
   const [q, setQ] = useState({ connector_id: "", query: "", countries: "SA", every_minutes: "60", page_ids: "" });
   const [exp, setExp] = useState<{ source: string; country: string; file: File | null }>({ source: "pipiads", country: "", file: null });
   const [newAdapter, setNewAdapter] = useState("");
+  const { byKey } = usePlatforms();
   useEvents((e) => {
     if (["CONNECTOR_SYNCED", "CONNECTOR_FAILED", "SEARCH_DONE", "PRODUCT_DISCOVERED"].includes(e.type)) {
       setFeed((f) => [e, ...f].slice(0, 30));
@@ -123,8 +179,13 @@ export default function Collector() {
     }
   });
   if (!data) return <Loading error={error} />;
+  // spy sources grouped by channel (ads / commerce); company data (own ads, CRM, carriers) last
   const grouped: Record<string, any[]> = {};
-  data.connectors.forEach((c: any) => (grouped[c.group] ||= []).push(c));
+  data.connectors.forEach((c: any) => {
+    const g = INTERNAL.has(c.group) ? "internal" : byKey[c.network]?.channel || "ads";
+    (grouped[g] ||= []).push(c);
+  });
+  const groupOrder: [string, string][] = [...CHANNEL_ORDER, ["internal", "Dữ liệu nội bộ (Company Fit)"]];
   const searchable = data.connectors.filter((c: any) => c.supports_search);
 
   const addQuery = async () => {
@@ -155,6 +216,7 @@ export default function Collector() {
         <button className="btn" onClick={addConnector} disabled={!newAdapter}>Thêm</button>
       </PageHeader>
 
+      <SourcesCard sources={data.sources || []} byKey={byKey} />
       <StorageCard />
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
         <Card title="Kho dữ liệu">
@@ -189,10 +251,10 @@ export default function Collector() {
       </div>
 
       <Card title="Connectors" pad={false} className="mb-4">
-        {Object.entries(grouped).map(([g, rows]) => (
+        {groupOrder.filter(([g]) => grouped[g]?.length).map(([g, title]) => (
           <div key={g}>
-            <div className="px-4 pt-3 pb-1 text-[11px] uppercase tracking-wider text-muted">{GROUPS[g] || g}</div>
-            {rows.map((c) => <ConnectorRow key={c.id} c={c} onChange={reload} />)}
+            <div className="px-4 pt-3 pb-1 text-[11px] uppercase tracking-wider text-muted">{title} · {grouped[g].length}</div>
+            {grouped[g].map((c) => <ConnectorRow key={c.id} c={c} onChange={reload} byKey={byKey} />)}
           </div>
         ))}
       </Card>

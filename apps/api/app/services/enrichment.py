@@ -275,29 +275,30 @@ def classify_refusals(notes: list[str]) -> list[str | None]:
 
 
 # ============================================================ Creative: hook / angle / offer (§20)
+# vi + en + a few ar (GCC) / tl (PH) words — the two markets the team actually spies
 HOOKS = {
-    "question": ["?", "bạn có", "do you", "are you", "have you", "có phải"],
-    "problem": ["đau", "mệt", "khổ", "tired of", "struggling", "pain", "problem", "suffer", "mụn", "rụng tóc"],
-    "before_after": ["before", "after", "trước và sau", "trước sau", "transformation", "sau 7 ngày", "after 7 days"],
-    "testimonial": ["review", "khách hàng", "customer", "feedback", "chị", "em đã dùng", "i tried", "my mom", "testimonial"],
-    "demo": ["xem", "watch", "how it works", "cách dùng", "chỉ cần", "just", "demo", "in seconds"],
-    "urgency": ["hôm nay", "today", "only", "chỉ còn", "limited", "last chance", "hurry", "flash sale", "cuối cùng"],
-    "curiosity": ["bí mật", "secret", "nobody tells", "không ai nói", "you won't believe", "viral", "tiktok made me"],
+    "question": ["?", "bạn có", "do you", "are you", "have you", "có phải", "هل", "ba"],
+    "problem": ["đau", "mệt", "khổ", "tired of", "struggling", "pain", "problem", "suffer", "mụn", "rụng tóc", "ألم", "تعب", "sakit", "pagod", "hirap"],
+    "before_after": ["before", "after", "trước và sau", "trước sau", "transformation", "sau 7 ngày", "after 7 days", "قبل وبعد"],
+    "testimonial": ["review", "khách hàng", "customer", "feedback", "chị", "em đã dùng", "i tried", "my mom", "testimonial", "تجربتي", "sinubukan ko"],
+    "demo": ["xem", "watch", "how it works", "cách dùng", "chỉ cần", "just", "demo", "in seconds", "شاهد", "panoorin", "tingnan"],
+    "urgency": ["hôm nay", "today", "only", "chỉ còn", "limited", "last chance", "hurry", "flash sale", "cuối cùng", "اليوم", "عرض محدود", "ngayon", "limitado", "huling"],
+    "curiosity": ["bí mật", "secret", "nobody tells", "không ai nói", "you won't believe", "viral", "tiktok made me", "سر", "لن تصدق", "sikreto"],
 }
 ANGLES = {
-    "pain_relief": ["đau", "pain", "relief", "nhức", "mỏi", "đỡ", "relax", "thư giãn"],
-    "beauty": ["đẹp", "da", "skin", "glow", "trắng", "beauty", "mụn", "acne", "nếp nhăn", "wrinkle", "tóc", "hair"],
-    "convenience": ["tiện", "easy", "nhanh", "save time", "tiết kiệm thời gian", "portable", "mang theo", "anywhere"],
-    "health": ["sức khỏe", "health", "healthy", "posture", "ngủ", "sleep", "tư thế"],
-    "saving_money": ["tiết kiệm", "save money", "rẻ hơn", "cheaper", "thay vì", "instead of"],
-    "gift": ["quà", "gift", "tặng", "mother", "mẹ", "valentine", "eid", "ramadan"],
-    "pet_care": ["pet", "chó", "mèo", "dog", "cat"],
+    "pain_relief": ["đau", "pain", "relief", "nhức", "mỏi", "đỡ", "relax", "thư giãn", "ألم", "راحة", "sakit", "ginhawa"],
+    "beauty": ["đẹp", "da", "skin", "glow", "trắng", "beauty", "mụn", "acne", "nếp nhăn", "wrinkle", "tóc", "hair", "جمال", "بشرة", "kutis", "maganda", "pampaputi"],
+    "convenience": ["tiện", "easy", "nhanh", "save time", "tiết kiệm thời gian", "portable", "mang theo", "anywhere", "سهل", "سريع", "madali", "mabilis", "praktikal"],
+    "health": ["sức khỏe", "health", "healthy", "posture", "ngủ", "sleep", "tư thế", "صحة", "kalusugan", "tulog"],
+    "saving_money": ["tiết kiệm", "save money", "rẻ hơn", "cheaper", "thay vì", "instead of", "توفير", "أرخص", "tipid", "mura", "sulit"],
+    "gift": ["quà", "gift", "tặng", "mother", "mẹ", "valentine", "eid", "ramadan", "هدية", "regalo", "pasko", "nanay"],
+    "pet_care": ["pet", "chó", "mèo", "dog", "cat", "قطة", "كلب", "aso", "pusa", "alaga"],
 }
 OFFER_PATTERNS = [
     (r"(\d{1,2})\s?%\s?(off|giảm|discount)|giảm\s?(\d{1,2})\s?%", "discount"),
-    (r"free\s?ship|freeship|miễn phí vận chuyển|miễn phí ship|free delivery|توصيل مجاني", "free_shipping"),
+    (r"free\s?ship|freeship|miễn phí vận chuyển|miễn phí ship|free delivery|libreng (?:shipping|delivery|padala)|توصيل مجاني", "free_shipping"),
     (r"buy\s?1\s?get\s?1|mua 1 tặng 1|bogo|1\+1", "bogo"),
-    (r"\bcod\b|thanh toán khi nhận|cash on delivery|الدفع عند الاستلام", "cod"),
+    (r"\bcod\b|thanh toán khi nhận|cash on delivery|bayad pagdating|الدفع عند الاستلام", "cod"),
     (r"bảo hành|warranty|guarantee|hoàn tiền|money back", "guarantee"),
     (r"tặng kèm|free gift|quà tặng", "free_gift"),
 ]
@@ -324,13 +325,25 @@ COUNTRY_INFO = {
     "QA": ("Qatar", "GCC", "ar", "QAR"), "OM": ("Oman", "GCC", "ar", "OMR"), "BH": ("Bahrain", "GCC", "ar", "BHD"),
     "VN": ("Vietnam", "SEA", "vi", "VND"), "TH": ("Thailand", "SEA", "th", "THB"), "PH": ("Philippines", "SEA", "en", "PHP"),
     "MY": ("Malaysia", "SEA", "ms", "MYR"), "ID": ("Indonesia", "SEA", "id", "IDR"),
-    "US": ("United States", "NA", "en", "USD"), "GB": ("United Kingdom", "EU", "en", "GBP"),
+    "JO": ("Jordan", "ME", "ar", "JOD"), "EG": ("Egypt", "ME", "ar", "EGP"), "IQ": ("Iraq", "ME", "ar", "IQD"),
+    "US": ("United States", "NA", "en", "USD"), "CA": ("Canada", "NA", "en", "CAD"), "GB": ("United Kingdom", "EU", "en", "GBP"),
+    "DE": ("Germany", "EU", "de", "EUR"), "FR": ("France", "EU", "fr", "EUR"), "IT": ("Italy", "EU", "it", "EUR"),
+    "ES": ("Spain", "EU", "es", "EUR"), "NL": ("Netherlands", "EU", "nl", "EUR"), "BE": ("Belgium", "EU", "nl", "EUR"),
+    "AT": ("Austria", "EU", "de", "EUR"), "IE": ("Ireland", "EU", "en", "EUR"), "PT": ("Portugal", "EU", "pt", "EUR"),
+    "FI": ("Finland", "EU", "fi", "EUR"), "GR": ("Greece", "EU", "el", "EUR"), "SE": ("Sweden", "EU", "sv", "SEK"),
+    "DK": ("Denmark", "EU", "da", "DKK"), "CZ": ("Czechia", "EU", "cs", "CZK"),
     "PL": ("Poland", "EU", "pl", "PLN"), "RO": ("Romania", "EU", "ro", "RON"),
+    "AU": ("Australia", "AU", "en", "AUD"), "NZ": ("New Zealand", "AU", "en", "NZD"),
 }
-COD_COUNTRIES = {"SA", "AE", "KW", "QA", "OM", "BH", "VN", "TH", "PH", "MY", "ID", "PL", "RO"}
+# where COD is the default checkout (markets.py targets): GCC + Levant/Egypt/Iraq, SEA, southern/eastern EU, AU/NZ
+# ponytail: DE/FR/NL/SE/DK/FI/IE/AT/BE are prepaid markets — not COD, even though they are targets
+COD_COUNTRIES = {"SA", "AE", "KW", "QA", "OM", "BH", "JO", "EG", "IQ", "VN", "TH", "PH", "MY", "ID",
+                 "PL", "RO", "IT", "ES", "GR", "CZ", "PT", "AU", "NZ"}
 # rough USD conversion for price segmentation
-FX_TO_USD = {"SAR": 0.27, "AED": 0.27, "KWD": 3.25, "QAR": 0.27, "OMR": 2.6, "BHD": 2.65, "VND": 0.00004,
-             "THB": 0.028, "PHP": 0.018, "MYR": 0.21, "IDR": 0.000063, "USD": 1, "GBP": 1.27, "PLN": 0.25, "RON": 0.22}
+FX_TO_USD = {"SAR": 0.27, "AED": 0.27, "KWD": 3.25, "QAR": 0.27, "OMR": 2.6, "BHD": 2.65, "JOD": 1.41, "EGP": 0.021,
+             "IQD": 0.00076, "VND": 0.00004, "THB": 0.028, "PHP": 0.018, "MYR": 0.21, "IDR": 0.000063,
+             "USD": 1, "CAD": 0.73, "GBP": 1.27, "EUR": 1.08, "AUD": 0.65, "NZD": 0.60, "SEK": 0.095, "DKK": 0.145,
+             "CZK": 0.043, "PLN": 0.25, "RON": 0.22, "CNY": 0.14, "RMB": 0.14}
 
 
 def price_segment(price: float | None, currency: str | None) -> str | None:
@@ -368,18 +381,44 @@ def classify_market(country: str | None, platform: str | None, category: str | N
 
 
 # ============================================================ Category classifier
+# en + vi, then ar (GCC / Egypt / Iraq) and tl (Philippines) — _has() matches whole words, Arabic letters count as \w
 CATEGORY_KEYWORDS = {
-    "beauty": ["serum", "cream", "kem", "acne", "mụn", "skin", "da", "whitening", "lipstick", "makeup", "hair", "tóc", "perfume", "nước hoa", "mask", "collagen"],
-    "health": ["massager", "massage", "posture", "corrector", "knee", "brace", "pain", "đau", "supplement", "vitamin", "neck", "back", "foot", "sleep"],
-    "home": ["kitchen", "blender", "vacuum", "cleaner", "mop", "organizer", "lamp", "light", "pillow", "bếp", "nồi", "chảo", "cleaning"],
-    "gadgets": ["phone", "charger", "earbuds", "camera", "smart", "projector", "drone", "watch", "led", "usb", "bluetooth"],
-    "fashion": ["dress", "shoe", "bag", "túi", "giày", "váy", "áo", "jeans", "abaya", "jewelry", "ring", "necklace"],
-    "pets": ["pet", "dog", "cat", "chó", "mèo", "leash", "litter"],
+    "beauty": ["serum", "cream", "kem", "acne", "mụn", "skin", "da", "whitening", "lipstick", "makeup", "hair", "tóc", "perfume", "nước hoa", "mask", "collagen",
+               "سيروم", "كريم", "بشرة", "تفتيح", "تبييض", "شعر", "عطر", "مكياج", "ماسك", "حب الشباب", "كولاجين", "أحمر شفاه",
+               "pampaputi", "kutis", "mukha", "buhok", "pabango", "tigyawat", "kolorete", "sabon", "lotion", "balat"],
+    "health": ["massager", "massage", "posture", "corrector", "knee", "brace", "pain", "đau", "neck", "back", "foot", "sleep",
+               "مساج", "مدلك", "ألم", "آلام", "ركبة", "ظهر", "رقبة", "قدم", "نوم", "مشد", "دعامة", "علاج",
+               "masahe", "sakit", "likod", "tuhod", "leeg", "paa", "tulog", "balakang", "braso", "pamamaga"],
+    "home": ["kitchen", "blender", "vacuum", "cleaner", "mop", "organizer", "lamp", "light", "pillow", "bếp", "nồi", "chảo", "cleaning",
+             "مطبخ", "خلاط", "مكنسة", "تنظيف", "منظم", "مصباح", "إضاءة", "وسادة", "قدر", "مقلاة", "منزل",
+             "kusina", "walis", "panlinis", "ilaw", "unan", "kaldero", "kawali", "lalagyan", "bahay", "linis"],
+    "gadgets": ["phone", "charger", "earbuds", "camera", "smart", "projector", "drone", "watch", "led", "usb", "bluetooth",
+                "جوال", "هاتف", "شاحن", "سماعة", "كاميرا", "ساعة ذكية", "بروجكتر", "بلوتوث", "ذكي", "درون",
+                "cellphone", "relo", "kamera", "powerbank", "earphone", "speaker", "selpon", "pang-charge"],
+    "fashion": ["dress", "shoe", "bag", "túi", "giày", "váy", "áo", "jeans", "abaya", "jewelry", "ring", "necklace",
+                "فستان", "حذاء", "شنطة", "حقيبة", "عباية", "مجوهرات", "خاتم", "عقد", "قميص", "بنطلون", "جينز",
+                "damit", "sapatos", "tsinelas", "pantalon", "alahas", "singsing", "kwintas", "blusa", "palda", "sando"],
+    "pets": ["pet", "dog", "cat", "chó", "mèo", "leash", "litter",
+             "قطط", "قطة", "كلب", "كلاب", "حيوانات أليفة", "طيور", "رمل قطط", "أليف",
+             "aso", "pusa", "alaga", "tali", "pagkain ng aso", "pagkain ng pusa", "kulungan"],
 }
+
+
+# Not importable from China as a generic product (1688 / AliExpress): consumables and regulated goods, services,
+# digital goods, and big brands that only sell their own stock. Matching products get category "non_product" and
+# are left out of discovery views. The LLM pass (extract_products) decides first when an API key is set.
+NOT_IMPORTABLE = re.compile(
+    r"\b(supplements?|multivitamins?|vitamin (tablets|gummies|capsules)|protein powder|probiotics?|detox tea|slimming tea|weight loss (pills?|capsules?)|"
+    r"medicine|medication|prescription|cbd|insurance|loans?|credit card|online course|webinar|real estate|apartments?|villa|"
+    r"hotel|flights?|nike|adidas|rolex|"  # brand goods = counterfeit risk; "iPhone case" stays (generic accessory)
+    r"thực phẩm chức năng|viên uống|thuốc|khoá học|khóa học|bảo hiểm|căn hộ|"
+    r"مكمل|فيتامين|دواء|دورة|تأمين|شقة)\b", re.I)
 
 
 def classify_category(name: str, text: str | None = None) -> str | None:
     t = f"{name} {text or ''}".lower()
+    if NOT_IMPORTABLE.search(name or ""):  # the product name only: ad copy mentions "tea" / "app" too often
+        return "non_product"
     best, hits = None, 0
     for cat, words in CATEGORY_KEYWORDS.items():
         n = sum(1 for w in words if _has(t, [w]))
@@ -423,7 +462,9 @@ def extract_products(items: list[dict]) -> list[dict] | None:
         data = llm.complete_json(
             system=("You read e-commerce ads (any language) and name the product being sold as a short generic English "
                     "product name (no brand hype, no prices). is_physical_product=false for services, apps, media, "
-                    "events, real estate, courses. Use the number as i."),
+                    "events, real estate, courses, and also for anything that cannot be imported from China as a "
+                    "generic product: food, drinks, supplements, medicine, and branded goods sold only by the brand "
+                    "(an iPhone is not importable, an iPhone case is). Use the number as i."),
             user=lines, schema=_PRODUCT_SCHEMA,
         )
         if not data:

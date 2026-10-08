@@ -35,7 +35,7 @@ export default function Agent() {
   };
   return (
     <div>
-      <PageHeader title="AI Agent" subtitle={`Hỏi bằng ngôn ngữ tự nhiên — câu hỏi được dịch thành truy vấn có cấu trúc; số liệu lấy từ database. Engine: ${meta.data?.llm ? `Claude (${meta.data.llm_model})` : "rule-based parser (đặt ANTHROPIC_API_KEY để dùng Claude)"}`} />
+      <PageHeader title="AI Agent" subtitle={`Hỏi bằng ngôn ngữ tự nhiên — câu hỏi được dịch thành truy vấn có cấu trúc; số liệu lấy từ database. Engine: ${meta.data?.llm ? `AI (${meta.data.llm_model})` : "rule-based parser (đặt GEMINI_API_KEY để dùng AI)"}`} />
       <Card className="mb-4">
         <div className="flex gap-2 pt-4">
           <input className="input flex-1" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && ask()} />

@@ -26,7 +26,7 @@ class MediaItem:
 class AdRecord:
     source: str  # connector/provider that delivered it: meta_library, apify_meta, pipiads, minea, extension …
     source_ad_id: str
-    platform: str | None = None  # facebook | instagram | tiktok | messenger | audience_network | google
+    platform: str | None = None  # facebook | instagram | tiktok | messenger | audience_network | snapchat | aliexpress | 1688 | taobao
     platforms: list[str] = field(default_factory=list)  # every placement the ad runs on
     country: str | None = None  # ISO-2
     countries: list[str] = field(default_factory=list)
@@ -59,6 +59,13 @@ class AdRecord:
     page_likes: int | None = None
     snapshot_url: str | None = None  # link to the original ad (Ad Library / provider page)
     saved_by: str | None = None  # user who saved it (Chrome extension / manual)
+    # commerce listings (China source / competitor stores) — None for ad libraries
+    rating: float | None = None
+    review_count: int | None = None
+    sold_count: int | None = None
+    rank: int | None = None  # search position at the source
+    original_price: float | None = None
+    matched_query: str | None = None  # keyword the source matched this ad for (it may match fields we don't store)
     raw_source: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:

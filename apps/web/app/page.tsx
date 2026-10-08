@@ -3,17 +3,15 @@ import Link from "next/link";
 import { useState } from "react";
 import { TrendChart } from "@/components/charts";
 import { Card, Loading, PageHeader, ProductTable, RecBadge, SeverityIcon, Stat } from "@/components/ui";
-import { api, fmt, qs, useApi } from "@/lib/api";
+import { api, fmt, qs, useAction, useApi } from "@/lib/api";
 
 export default function DailyPulse() {
   const [country, setCountry] = useState("");
   const meta = useApi("/meta");
   const { data, error, reload } = useApi(`/dashboard/pulse${qs({ country })}`);
-  const [running, setRunning] = useState(false);
-  const runPipeline = async () => {
-    setRunning(true);
-    try { await api("/pipeline/run", { method: "POST" }); reload(); } finally { setRunning(false); }
-  };
+  const act = useAction();
+  const running = act.busy;
+  const runPipeline = () => act.run(async () => { await api("/pipeline/run", { method: "POST" }); reload(); });
   if (!data) return <Loading error={error} />;
   const k = data.kpis, t = data.internal_tests;
   const refDelta = t.cod_refusal !== null && t.cod_refusal_prev !== null ? t.cod_refusal - t.cod_refusal_prev : null;
@@ -24,11 +22,12 @@ export default function DailyPulse() {
       <PageHeader title={`Today — ${country || "thị trường mục tiêu"}`} subtitle="Hôm nay thị trường thay đổi gì">
         <select className="input" value={country} onChange={(e) => setCountry(e.target.value)}>
           <option value="">Mọi thị trường mục tiêu</option>
-          <option value="ME">Trung Đông</option><option value="US">Mỹ</option><option value="EU">Châu Âu + UK</option><option value="AU">Úc / NZ</option><option value="WW">Toàn cầu</option>
+          <option value="PH">Philippines ★</option><option value="ME">Trung Đông</option><option value="US">Mỹ</option><option value="EU">Châu Âu + UK</option><option value="AU">Úc / NZ</option><option value="VN">Việt Nam</option><option value="WW">Toàn cầu</option>
           {meta.data?.countries.map((c: string) => <option key={c}>{c}</option>)}
         </select>
         <button className="btn btn-primary" onClick={runPipeline} disabled={running}>{running ? "Đang chạy pipeline…" : "Chạy pipeline hôm nay"}</button>
       </PageHeader>
+      {act.error && <div className="text-sm mb-2" style={{ color: "var(--critical)" }}>Lỗi: {act.error}</div>}
 
       <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-4">
         <Stat label="Products monitored" value={fmt.n(k.products_monitored)} />

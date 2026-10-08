@@ -22,6 +22,7 @@ EVENT_TYPES = [
 ]
 
 _subs: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
+listeners: list = []  # in-process callbacks(type_) — e.g. router cache invalidation
 _lock = threading.Lock()
 
 
@@ -69,6 +70,11 @@ def publish(type_: str, data: dict | None = None, product_id: int | None = None,
                 s.add(Event(type=type_, product_id=product_id, data=data or {}))
                 s.commit()
     _fanout(payload)
+    for cb in list(listeners):
+        try:
+            cb(type_)
+        except Exception:
+            pass
 
 
 def sse_format(payload: dict) -> str:

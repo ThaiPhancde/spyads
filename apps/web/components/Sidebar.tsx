@@ -6,13 +6,16 @@ import { api } from "@/lib/api";
 import { getUser, LiveEvent, setUser, useEvents, useLiveStatus } from "@/lib/realtime";
 
 const NAV = [
-  { group: "Tìm & khám phá", items: [
-    { href: "/search", label: "Tìm sản phẩm", icon: "⌕" },
+  { group: "Khám phá sản phẩm", items: [
+    { href: "/search", label: "Tìm sản phẩm (mọi nguồn)", icon: "⌕" },
     { href: "/product-radar", label: "Product Radar", icon: "⚡" },
-    { href: "/ads", label: "Thư viện quảng cáo", icon: "▦" },
     { href: "/radar", label: "Product Discovery", icon: "◎" },
-    { href: "/vault", label: "Creative Vault (video)", icon: "▶" },
     { href: "/hidden-winners", label: "Hidden Winners", icon: "◆" },
+  ]},
+  { group: "Nguồn dữ liệu", items: [
+    { href: "/ads", label: "Thư viện quảng cáo", icon: "▦" },
+    { href: "/marketplace", label: "Nguồn hàng & Store", icon: "🛒" },
+    { href: "/vault", label: "Creative Vault (video)", icon: "▶" },
   ]},
   { group: "Thị trường", items: [
     { href: "/", label: "Daily Pulse", icon: "◉" },

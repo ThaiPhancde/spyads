@@ -5,13 +5,13 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ..models import (Ad, ad_markets, AdvertiserDailySnapshot, CreativeDailySnapshot, Experiment, MarketDailySnapshot, Product,
+from ..models import (ADS_ONLY, Ad, ad_markets, AdvertiserDailySnapshot, Experiment, MarketDailySnapshot, Product,
                       ProductDailySnapshot)
 from . import scoring as S
 from .decision import analyze_experiment, auto_lifecycle, learning_profile, market_fit, recommend
 from .features import ProductData, compute_features, load_product_data
+from ..markets import priority_boost
 
-HIDDEN_WINNER_MIN = 60
 POTENTIAL_WINNER_MIN = 65
 
 
@@ -27,7 +27,12 @@ def compute_scores(product: Product, f: dict, profile: dict) -> dict:
     rare = S.rare_winner_score(win, rarity, growth, fit, margin)
     conf, conf_b = S.confidence_score(f)
     opp_raw, opp = S.opportunity_score(win, sat, growth, margin, conf)
+    # priority market (PH) ranks first everywhere opportunity_score sorts — lists, radar, media download order.
+    # Applied once, here; the pre-boost value is kept (features.opportunity_raw) so text / UI can show both.
+    boost = priority_boost(f.get("markets") or [product.country])
+    unboosted, opp = opp, min(100.0, round(opp + boost, 1))
     return {
+        "opportunity_unboosted": unboosted, "priority_boost": boost,
         "external_win_score": ext, "internal_win_score": internal, "win_score": win,
         "saturation_score": sat, "saturation_state": sat_state,
         "rarity_score": rarity, "rare_winner_score": rare, "growth_velocity": growth,
@@ -39,23 +44,6 @@ def compute_scores(product: Product, f: dict, profile: dict) -> dict:
         "breakdown": {"external": ext_b, "internal": int_b, "blend": blend, "saturation": sat_b,
                       "rarity": rar_b, "confidence": conf_b},
     }
-
-
-def hidden_winner_tags(product: Product, f: dict) -> list[str]:
-    tags = []
-    if f["creative_growth_7d"] >= 0.5 or f["advertiser_growth"] >= 0.3:
-        tags.append("fast_growing")
-    if product.rarity_score >= 70:
-        tags.append("rare")
-    if product.saturation_score < 30:
-        tags.append("low_competition")
-    if f["new_markets_7d"]:
-        tags.append("new_market")
-    if (product.features or {}).get("_scores", {}).get("margin_potential", 0) >= 70:
-        tags.append("good_margin")
-    if f["comments"] >= 10 and f["positive_comment_rate"] >= 0.6:
-        tags.append("positive_feedback")
-    return tags
 
 
 class ScoreContext:
@@ -96,6 +84,13 @@ def score_product(db: Session, product: Product, data: ProductData, ctx: "ScoreC
         setattr(product, k, sc[k])
     f["_scores"] = {k: sc[k] for k in ("growth_velocity", "market_fit", "margin_potential", "opportunity_raw")}
     f["_breakdown"] = sc["breakdown"]
+    f["opportunity_raw"], f["priority_boost"] = sc["opportunity_unboosted"], sc["priority_boost"]
+    f["hidden_alerted"] = (product.features or {}).get("hidden_alerted", False)  # alert state survives rescoring (alerts.py)
+    from .hidden import evaluate
+
+    hw = evaluate(product, data.ads, f)
+    f["hidden_score"] = hw["score"] if hw else None
+    product.tags = hw["tags"] if hw else []
     product.features = f
     if f.get("gross_margin") is not None and product.price:
         product.cost = product.cost or round(product.price * (1 - f["gross_margin"]), 2)
@@ -127,7 +122,6 @@ def score_product(db: Session, product: Product, data: ProductData, ctx: "ScoreC
     else:
         action, reasons = recommend(product, f)
     product.recommendation, product.recommendation_reasons = action, reasons
-    product.tags = hidden_winner_tags(product, f) if is_hidden_winner(product) else []
     product.scored_at = datetime.utcnow()
     auto_lifecycle(db, product, f, data.experiments)
     if prev_rec and prev_rec != action:
@@ -140,28 +134,23 @@ def score_product(db: Session, product: Product, data: ProductData, ctx: "ScoreC
 
 def rescore_products(db: Session, product_ids) -> int:
     """Incremental computation (realtime §4): only the products touched by new events."""
-    from ..db import write_lock
-
-    with write_lock():
-        return _rescore(db, product_ids)
-
-
-def _rescore(db: Session, product_ids) -> int:
     ctx = ScoreContext.get(db)
+    ids = set(product_ids)
     n = 0
-    for pid in set(product_ids):
+    for pid in ids:
         p = db.get(Product, pid)
         if p:
             score_product(db, p, load_product_data(db, p), ctx)
             n += 1
+            if len(ids) > 50 and n % 50 == 0:  # big batches (live search): let other writers in between
+                db.commit()
     db.flush()
     return n
 
 
 def is_hidden_winner(p: Product) -> bool:
-    f = p.features or {}
-    return (p.rare_winner_score >= HIDDEN_WINNER_MIN and p.confidence_score >= 35
-            and f.get("advertiser_count", 999) <= 20 and p.saturation_score < 45)
+    """Stored verdict of services/hidden.evaluate (set by score_product): same rule as the Hidden Winners page."""
+    return (p.features or {}).get("hidden_score") is not None
 
 
 def is_potential_winner(p: Product) -> bool:
@@ -185,13 +174,17 @@ def analyze_all_experiments(db: Session) -> int:
     return len(exps)
 
 
-def score_all(db: Session) -> int:
+def score_all(db: Session, commit_every: int | None = None) -> int:
+    """`commit_every`: background jobs commit in small batches — one transaction over every product held the SQLite
+    write lock for minutes, and every other write (votes, live search, ingest) timed out with HTTP 500."""
     analyze_all_experiments(db)
     ScoreContext.invalidate()
     ctx = ScoreContext.get(db)
     products = db.scalars(select(Product)).all()
-    for p in products:
+    for i, p in enumerate(products, 1):
         score_product(db, p, load_product_data(db, p), ctx)
+        if commit_every and i % commit_every == 0:
+            db.commit()
     db.flush()
     return len(products)
 
@@ -217,14 +210,14 @@ def _product_snapshot(p: Product, data: ProductData, d: date, profile: dict) -> 
 
 
 def build_snapshots(db: Session, d: date | None = None, products: list[Product] | None = None,
-                    preloaded: dict[int, ProductData] | None = None, profile: dict | None = None) -> int:
+                    preloaded: dict[int, ProductData] | None = None, profile: dict | None = None,
+                    commit_every: int | None = None) -> int:
     d = d or date.today()
     products = products if products is not None else db.scalars(select(Product)).all()
     profile = profile or learning_profile(db)
     db.execute(delete(ProductDailySnapshot).where(ProductDailySnapshot.date == d))
     db.execute(delete(MarketDailySnapshot).where(MarketDailySnapshot.date == d))
     db.execute(delete(AdvertiserDailySnapshot).where(AdvertiserDailySnapshot.date == d))
-    db.execute(delete(CreativeDailySnapshot).where(CreativeDailySnapshot.date == d))
 
     market = defaultdict(lambda: Counter())
     market_opp = defaultdict(list)
@@ -237,16 +230,10 @@ def build_snapshots(db: Session, d: date | None = None, products: list[Product] 
         snap, f, sc = _product_snapshot(p, data, d, profile)
         db.add(snap)
         n += 1
-        # creative snapshot
+        if commit_every and n % commit_every == 0:
+            db.commit()
         active = [a for a in data.ads if not a.is_internal and a.first_seen_at.date() <= d
                   and a.last_seen_at.date() >= d - timedelta(days=2)]
-        fps = Counter(a.creative_fingerprint for a in active)
-        db.add(CreativeDailySnapshot(
-            product_id=p.id, date=d, unique_creatives=len(fps),
-            duplicated_creatives=sum(c - 1 for c in fps.values() if c > 1),
-            top_hooks=dict(Counter(a.hook for a in active if a.hook).most_common(5)),
-            top_angles=dict(Counter(a.angle for a in active if a.angle).most_common(5)),
-        ))
         # market rollup by country × category
         for c in (f["markets"] or [p.country or "??"]):
             key = (c, p.category or "other")
@@ -259,7 +246,7 @@ def build_snapshots(db: Session, d: date | None = None, products: list[Product] 
             pseudo = Product(win_score=sc["win_score"], confidence_score=sc["confidence_score"],
                              rare_winner_score=sc["rare_winner_score"], saturation_score=sc["saturation_score"], features=f)
             m["potential_winners"] += 1 if is_potential_winner(pseudo) else 0
-            m["hidden_winners"] += 1 if is_hidden_winner(pseudo) else 0
+            m["hidden_winners"] += 1 if is_hidden_winner(p) else 0
             market_opp[key].append(sc["opportunity_score"])
 
     for (country, cat), m in market.items():
@@ -272,7 +259,7 @@ def build_snapshots(db: Session, d: date | None = None, products: list[Product] 
         ))
 
     # advertiser snapshot
-    ads = db.scalars(select(Ad).where(Ad.advertiser_id.is_not(None), Ad.is_internal.is_(False))).all()
+    ads = db.scalars(select(Ad).where(Ad.advertiser_id.is_not(None), Ad.is_internal.is_(False), ADS_ONLY)).all()
     by_adv = defaultdict(list)
     for a in ads:
         if a.first_seen_at.date() <= d and a.last_seen_at.date() >= d - timedelta(days=2):
@@ -285,14 +272,3 @@ def build_snapshots(db: Session, d: date | None = None, products: list[Product] 
         ))
     db.flush()
     return n
-
-
-def backfill_snapshots(db: Session, days: int = 30) -> int:
-    products = db.scalars(select(Product)).all()
-    pre = {p.id: load_product_data(db, p) for p in products}
-    profile = learning_profile(db)
-    total = 0
-    today = date.today()
-    for i in range(days, -1, -1):
-        total += build_snapshots(db, today - timedelta(days=i), products, pre, profile)
-    return total

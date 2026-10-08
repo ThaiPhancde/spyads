@@ -56,6 +56,16 @@ class LocalStorage:
             return n
         return 0
 
+    def delete_prefix(self, prefix: str) -> int:
+        import shutil
+
+        p = self.path(prefix)
+        if not p.exists():
+            return 0
+        n = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        shutil.rmtree(p, ignore_errors=True)
+        return n
+
     def public_url(self, key: str, download_name: str | None = None) -> str | None:
         return None  # served by the API (/api/media/...)
 
@@ -112,6 +122,20 @@ class S3Storage:
         self.s3.delete_object(Bucket=self.bucket, Key=key)
         return n
 
+    def delete_prefix(self, prefix: str) -> int:
+        freed, batch = 0, []
+        for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix):
+            for o in page.get("Contents", []):
+                freed += o["Size"]
+                batch.append({"Key": o["Key"]})
+        for i in range(0, len(batch), 1000):
+            self.s3.delete_objects(Bucket=self.bucket, Delete={"Objects": batch[i:i + 1000]})
+        return freed
+
+    def usage_bytes(self) -> int:
+        return sum(o["Size"] for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket)
+                   for o in page.get("Contents", []))
+
     def public_url(self, key: str, download_name: str | None = None) -> str:
         if self.public_base and not download_name:
             return f"{self.public_base}/{key}"
@@ -139,7 +163,9 @@ def store():
 def write_raw_batch(source: str, entity_type: str, records: list[dict]) -> str:
     """Raw data layer: /raw/<source>/<YYYY-MM-DD>/<entity>_<HHMMSSffffff>.jsonl — reprocessable later."""
     now = datetime.utcnow()
-    key = f"raw/{source}/{now:%Y-%m-%d}/{entity_type}_{now:%H%M%S%f}.jsonl"
-    body = "\n".join(json.dumps(r, ensure_ascii=False, default=str) for r in records).encode()
-    store().put(key, body, "application/x-ndjson")
+    import gzip
+
+    key = f"raw/{source}/{now:%Y-%m-%d}/{entity_type}_{now:%H%M%S%f}.jsonl.gz"  # gzip: raw lake ~10x smaller
+    body = gzip.compress("\n".join(json.dumps(r, ensure_ascii=False, default=str) for r in records).encode(), 6)
+    store().put(key, body, "application/gzip")
     return key

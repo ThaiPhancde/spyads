@@ -109,10 +109,11 @@ class BaseConnector:
         """HTTP with token-bucket rate limit, Retry-After and exponential backoff on 429/5xx."""
         rl = self.rate_limit
         last: Exception | None = None
+        timeout = kw.pop("timeout", 60)
         for attempt in range(rl.retries + 1):
             self.bucket.take()
             try:
-                r = httpx.request(method, url, timeout=kw.pop("timeout", 60), **kw)
+                r = httpx.request(method, url, timeout=timeout, **kw)
             except httpx.TransportError as e:
                 last = e
             else:

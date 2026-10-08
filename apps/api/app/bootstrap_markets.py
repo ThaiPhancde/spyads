@@ -8,6 +8,7 @@ Usage (API must be running):  python -m app.bootstrap_markets [--limit 40] [--ma
 import argparse
 import time
 
+import os
 import httpx
 
 API = "http://localhost:8000"
@@ -15,7 +16,9 @@ EVERY = 360
 
 # (keywords, every_minutes) per market — local-language e-commerce wording (COD / free delivery / offers)
 KEYWORDS = {
-    # Middle East — priority, hourly
+    # Philippines — top priority, every 30 min (Taglish + English COD wording)
+    "PH": (["cash on delivery", "COD nationwide", "free shipping nationwide", "libreng shipping", "order na"], 30),
+    # Middle East — hourly
     "SA": (["الدفع عند الاستلام", "توصيل مجاني", "free delivery"], 60),
     "AE": (["الدفع عند الاستلام", "توصيل مجاني", "cash on delivery"], 60),
     "KW": (["الدفع عند الاستلام", "توصيل مجاني"], 60),
@@ -40,9 +43,32 @@ KEYWORDS = {
     # Australia / NZ
     "AU": (["free shipping", "afterpay"], 90),
     "NZ": (["free shipping"], 180),
+    # Vietnam
+    "VN": (["freeship", "thanh toán khi nhận hàng", "giảm giá"], 120),
     # Worldwide (country = ALL in the Ad Library)
     "ALL": (["free shipping", "cash on delivery"], 120),
 }
+
+
+def _env_overrides():
+    """KW_<MARKET>=kw1|kw2 and optional KW_<MARKET>_EVERY=minutes in the root .env replace the defaults above."""
+    import os
+    from pathlib import Path
+
+    f = Path(__file__).resolve().parents[3] / ".env"
+    vals = dict(os.environ)
+    if f.is_file():
+        for line in f.read_text(encoding="utf8").splitlines():
+            k, sep, v = line.partition("=")
+            if sep and not line.lstrip().startswith("#"):
+                vals.setdefault(k.strip(), v.split(" #")[0].strip())
+    for m in list(KEYWORDS) + [k[3:] for k in vals if k.startswith("KW_") and not k.endswith("_EVERY")]:
+        if vals.get(f"KW_{m}"):
+            KEYWORDS[m] = ([x.strip() for x in vals[f"KW_{m}"].split("|") if x.strip()],
+                           int(vals.get(f"KW_{m}_EVERY") or KEYWORDS.get(m, ([], EVERY))[1]))
+
+
+_env_overrides()
 
 
 def main():
@@ -52,12 +78,12 @@ def main():
     ap.add_argument("--no-run", action="store_true", help="only create / update queries; let the scheduler run them")
     args = ap.parse_args()
     markets = [m.strip().upper() for m in args.markets.split(",") if m.strip()] or list(KEYWORDS)
-    c = httpx.Client(base_url=API, timeout=60)
+    c = httpx.Client(base_url=API, timeout=60, headers={"X-Admin-Token": os.getenv("ADMIN_TOKEN", "")})
     col = c.get("/api/collector").json()
     meta = next(x for x in col["connectors"] if x["adapter"] == "meta_library")
     wanted = {(kw, m) for m in KEYWORDS for kw in KEYWORDS[m][0]}
     existing = {(q["query"], q["countries"][0] if q["countries"] else ""): q for q in col["tracked_queries"]}
-    # markets outside the plan (e.g. VN / SEA): keep their data, stop re-collecting
+    # markets outside the plan (e.g. SEA): keep their data, stop re-collecting
     for (kw, m), q in existing.items():
         if (kw, m) not in wanted and q["enabled"]:
             c.patch(f"/api/collector/queries/{q['id']}", json={"enabled": False})

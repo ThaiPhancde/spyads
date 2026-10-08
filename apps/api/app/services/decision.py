@@ -11,7 +11,6 @@ from .enrichment import price_segment
 
 # ============================================================ Thresholds (tunable)
 TH = {
-    "test_opportunity": 70, "test_confidence": 55, "test_saturation": 55,
     "scale_internal": 72, "scale_margin": 0.12, "scale_refusal": 0.22, "scale_delivery": 0.70,
     "hold_roas": 2.0, "hold_refusal": 0.25,
     "low_ctr": 0.008, "high_cpa_ratio": 0.45, "low_cvr": 0.012,
@@ -128,13 +127,14 @@ def analyze_experiment(e: Experiment, market_avg_price: float | None = None, neg
 
 # ============================================================ §28 Decision engine
 def recommend(product: Product, f: dict) -> tuple[str, list[str]]:
-    """Return (action, reasons). Actions: TEST WATCH HOLD ITERATE SCALE STOP."""
+    """After a test (company data): SCALE · HOLD · ITERATE · STOP, or WATCH while data is thin.
+    Before a test the decision comes from discovery.discovery_decision (TEST_NOW · TEST · WATCH · REVIEW · SKIP)."""
     ext, internal = product.external_win_score, product.internal_win_score
-    opp, conf, sat = product.opportunity_score, product.confidence_score, product.saturation_score
-    reasons: list[str] = []
 
     if f.get("has_internal") and internal is not None:
-        cm, refusal = f.get("contribution_margin") or -1, f.get("refusal_rate") or 0
+        cm = f.get("contribution_margin")
+        cm = -1 if cm is None else cm  # 0.0 margin is a number, not "unknown"
+        refusal = f.get("refusal_rate") or 0
         roas, ctr, cvr = f.get("roas") or 0, f.get("ctr") or 0, f.get("cvr") or 0
         cpa_ratio = (f.get("cpa") or 0) / (f.get("aov") or 1)
         delivery = f.get("delivery_rate") or 0
@@ -155,21 +155,7 @@ def recommend(product: Product, f: dict) -> tuple[str, list[str]]:
         if internal >= 60:
             return "HOLD", [f"Internal Win {internal:.0f} khá nhưng chưa đủ điều kiện scale", f"Margin {cm:.0%}, refusal {refusal:.0%}"]
         return "WATCH", [f"Internal Win {internal:.0f} — chờ thêm dữ liệu"]
-
-    if opp >= TH["test_opportunity"] and conf >= TH["test_confidence"] and sat < TH["test_saturation"]:
-        return "TEST", [f"Opportunity {opp:.0f} ≥ {TH['test_opportunity']}", f"Confidence {conf:.0f}", f"Saturation {sat:.0f} < {TH['test_saturation']}"]
-    if product.rare_winner_score >= 62 and conf >= 40 and sat < 45:
-        return "TEST", [f"Rare Winner {product.rare_winner_score:.0f}", f"Chỉ {f['advertiser_count']} advertiser", f"Growth 7d {f['creative_growth_7d']:.0%}"]
-    if sat >= 68 or product.saturation_state == "Declining":
-        reasons.append(f"Saturation {sat:.0f} ({product.saturation_state})")
-        return ("STOP" if ext < 50 else "HOLD"), reasons
-    if ext < 35 and conf >= 50:
-        return "STOP", [f"External Win {ext:.0f} thấp với confidence {conf:.0f}"]
-    if opp >= 55:
-        reasons.append(f"Opportunity {opp:.0f} nhưng confidence {conf:.0f} chưa đủ" if conf < TH["test_confidence"] else f"Opportunity {opp:.0f}")
-    else:
-        reasons.append(f"Opportunity {opp:.0f} — theo dõi thêm")
-    return "WATCH", reasons
+    return "WATCH", ["Chưa có dữ liệu nội bộ — dùng quyết định discovery"]
 
 
 # ============================================================ §14 Lifecycle state machine
@@ -222,7 +208,7 @@ def auto_lifecycle(db: Session, product: Product, f: dict, exps: list[Experiment
                 changed = transition(db, product, "SCALE", "Decision engine → SCALE")
             elif s in ("WIN", "SCALE") and product.saturation_state in ("Highly Saturated", "Declining"):
                 changed = transition(db, product, "SATURATED", f"Saturation {product.saturation_score:.0f} ({product.saturation_state})")
-            elif s in ("DISCOVERED", "WATCHLIST") and product.recommendation == "TEST":
+            elif s in ("DISCOVERED", "WATCHLIST") and product.recommendation in ("TEST", "TEST_NOW"):
                 changed = transition(db, product, "CANDIDATE", "Decision engine → TEST")
             elif s == "DISCOVERED" and product.opportunity_score >= 50:
                 changed = transition(db, product, "WATCHLIST", f"Opportunity {product.opportunity_score:.0f}")

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import Ad, Advertiser, Comment, Experiment, MarketDailySnapshot, Product
+from ..models import ADS_ONLY, Ad, Advertiser, Comment, Experiment, MarketDailySnapshot, Product
 from . import llm
 from .decision import FAILURE_TYPES
 from .engine import is_hidden_winner
@@ -21,7 +21,7 @@ INTENTS = ["product_search", "failed_tests", "top_complaints", "market_hidden_wi
 COUNTRY_WORDS = {
     "SA": ["saudi", "ả rập", "a rap", "ksa", "ả-rập"], "AE": ["uae", "dubai", "emirates", "các tiểu vương quốc"],
     "KW": ["kuwait"], "QA": ["qatar"], "VN": ["việt nam", "vietnam", "vn"], "TH": ["thái", "thailand", "thai"],
-    "PH": ["philippines", "phi"], "MY": ["malaysia", "mã lai"], "ID": ["indonesia", "indo"], "US": ["mỹ", "usa", "us"],
+    "PH": ["philippines", "phi"], "MY": ["malaysia", "mã lai"], "ID": ["indonesia", "indo"], "US": ["mỹ", "usa", "united states"],
 }
 CATEGORY_WORDS = {
     "beauty": ["beauty", "làm đẹp", "mỹ phẩm", "skincare"], "health": ["health", "sức khỏe", "massage"],
@@ -73,7 +73,7 @@ def parse_rules(q: str) -> dict:
     m = re.search(r"(?:top|tìm|find|cho tôi)\s*(\d+)", t)
     if m:
         spec["limit"] = min(100, int(m.group(1)))
-    spec["country"] = _find(t, COUNTRY_WORDS)
+    spec["country"] = _find(t, COUNTRY_WORDS) or ("US" if re.search(r"\bUS\b", q) else None)  # "us" = we, "US" = the market
     spec["category"] = _find(t, CATEGORY_WORDS)
     m = re.search(r"(?:dưới|<|less than|under|ít hơn)\s*(\d+)\s*(?:advertiser|nhà quảng cáo|adv)", t)
     if m:
@@ -224,7 +224,7 @@ def execute(db: Session, spec: dict) -> dict:
     if intent == "competitors_scaling":
         now = datetime.utcnow()
         data = db.execute(
-            select(Ad.advertiser_id, func.count(Ad.id)).where(Ad.first_seen_at > now - timedelta(days=7), Ad.is_internal.is_(False),
+            select(Ad.advertiser_id, func.count(Ad.id)).where(Ad.first_seen_at > now - timedelta(days=7), Ad.is_internal.is_(False), ADS_ONLY,
                                                                Ad.advertiser_id.is_not(None)).group_by(Ad.advertiser_id)
         ).all()
         rows = []

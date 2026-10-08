@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
+import re
+import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .collector.base import AuthExpired, ConnectorError, FetchParams, NotConfigured
@@ -25,6 +29,14 @@ from .ingest import ingest_ads
 from .models import Alert, Connector, Order, Product, SearchJob, TrackedQuery
 
 log = logging.getLogger(__name__)
+# ponytail: global ingest lock, per-source locks if throughput matters — two live searches (or one + the scheduler)
+# writing at once cost one of them its whole Meta batch ("database is locked") while the job still said "done"
+_ingest_lock = threading.Lock()
+
+
+def _redact(s: str | None) -> str | None:
+    """Source errors echo request URLs — never the Apify token in them."""
+    return re.sub(r"(token=)[^&\s'\"]+", r"\1***", s) if s else s
 
 # ------------------------------------------------------------ carrier status normalization (§12, §14)
 STAGE_MAP = {
@@ -177,10 +189,10 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
         c = db.get(Connector, cid)
         if not c or not c.adapter:
             return {"error": "connector has no adapter"}
-        connector = ConnectorFactory.get(c.adapter, c.config or {})
         result = {"connector": c.name, "fetched": 0}
         db.commit()  # close the read transaction before calling the source over the network
         try:
+            connector = ConnectorFactory.get(c.adapter, c.config or {})  # KeyError = adapter removed from the factory
             if c.adapter == "meta_ads":
                 rows = connector.fetch_metrics("today")
                 pids = upsert_ad_metrics(db, rows, c.config or {})
@@ -193,37 +205,58 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                 publish("CONNECTOR_SYNCED", result)
                 return result
             plist = [params] if params else ([_params_from(c, query)] if query else _connector_param_list(c))
+            if not plist:  # keyword-search source without scheduled keywords: it runs from live searches only
+                c.status, c.last_error = "ok", None
+                db.commit()
+                return {**result, "skipped": "chỉ chạy khi tìm từ khoá (Tìm sản phẩm) hoặc khi cấu hình keywords"}
             recs = []
             for p in plist:
-                recs += list(connector.fetch_ads(p))
-            stats = ingest_ads(db, recs)
-            rescore_products(db, stats["product_ids"])
-            c = db.get(Connector, cid)
-            c.status, c.health, c.last_error = "ok", "healthy", None
-            if not recs:  # blueprint §7: an empty result never means "no ads" — flag it, keep previous data untouched
-                c.health = "degraded"
-                c.last_error = "Nguồn trả về 0 kết quả — có thể bị chặn / đổi API; dữ liệu cũ được giữ nguyên"
-            c.last_sync_at, c.last_sync_count = datetime.utcnow(), len(recs)
-            c.last_duration_ms = int((time.perf_counter() - t0) * 1000)
-            if c.last_duration_ms > 120_000:
-                c.health = "slow"
-            if query:
-                q = db.get(TrackedQuery, query.id)
-                q.last_run_at, q.last_count, q.last_new, q.last_error = datetime.utcnow(), len(recs), stats["new_ads"], None
-            db.commit()
+                for r in connector.fetch_ads(p):
+                    r.matched_query = p.query
+                    recs.append(r)
+            with _ingest_lock:
+                stats = ingest_ads(db, recs)
+                rescore_products(db, stats["product_ids"])
+                c = db.get(Connector, cid)
+                c.status, c.health, c.last_error = "ok", "healthy", None
+                if not recs and c.adapter != "export":  # an empty watch folder is normal; blueprint §7: an empty result never means "no ads" — flag it, keep previous data untouched
+                    c.health = "degraded"
+                    c.last_error = "Nguồn trả về 0 kết quả — có thể bị chặn / đổi API; dữ liệu cũ được giữ nguyên"
+                if stats["errors"] and not (stats["new_ads"] or stats["updated_ads"]):  # fetched fine, stored nothing
+                    c.health, c.last_error = "error", _redact(stats["errors"][0])[:500]
+                c.last_sync_at, c.last_sync_count = datetime.utcnow(), len(recs)
+                c.last_duration_ms = int((time.perf_counter() - t0) * 1000)
+                if c.last_duration_ms > 120_000:
+                    c.health = "slow"
+                if query:
+                    q = db.get(TrackedQuery, query.id)
+                    q.last_run_at, q.last_count, q.last_new, q.last_error = datetime.utcnow(), len(recs), stats["new_ads"], None
+                db.commit()
             result.update(fetched=len(recs), **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source")})
             publish("CONNECTOR_SYNCED", result)
         except (NotConfigured, AuthExpired, ConnectorError, Exception) as e:
+            if isinstance(e, OperationalError):
+                log.exception("connector %s: batch lost (sqlite busy)", cid)
             db.rollback()
-            c = db.get(Connector, cid)
+            for _try in range(3):  # the failure may itself be "database is locked": retry the status write briefly
+                try:
+                    c = db.get(Connector, cid)
+                    break
+                except OperationalError:
+                    db.rollback()
+                    time.sleep(2)
             c.status = "not_configured" if isinstance(e, NotConfigured) else "error"
             c.health = "auth_expired" if isinstance(e, AuthExpired) else ("unknown" if isinstance(e, NotConfigured) else "error")
-            c.last_error = f"{type(e).__name__}: {e}"[:500]
+            c.last_error = "adapter removed" if isinstance(e, KeyError) else _redact(f"{type(e).__name__}: {e}")[:500]
             c.last_sync_at = datetime.utcnow()
             if query:
                 q = db.get(TrackedQuery, query.id)
                 q.last_run_at, q.last_error = datetime.utcnow(), c.last_error
-            db.commit()
+            try:
+                db.commit()
+            except OperationalError:
+                log.exception("connector %s: could not even record the failure (sqlite busy)", cid)
+                db.rollback()
             result["error"] = c.last_error
             publish("CONNECTOR_FAILED", result)
         return result
@@ -279,7 +312,8 @@ def _connector_param_list(c: Connector) -> list[FetchParams]:
     if pages:
         out.append(FetchParams(page_ids=pages, countries=base.countries, limit=base.limit))
     # search-type sources need a keyword / page list — never pull random ads
-    return out or ([] if c.adapter in ("meta_library", "meta_graph", "apify_meta", "tiktok_commercial", "apify_actor", "http") else [base])
+    cls = ConnectorFactory.connectors.get(c.adapter)
+    return out or ([] if cls and cls.supports_search and not getattr(cls, "browses", False) else [base])
 
 
 def run_search(job_id: int, more: int = 0):
@@ -308,63 +342,136 @@ def run_search(job_id: int, more: int = 0):
         errors: list[str] = []
         state = dict(job.state or {})
         countries = job.countries or ["ALL"]
-
-        def flush(batch, c, key):
-            st = ingest_ads(db, batch)
-            job.found += len(batch)
-            job.new_ads += st["new_ads"]
-            pids.update(st["product_ids"])
-            job.state = dict(state)
-            job.product_ids = sorted(pids)
-            db.commit()
-            publish("SEARCH_PROGRESS", {"job_id": job_id, "connector": c.name, "found": job.found, "new_ads": job.new_ads,
-                                        "products": len(pids)}, persist=False)
-
+        # "a | b | c" = several keywords: each one is searched on every source (OR), results merge into one job
+        kws = [k.strip() for k in (job.query or "").split("|") if k.strip()]
+        plist = [(kw, FetchParams(query=kw, countries=countries, limit=target, media_type=job.media_type or None)) for kw in kws]
         db.commit()  # close the read transaction before network calls
+
+        # Every source fetches in its own thread (they used to run one after another: Meta's ~3 s pages held up the
+        # rest); ingest stays on this thread — SQLite has one writer anyway.
+        q: queue.Queue = queue.Queue()
+
+        def worker(cid: int, name: str, adapter: str, cfg: dict):
+            _slots.acquire()  # ponytail: one semaphore shared with the scheduler — MAX_PARALLEL_JOBS sources at once in total
+            try:
+                connector = ConnectorFactory.get(adapter, cfg)
+                for kw, params in plist:
+                    sfx = f":{kw}" if len(plist) > 1 else ""  # single keyword keeps the old cursor keys
+                    if hasattr(connector, "fetch_page"):  # resumable paging (Meta Ad Library)
+                        for country in countries:
+                            key = f"{cid}:{country}{sfx}"
+                            st, got, empty = dict(state.get(key) or {}), 0, 0
+                            while got < target and not st.get("done"):
+                                recs, st = connector.fetch_page(params, country, st)
+                                # Meta returns empty pages mid-stream while the cursor goes on (filtered results):
+                                # stopping at the first one lost about half the ads — only a run of them means the end
+                                empty = 0 if recs else empty + 1
+                                if empty >= 3:
+                                    st["done"] = True
+                                got += len(recs)
+                                q.put(("batch", cid, name, recs, key, dict(st), kw))
+                    elif not more:  # single-shot sources (Apify, REST…): only on the first run
+                        batch: list = []
+                        for rec in connector.fetch_ads(params):
+                            batch.append(rec)
+                            if len(batch) >= 10:
+                                q.put(("batch", cid, name, batch, None, None, kw))
+                                batch = []
+                        q.put(("batch", cid, name, batch, f"{cid}:*{sfx}", {"done": True}, kw))
+                q.put(("end", cid, name, None))
+            except Exception as e:
+                q.put(("end", cid, name, f"{type(e).__name__}: {e}"))
+            finally:
+                _slots.release()
+
+        def mark(cid: int, n: int, err: str | None):
+            """A live search is a real run of the source: keep its health on the Data & Connectors screen honest."""
+            cc = db.get(Connector, cid)
+            cc.last_sync_at, cc.last_error = datetime.utcnow(), err
+            cc.status, cc.health = ("error", "error") if err else ("ok", "healthy")
+            if not err:
+                cc.last_sync_count = n
+            db.commit()
+
         for c in conns:
             publish("SEARCH_PROGRESS", {"job_id": job_id, "connector": c.name, "stage": "fetching", "found": job.found}, persist=False)
-            try:
-                connector = ConnectorFactory.get(c.adapter, c.config or {})
-                params = FetchParams(query=job.query, countries=countries, limit=target,
-                                     media_type=job.media_type or None)
-                if hasattr(connector, "fetch_page"):  # resumable paging (Meta Ad Library)
-                    for country in countries:
-                        key = f"{c.id}:{country}"
-                        st = state.get(key) or {}
-                        got = 0
-                        while got < target and not st.get("done"):
-                            recs, st = connector.fetch_page(params, country, st)
-                            state[key] = st
-                            if recs:
-                                flush(recs, c, key)
-                                got += len(recs)
-                            else:
-                                st["done"] = True
-                else:  # single-shot sources (Apify, REST…): only on the first run
-                    if more:
-                        continue
-                    batch = []
-                    for rec in connector.fetch_ads(params):
-                        batch.append(rec)
-                        if len(batch) >= 10:
-                            flush(batch, c, c.id)
-                            batch = []
-                    if batch:
-                        flush(batch, c, c.id)
-                    state[f"{c.id}:*"] = {"done": True}
-            except Exception as e:
-                db.rollback()
-                job = db.get(SearchJob, job_id)
-                errors.append(f"{c.name}: {type(e).__name__}: {e}")
-        job = db.get(SearchJob, job_id)
-        rescore_products(db, pids)
-        job.state = state
-        job.has_more = any(not v.get("done") for v in state.values())
-        job.product_ids = sorted(pids)
-        job.status = "done" if job.found or not errors else "error"
-        job.error = "; ".join(errors)[:1000] or None
-        job.finished_at = datetime.utcnow()
-        db.commit()
+            threading.Thread(target=worker, args=(c.id, c.name, c.adapter, dict(c.config or {})), daemon=True).start()
+        got_by: dict[int, int] = {c.id: 0 for c in conns}
+        adapter_by = {c.id: c.adapter for c in conns}
+        lost_primary = False  # Meta is the primary source: a lost Meta batch makes the job an error, not "done"
+        from .platforms import connector_network
+
+        sources = dict(job.sources or {}) if more else {}
+        for c in conns:
+            sources.setdefault(c.name, {"network": connector_network(c.adapter, c.config), "fetched": 0, "new": 0, "failed": 0})
+            sources[c.name]["error"] = None
+        pending = len(conns)
+        # job.found = distinct ads stored, not rows received: one ad comes back from several pages / sources / countries
+        # ponytail: the set lives for this run only — "load more" can re-count an ad seen in the first run
+        seen_ads: set[int] = set()
+        while pending:
+            kind, cid, name, *rest = q.get()
+            if kind == "end":
+                pending -= 1
+                err = _redact(rest[0])
+                if err:
+                    errors.append(f"{name}: {err}")
+                    sources[name]["error"] = err[:300]
+                job.sources = {k: dict(v) for k, v in sources.items()}
+                db.commit()
+                if not (more and not got_by[cid] and not err):  # "load more" skips single-shot sources
+                    mark(cid, got_by[cid], err and err[:500])
+                continue
+            recs, key, st, kw = rest
+            if key:
+                state[key] = st
+            with _ingest_lock:
+                try:
+                    for r in recs:
+                        r.matched_query = kw
+                    res = ingest_ads(db, recs)
+                    if res["errors"] and not (res["new_ads"] or res["updated_ads"]):
+                        errors.append(f"{name}: lưu vào kho lỗi — {_redact(res['errors'][0])[:200]}")
+                    s = sources[name]
+                    fresh = set(res["ad_ids"]) - seen_ads
+                    seen_ads |= fresh
+                    listings = fresh & set(res.get("listing_ids") or [])  # marketplace rows: reported, not counted as ads
+                    s["fetched"] += len(recs)
+                    s["stored"] = s.get("stored", 0) + len(fresh)
+                    s["listings"] = s.get("listings", 0) + len(listings)
+                    s["new"] += res["new_ads"]
+                    s["failed"] += len(recs) - res["new_ads"] - res["updated_ads"]  # invalid or rejected by the DB
+                    job.sources = {k: dict(v) for k, v in sources.items()}
+                    job.found += len(fresh) - len(listings)
+                    job.new_ads += res["new_ads"]
+                    got_by[cid] += len(recs)
+                    pids.update(res["product_ids"])
+                    job.state = dict(state)
+                    job.product_ids = sorted(pids)
+                    db.commit()
+                except Exception as e:
+                    if isinstance(e, OperationalError):
+                        log.exception("search job %s: %s lost a batch of %d (sqlite busy)", job_id, name, len(recs))
+                        lost_primary |= "meta" in (adapter_by.get(cid) or "")
+                    db.rollback()
+                    job = db.get(SearchJob, job_id)
+                    db.commit()  # db.get opened a write transaction (BEGIN IMMEDIATE): never hold it outside the lock
+                    msg = _redact(f"{name}: {type(e).__name__}: {e}")[:300]
+                    errors.append(msg)
+                    sources[name]["error"] = msg
+            if recs:
+                publish("SEARCH_PROGRESS", {"job_id": job_id, "connector": name, "found": job.found, "new_ads": job.new_ads,
+                                            "products": len(pids)}, persist=False)
+        with _ingest_lock:
+            job = db.get(SearchJob, job_id)
+            rescore_products(db, pids)
+            job.state = state
+            job.has_more = any(not v.get("done") for v in state.values())
+            job.product_ids = sorted(pids)
+            job.status = "done" if (job.found or not errors) and not lost_primary else "error"
+            job.error = "; ".join(dict.fromkeys(errors))[:1000] or None
+            job.finished_at = datetime.utcnow()
+            db.commit()
         publish("SEARCH_DONE", {"job_id": job_id, "found": job.found, "new_ads": job.new_ads, "products": len(pids),
                                 "has_more": job.has_more, "error": job.error}, persist=False)
 
@@ -380,6 +487,7 @@ import os as _os
 
 _running: set[str] = set()
 MAX_PARALLEL_JOBS = int(_os.getenv("MAX_PARALLEL_JOBS", "2"))
+_slots = threading.BoundedSemaphore(MAX_PARALLEL_JOBS)  # scheduled jobs + live-search worker threads, in total
 
 
 async def scheduler_loop():
@@ -388,7 +496,9 @@ async def scheduler_loop():
     while True:
         try:
             now = datetime.utcnow()
-            with SessionLocal() as db:
+            from .db import read_only
+
+            with SessionLocal() as db, read_only():
                 due = []
                 for c in db.scalars(select(Connector).where(Connector.enabled.is_(True), Connector.adapter.is_not(None),
                                                             Connector.every_minutes.is_not(None))).all():
@@ -423,7 +533,9 @@ async def scheduler_loop():
                 _last_liveness = now
                 _running.add("liveness")
                 asyncio.get_running_loop().run_in_executor(None, _liveness_wrapper)
-            if now - _last_cleanup >= timedelta(hours=6):
+            from .retention import day_start
+
+            if now - _last_cleanup >= timedelta(hours=6) or _last_cleanup < day_start(now):  # + right after midnight
                 await asyncio.to_thread(_cleanup_job)
                 _last_cleanup = now
             if _last_daily is None or now - _last_daily >= timedelta(hours=REFRESH_HOURS):
@@ -443,24 +555,30 @@ def _export_has_files(c: Connector) -> bool:
 
 def _job_wrapper(key, cid, q):
     try:
-        run_connector(cid, query=q)
+        with _slots:
+            run_connector(cid, query=q)
     finally:
         _running.discard(key)
 
 
 def _cleanup_job():
-    from .db import write_lock
     from .retention import run_cleanup
 
-    with SessionLocal() as db, write_lock():
+    with SessionLocal() as db:
         r = run_cleanup(db)
         if r["archived"] or r["raw_deleted"] or r["events_deleted"]:
             log.info("retention: %s", r)
+    if r["archived"]:
+        publish("STORAGE_ROLLOVER", {"archived": r["archived"], "freed_bytes": r["freed_bytes"]}, persist=False)
+    from .media import enqueue_pending
+
+    enqueue_pending()  # start filling the new day's batch right away
 
 
 def _liveness_wrapper():
     try:
-        r = verify_liveness()
+        with _slots:
+            r = verify_liveness()
         if r["advertisers"]:
             log.info("liveness: %s", r)
             publish("LIVENESS_CHECKED", r, persist=False)
@@ -483,8 +601,9 @@ def _daily_job():
     from .services.engine import build_snapshots, score_all
 
     with SessionLocal() as db:
-        score_all(db)
-        build_snapshots(db)
+        score_all(db, commit_every=50)
+        db.commit()
+        build_snapshots(db, commit_every=50)
         db.commit()
 
 
@@ -524,8 +643,7 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
             if len(pages) >= max_advertisers:
                 break
         connector = MetaLibraryConnector(c.config or {})
-        db.commit()  # end the read transaction: writes below start fresh inside the write lock
-        from .db import write_lock
+        db.commit()  # end the read transaction before the network calls
 
         touched: set[int] = set()
         for pid in pages:
@@ -537,50 +655,61 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
                 for _ in range(LIVENESS_MAX_PAGES):
                     recs, st = connector.fetch_page(FetchParams(page_ids=[pid], active_only=True), "ALL", st)
                     recs_all += recs
-                    seen |= {r.source_ad_id for r in recs}
+                    seen |= {r.source_ad_id for r in recs} | set(st.get("siblings") or [])
                     if st.get("done"):
                         break
             except Exception:
                 out["errors"] += 1
                 continue
-            with write_lock():
+            try:
                 _reconcile_page(db, pid, recs_all, seen, bool(st.get("done")), now, out, touched)
+            except OperationalError:
+                log.exception("liveness: page %s lost (sqlite busy)", pid)
+                db.rollback()
+                out["errors"] += 1
         if touched:
             from .services import adsignals
 
-            with write_lock():
+            with _ingest_lock:
                 adsignals.refresh(db, [a.id for a in db.scalars(select(Ad).where(Ad.product_id.in_(touched)))])
                 db.commit()
-            rescore_products(db, touched)
-            db.commit()
+                rescore_products(db, touched)
+                db.commit()
     return out
 
 
 def _reconcile_page(db, pid, recs_all, seen, complete, now, out, touched):
     from .models import Ad, AdSource
 
-    if recs_all:
-        stats = ingest_ads(db, recs_all)  # refreshes last_verified_at, adds any new ads of this advertiser
-        touched |= set(stats["product_ids"])
-        out["verified"] += len(seen)
-    if not complete:
-        out["incomplete"] += 1
+    with _ingest_lock:
+        if recs_all:
+            # refresh only ads we already track: the scan is worldwide ("ALL"), so a new ad from it would have no country
+            # and still count as in-target (audit H4) — new ads come from country searches
+            known = set(db.scalars(select(AdSource.source_ad_id).where(
+                AdSource.source == "meta_library", AdSource.source_ad_id.in_([r.source_ad_id for r in recs_all]))))
+            recs_all = [r for r in recs_all if r.source_ad_id in known]
+        if recs_all:
+            stats = ingest_ads(db, recs_all)  # refreshes last_verified_at / is_active
+            touched |= set(stats["product_ids"])
+            out["verified"] += len(seen)
+        if not complete:
+            out["incomplete"] += 1
+            db.commit()
+            return
+        for ad in db.scalars(select(Ad).join(AdSource, AdSource.ad_id == Ad.id).where(
+                Ad.page_id == pid, Ad.is_active.is_(True), AdSource.source == "meta_library")).all():
+            src_ids = {s.source_ad_id for s in db.scalars(select(AdSource).where(AdSource.ad_id == ad.id))}
+            if src_ids & seen:
+                continue
+            ad.verify_misses = (ad.verify_misses or 0) + 1
+            if ad.verify_misses >= 2:
+                ad.is_active, ad.inactive_at = False, now
+                out["stopped"] += 1
+                touched.add(ad.product_id)
+                publish("AD_STOPPED", {"ad_id": ad.id, "page_id": pid}, product_id=ad.product_id, db=db)
+            else:
+                out["suspect"] += 1
         db.commit()
-        return
-    for ad in db.scalars(select(Ad).join(AdSource, AdSource.ad_id == Ad.id).where(
-            Ad.page_id == pid, Ad.is_active.is_(True), AdSource.source == "meta_library")).all():
-        src_ids = {s.source_ad_id for s in db.scalars(select(AdSource).where(AdSource.ad_id == ad.id))}
-        if src_ids & seen:
-            continue
-        ad.verify_misses = (ad.verify_misses or 0) + 1
-        if ad.verify_misses >= 2:
-            ad.is_active, ad.inactive_at = False, now
-            out["stopped"] += 1
-            touched.add(ad.product_id)
-            publish("AD_STOPPED", {"ad_id": ad.id, "page_id": pid}, product_id=ad.product_id, db=db)
-        else:
-            out["suspect"] += 1
-    db.commit()
 
 
 def freshness(ts: datetime | None) -> str:

@@ -14,16 +14,14 @@ Canonical record shapes (what every adapter / CSV / webhook must produce):
                funnel, sell_price, unit_cost, started_at, ended_at, spend, impressions, clicks,
                landing_views, atc, checkout, purchase, revenue, confirmed_orders, shipped, delivered,
                refused, returned, ads_submitted, ads_rejected
-  product_signal: product_code | product_name, search_trend, keyword_competition   (Semrush / Google Trends)
+  product_signal: product_code | product_name, search_trend, keyword_competition   (Semrush / keyword tools)
 """
 import csv
 import hashlib
 import io
-import random
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from urllib.parse import urlparse
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -32,37 +30,6 @@ from . import enrichment as E
 from .entity_resolution import resolve_product
 
 ENTITY_TYPES = ["ad", "comment", "order", "store", "experiment", "product_signal"]
-
-# ------------------------------------------------------------ Provider catalogue (§3.1)
-PROVIDERS = {
-    # group: ad_intel
-    "minea": ("Minea", "paid_provider_api", "ad_intel"),
-    "foreplay": ("Foreplay", "paid_provider_api", "ad_intel"),
-    "bigspy": ("BigSpy", "paid_provider_api", "ad_intel"),
-    "pipiads": ("PiPiAds", "paid_provider_api", "ad_intel"),
-    "demo_spy": ("Demo Spy Feed (simulated)", "paid_provider_api", "ad_intel"),
-    # transparency
-    "meta_ad_library": ("Meta Ad Library", "official_api", "transparency"),
-    "tiktok_creative_center": ("TikTok Creative Center", "official_api", "transparency"),
-    # web intel
-    "similarweb": ("Similarweb", "paid_provider_api", "web_intel"),
-    "semrush": ("Semrush", "paid_provider_api", "web_intel"),
-    # internal ads
-    "meta_ads": ("Meta Ads (own account)", "first_party_account", "internal_ads"),
-    "tiktok_ads": ("TikTok Ads (own account)", "first_party_account", "internal_ads"),
-    "google_ads": ("Google Ads (own account)", "first_party_account", "internal_ads"),
-    # business
-    "crm": ("CRM / Orders", "webhook", "business"),
-    "pancake": ("Pancake POS", "webhook", "business"),
-    "shipping": ("COD / Shipping carrier", "webhook", "business"),
-    # feedback
-    "comments": ("Comments / Reviews / Inbox", "webhook", "feedback"),
-    # generic
-    "generic_rest": ("Generic REST API (field mapping)", "paid_provider_api", "ad_intel"),
-    "csv": ("CSV Import", "csv_import", "business"),
-    "manual": ("Manual URL import", "manual_url", "ad_intel"),
-}
-
 
 # Default connectors (Unified Collector). Only the public Meta Ad Library works without credentials;
 # the others are templates the admin fills in (Data & Connectors screen). No simulated sources.
@@ -77,19 +44,45 @@ DEFAULT_CONNECTORS = [
     ("http", "Pipiads API (Enterprise)", False, 60, 2, {"source": "pipiads"}),
     ("export", "Export · pipiads", True, 5, 2, {"source": "pipiads"}),
     ("export", "Export · minea", True, 5, 2, {"source": "minea"}),
+    # the TikTok ad volume source: ≤ 500 top ads per country, MP4 + likes, incl. SA / AE. Runs on request headers pasted
+    # from DevTools (ads.tiktok.com/business/creativecenter, logged in to a free account) — the app never signs requests
+    ("tiktok_top_ads", "TikTok Creative Center · Top Ads (free account) — US/EU/SA/AE", False, 360, 2,
+     {"countries": "US,GB,DE,FR,AU,SA,AE", "period": 30, "order_by": "ctr", "pages": 25, "details": 20}),
+    # ad libraries beyond Meta (EU transparency) — collector/adapters/ad_libraries.py
+    # Snap searches brand names only and rate-limits non-EU IPs (429): opt-in, used for brand / competitor lookups
+    ("snapchat_ads_library", "Snapchat Ads Library (free) — theo tên brand", False, None, 2, {"countries": "FR,DE"}),
+    # no proxy needed (X-CCL-STR session, see the adapter); covers ads delivered in the EU/EEA/UK/CH
+    ("tiktok_ad_library", "TikTok Ad Library (free) — quảng cáo đối thủ EU/UK", True, None, 2, {"countries": "all", "days": 90, "details": 24}),
+    # China source searched together with the ads (supplier price → margin) — collector/adapters/marketplaces.py
+    ("aliexpress_search", "AliExpress (free) — giá nhập & đã bán", True, None, 2, {}),
+    # Apify actors with typed mappings (collector/adapters/apify.py) — token from APIFY_TOKEN in .env, billed per item:
+    # live search only (no schedule) and capped per search by `max_items`
+    ("apify_1688", "1688 — giá xưởng TQ (Apify)", True, None, 2, {}),
+    ("apify_taobao", "Taobao / Tmall — giá & đã bán TQ (Apify)", True, None, 2, {}),
+    ("apify_tiktok_top_ads", "TikTok Ads · Creative Center Top Ads (Apify) — PH/US/EU/ME", True, None, 2, {}),
+    # same TikTok Ad Library as the free connector above (EU/UK only), slower: off unless the free one breaks
+    ("apify_tiktok_ads", "TikTok Ads · Ad Library EU/UK (Apify)", False, None, 2, {}),
 ]
+FREE_READY = ("meta_library", "export", "snapchat_ads_library", "tiktok_ad_library",
+              "aliexpress_search", "apify_1688", "apify_taobao", "apify_tiktok_top_ads", "apify_tiktok_ads")
 
 
 def ensure_default_connectors(db: Session):
-    if db.scalar(select(Connector.id).where(Connector.adapter.is_not(None)).limit(1)):
-        return
+    """Seed default connectors; on existing DBs only add defaults that are missing (matched by name)."""
     from ..collector.factory import ConnectorFactory
 
+    have = set(db.scalars(select(Connector.name).where(Connector.adapter.is_not(None))))
     for adapter, name, enabled, every, tier, cfg in DEFAULT_CONNECTORS:
+        if name in have:
+            continue
         cls = ConnectorFactory.connectors[adapter]
-        db.add(Connector(name=name, provider=adapter, adapter=adapter, kind=cls.kind, group=cls.group, config=cfg,
-                         enabled=enabled, every_minutes=every, tier=tier,
-                         status="ready" if adapter in ("meta_library", "export") else "not_configured"))
+        db.add(Connector(name=name, provider=adapter, adapter=adapter, kind=cls.kind, group=cls.group,
+                         config=cfg, enabled=enabled, every_minutes=every, tier=tier,
+                         status="ready" if adapter in FREE_READY else "not_configured"))
+    # adapters dropped from the code (Shopify stores …): switched off, rows kept
+    for c in db.scalars(select(Connector).where(Connector.adapter.is_not(None), Connector.enabled.is_(True))):
+        if c.adapter not in ConnectorFactory.connectors:
+            c.enabled, c.status = False, "not_configured"
     db.flush()
 
 
@@ -434,98 +427,6 @@ CSV_TEMPLATES = {
     "experiment": "product_code,product_name,name,market,platform,creative,creative_type,angle,offer,funnel,sell_price,unit_cost,started_at,ended_at,spend,impressions,clicks,landing_views,atc,checkout,purchase,revenue,confirmed_orders,shipped,delivered,refused,returned,ads_submitted,ads_rejected",
     "product_signal": "product_code,product_name,search_trend,keyword_competition",
 }
-
-
-# ------------------------------------------------------------ Adapters
-class ConnectorNotConfigured(Exception):
-    pass
-
-
-def _get_path(obj, path: str):
-    for part in path.split("."):
-        if obj is None:
-            return None
-        if isinstance(obj, list):
-            obj = obj[int(part)] if part.isdigit() and int(part) < len(obj) else None
-        else:
-            obj = obj.get(part)
-    return obj
-
-
-def fetch_meta_ad_library(cfg: dict) -> list[dict]:
-    """Official Meta Ad Library API (ads_archive). Needs an access token with ads_read."""
-    token = cfg.get("access_token")
-    if not token:
-        raise ConnectorNotConfigured("Thiếu access_token (Meta Ad Library API).")
-    params = {
-        "access_token": token,
-        "search_terms": cfg.get("search_terms", ""),
-        "ad_reached_countries": str(cfg.get("countries", ["SA"])).replace("'", '"'),
-        "ad_active_status": "ACTIVE",
-        "ad_type": "ALL",
-        "fields": "id,page_name,ad_creative_bodies,ad_creative_link_titles,ad_creative_link_captions,"
-                  "ad_delivery_start_time,ad_delivery_stop_time,ad_snapshot_url,publisher_platforms",
-        "limit": cfg.get("limit", 100),
-    }
-    r = httpx.get(f"https://graph.facebook.com/{cfg.get('api_version', 'v21.0')}/ads_archive", params=params, timeout=60)
-    r.raise_for_status()
-    out = []
-    for a in r.json().get("data", []):
-        body = (a.get("ad_creative_bodies") or [""])[0]
-        title = (a.get("ad_creative_link_titles") or [None])[0]
-        out.append({
-            "external_id": a["id"], "source": "meta_ad_library", "platform": "meta", "advertiser": a.get("page_name"),
-            "product_name": title or body[:60], "ad_text": body, "landing_url": (a.get("ad_creative_link_captions") or [None])[0],
-            "country": (cfg.get("countries") or ["SA"])[0], "media_url": a.get("ad_snapshot_url"),
-            "first_seen": a.get("ad_delivery_start_time"), "last_seen": a.get("ad_delivery_stop_time") or datetime.utcnow().isoformat(),
-            "is_active": not a.get("ad_delivery_stop_time"),
-        })
-    return out
-
-
-def fetch_generic_rest(cfg: dict) -> list[dict]:
-    """Config: {url, method?, headers?, params?, items_path, entity_type, mapping: {canonical_field: 'dotted.path'}}"""
-    if not cfg.get("url") or not cfg.get("mapping"):
-        raise ConnectorNotConfigured("Cần cấu hình url + mapping (xem docs connector).")
-    r = httpx.request(cfg.get("method", "GET"), cfg["url"], headers=cfg.get("headers"), params=cfg.get("params"),
-                      json=cfg.get("body"), timeout=60)
-    r.raise_for_status()
-    items = _get_path(r.json(), cfg["items_path"]) if cfg.get("items_path") else r.json()
-    return [{k: _get_path(it, path) for k, path in cfg["mapping"].items()} for it in (items or [])]
-
-
-def fetch_demo_spy(db: Session, cfg: dict) -> list[dict]:
-    """Simulated spy-tool feed so the whole pipeline can be exercised without paid API keys."""
-    from ..seed import simulate_daily_feed
-
-    return simulate_daily_feed(db, random.Random(cfg.get("seed")))
-
-
-def sync_connector(db: Session, c: Connector) -> int:
-    cfg = c.config or {}
-    entity_type = cfg.get("entity_type", "ad")
-    try:
-        if c.provider == "meta_ad_library":
-            records = fetch_meta_ad_library(cfg)
-        elif c.provider == "demo_spy":
-            records = fetch_demo_spy(db, cfg)
-        elif cfg.get("url") or c.provider == "generic_rest":
-            records = fetch_generic_rest(cfg)
-        elif c.kind in ("webhook", "csv_import", "manual_url"):
-            raise ConnectorNotConfigured("Connector dạng push — dữ liệu vào qua webhook / CSV / manual import.")
-        else:
-            raise ConnectorNotConfigured(
-                f"{c.name}: thêm API credentials + url/mapping trong config (dùng adapter Generic REST) "
-                "hoặc import CSV export của tool.")
-        n = store_raw(db, entity_type, records, c.id)
-        c.status, c.last_error, c.last_sync_at, c.last_sync_count = "ok", None, datetime.utcnow(), n
-        return n
-    except ConnectorNotConfigured as ex:
-        c.status, c.last_error = "not_configured", str(ex)
-        return 0
-    except (httpx.HTTPError, ValueError, KeyError) as ex:
-        c.status, c.last_error = "error", f"{type(ex).__name__}: {ex}"
-        return 0
 
 
 def manual_url_record(url: str, product_name: str, country: str | None, price: float | None, advertiser: str | None,

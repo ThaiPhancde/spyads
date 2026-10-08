@@ -5,18 +5,18 @@ from datetime import date, datetime, timedelta
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
-from .db import Base, engine, get_db
-from .markets import ad_scope_filter, product_in_scope
-from .models import (ad_in_country, Ad, Advertiser, AdvertiserDailySnapshot, Alert, Comment, Connector, CreativeDailySnapshot, Experiment,
-                     LifecycleEvent, MarketDailySnapshot, Order, PipelineRun, Product, ProductDailySnapshot, RawRecord, Store)
+from .db import Base, ReadOnlyGets, engine, get_db
+from .markets import ad_scope_filter, expand, product_in_scope
+from .models import (ad_in_country, Ad, Advertiser, AdvertiserDailySnapshot, Alert, Comment, Connector, Experiment,
+                     LifecycleEvent, Order, Product, ProductDailySnapshot, Store)
 from .services import agent, llm
-from .services.connectors import (CSV_TEMPLATES, ENTITY_TYPES, PROVIDERS, ensure_default_connectors, manual_url_record,
-                                  normalize_pending, parse_csv, store_raw, sync_connector)
+from .services.connectors import (CSV_TEMPLATES, ENTITY_TYPES, ensure_default_connectors, manual_url_record, normalize_pending,
+                                  parse_csv, store_raw)
 from .services.decision import BENCH, FAILURE_TYPES, LIFECYCLE_STATES, TH, TRANSITIONS, experiment_metrics, learning_profile, transition
 from .services.engine import is_hidden_winner, is_potential_winner, score_all
 from .services.enrichment import ASPECTS, analyze_comments
@@ -25,7 +25,33 @@ from .services.pipeline import run_pipeline
 from .services.scoring import confidence_label, win_label
 
 app = FastAPI(title="Market Intelligence OS", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+class AdminGuard:
+    """ASGI middleware: every write (non GET/HEAD/OPTIONS) needs `X-Admin-Token` = ADMIN_TOKEN (.env). Fails closed when
+    unset. /api/ingest/* and /api/webhooks/* use X-Ingest-Token instead; /api/health stays open for probes."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+            path = scope["path"]
+            if not path.startswith(("/api/ingest/", "/api/webhooks/")) and path != "/api/health":
+                want = os.getenv("ADMIN_TOKEN")
+                got = next((v.decode() for k, v in scope["headers"] if k == b"x-admin-token"), None)
+                if not want:
+                    return await JSONResponse({"detail": "ADMIN_TOKEN not configured"}, status_code=503)(scope, receive, send)
+                if got != want:
+                    return await JSONResponse({"detail": "invalid admin token (header X-Admin-Token)"}, status_code=401)(scope, receive, send)
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(ReadOnlyGets)
+app.add_middleware(AdminGuard)
+# CORS last = outermost, so 401/503 from the guard still carry CORS headers for the browser
+app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in os.getenv("WEB_ORIGIN", "http://localhost:3000").split(",") if o.strip()],
+                   allow_methods=["*"], allow_headers=["*"])
 
 
 from .routers.intel import router as intel_router  # noqa: E402
@@ -43,14 +69,34 @@ async def _startup():
     from .realtime import scheduler_loop
 
     logging.basicConfig(level=logging.INFO)
+    for noisy in ("httpx", "httpcore"):  # one INFO line per request, with the full (signed) CDN URL — drowns real logs
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     Base.metadata.create_all(engine)
     auto_migrate()
     with SessionLocal() as db:
         ensure_default_connectors(db)
-        from .services import adsignals
+        from sqlalchemy import update
 
+        from .services import adsignals
+        from .services.engine import rescore_products
+
+        # repair: worldwide ("ALL") searches used to store country "AL" (Albania). No-op once clean.
+        bad = db.scalars(select(Ad).where(Ad.country == "AL", ad_in_country("ALL"))).all()
+        for a in bad:
+            a.country, a.countries = None, [c for c in a.countries or [] if c != "AL"]
+        for m in (Product, Advertiser, Store):
+            db.execute(update(m).where(m.country == "AL").values(country=None))
+        if bad:
+            rescore_products(db, {a.product_id for a in bad if a.product_id})
+
+        from . import platforms
+
+        platforms.backfill(db)  # rows from before network/channel existed; the scheduler's first full re-score picks them up
         adsignals.refresh(db)  # per-ad force / variation / target-market flags (cheap; keeps them in sync with .env)
         db.commit()
+    from .media import requeue_lost
+
+    logging.getLogger(__name__).info("media: %s lost creatives re-queued", requeue_lost())
     enqueue_pending()
     if os.getenv("DISABLE_SCHEDULER", "").lower() not in ("1", "true"):
         app.state.scheduler = asyncio.create_task(scheduler_loop())
@@ -72,10 +118,16 @@ def product_card(p: Product) -> dict:
         "growth_7d": f.get("creative_growth_7d", 0), "stores": f.get("store_count", 0), "traffic_growth": f.get("traffic_growth"),
         "refusal_rate": f.get("refusal_rate"), "roas": f.get("roas"), "tags": p.tags or [],
         "first_seen_at": p.first_seen_at, "last_seen_at": p.last_seen_at, "hidden_winner": is_hidden_winner(p),
+        **platform_signals(f),
     }
 
 
 # ============================================================ meta
+from .platforms import catalogue as platforms_catalogue
+from .models import ADS_ONLY
+from .routers.intel import platform_signals
+
+
 @app.get("/api/meta")
 def meta(db: Session = Depends(get_db)):
     countries = sorted({c for p in db.scalars(select(Product)).all() for c in (p.features or {}).get("markets", [])})
@@ -84,22 +136,28 @@ def meta(db: Session = Depends(get_db)):
 
     countries = _targets()
     return {"countries": countries, "regions": {r: {"label": REGION_LABEL[r], "countries": REGIONS[r]} for r in REGIONS}, "categories": cats, "lifecycle_states": LIFECYCLE_STATES, "transitions": {k: sorted(v) for k, v in TRANSITIONS.items()},
-            "failure_types": FAILURE_TYPES, "aspects": ASPECTS, "recommendations": ["TEST", "WATCH", "HOLD", "ITERATE", "SCALE", "STOP"],
-            "thresholds": TH, "benchmarks": BENCH, "llm": llm.available(), "llm_model": llm.MODEL if llm.available() else None,
-            "entity_types": ENTITY_TYPES}
+            "failure_types": FAILURE_TYPES, "aspects": ASPECTS, "recommendations": ["TEST_NOW", "TEST", "WATCH", "REVIEW", "SKIP", "SCALE", "HOLD", "ITERATE", "STOP"],
+            "thresholds": TH, "benchmarks": BENCH, "llm": llm.available(), "llm_model": llm.model() if llm.available() else None,
+            "entity_types": ENTITY_TYPES, "platforms": platforms_catalogue()}
 
 
 # ============================================================ §22 Daily Pulse
 @app.get("/api/dashboard/pulse")
 def pulse(country: str | None = None, db: Session = Depends(get_db)):
-    products = [p for p in db.scalars(select(Product)).all() if product_in_scope(p, country)]
+    from .routers.intel import cached
+
+    return cached(("pulse", country), lambda: _pulse(country, db))
+
+
+def _pulse(country: str | None, db: Session) -> dict:
+    products = [p for p in db.scalars(select(Product)).all() if p.category != "non_product" and product_in_scope(p, country)]
     since = datetime.utcnow() - timedelta(days=1)
-    ad_q = select(Ad).where(Ad.is_internal.is_(False), Ad.first_seen_at > since)
+    ad_q = select(Ad).where(Ad.is_internal.is_(False), ADS_ONLY, Ad.first_seen_at > since)
     _f = ad_scope_filter(country)
     if _f is not None:
         ad_q = ad_q.where(_f)
     new_ads = db.scalars(ad_q).all()
-    adv_first = db.execute(select(Ad.advertiser_id, func.min(Ad.first_seen_at)).where(Ad.is_internal.is_(False))
+    adv_first = db.execute(select(Ad.advertiser_id, func.min(Ad.first_seen_at)).where(Ad.is_internal.is_(False), ADS_ONLY)
                            .group_by(Ad.advertiser_id)).all()
     new_adv_ids = {a for a, t in adv_first if t and t > since}
     if country:
@@ -123,7 +181,9 @@ def pulse(country: str | None = None, db: Session = Depends(get_db)):
     patt = sum(1 for o in prev_orders if o.status in ("delivered", "refused", "failed", "returned"))
     pref = sum(1 for o in prev_orders if o.status == "refused")
 
-    hidden = sorted([p for p in products if is_hidden_winner(p)], key=lambda p: -p.rare_winner_score)
+    from .services import hidden as _hidden
+
+    hidden = [r["product"] for r in _hidden.compute(db, country)]
     alerts = db.scalars(select(Alert).order_by(Alert.created_at.desc(), Alert.id.desc()).limit(8)).all()
     trend = db.execute(select(ProductDailySnapshot.date, func.sum(ProductDailySnapshot.new_ads), func.sum(ProductDailySnapshot.active_ads))
                        .group_by(ProductDailySnapshot.date).order_by(ProductDailySnapshot.date)).all()
@@ -146,47 +206,6 @@ def pulse(country: str | None = None, db: Session = Depends(get_db)):
     }
 
 
-# ============================================================ Market Radar
-@app.get("/api/markets/radar")
-def market_radar(db: Session = Depends(get_db)):
-    last = db.scalar(select(func.max(MarketDailySnapshot.date)))
-    if not last:
-        return {"date": None, "rows": [], "countries": []}
-    def at(d):
-        return {(s.country, s.category): s for s in db.scalars(select(MarketDailySnapshot).where(MarketDailySnapshot.date == d))}
-    now, w1, w4 = at(last), at(last - timedelta(days=7)), at(last - timedelta(days=28))
-    rows = []
-    for key, s in now.items():
-        prev, old = w1.get(key), w4.get(key)
-        rows.append({
-            "country": s.country, "category": s.category, "products": s.products, "active_ads": s.active_ads,
-            "advertisers": s.advertisers, "potential_winners": s.potential_winners, "hidden_winners": s.hidden_winners,
-            "avg_opportunity": s.avg_opportunity,
-            "ads_growth_7d": round(s.active_ads / prev.active_ads - 1, 3) if prev and prev.active_ads else None,
-            "ads_growth_28d": round(s.active_ads / old.active_ads - 1, 3) if old and old.active_ads else None,
-            "advertiser_growth_7d": round(s.advertisers / prev.advertisers - 1, 3) if prev and prev.advertisers else None,
-        })
-    rows.sort(key=lambda r: -(r["ads_growth_7d"] or 0))
-    countries = defaultdict(lambda: Counter())
-    for r in rows:
-        c = countries[r["country"]]
-        for k in ("products", "active_ads", "advertisers", "potential_winners", "hidden_winners"):
-            c[k] += r[k]
-    series = db.execute(select(MarketDailySnapshot.date, MarketDailySnapshot.country, func.sum(MarketDailySnapshot.active_ads))
-                        .where(MarketDailySnapshot.date >= last - timedelta(days=30))
-                        .group_by(MarketDailySnapshot.date, MarketDailySnapshot.country)).all()
-    ts = defaultdict(dict)
-    for d, c, n in series:
-        ts[d.isoformat()][c] = n
-    funnel_by_country: dict[str, Counter] = defaultdict(Counter)
-    for countries_json, primary, fn in db.execute(select(Ad.countries, Ad.country, Ad.funnel).where(Ad.is_active.is_(True), Ad.is_internal.is_(False))):
-        for c in set((countries_json or []) + ([primary] if primary else [])):
-            funnel_by_country[c][fn or "other"] += 1
-    return {"date": last.isoformat(), "rows": rows, "funnels": {k: dict(v) for k, v in funnel_by_country.items()},
-            "countries": sorted(({"country": k, **v} for k, v in countries.items()), key=lambda x: -x["active_ads"]),
-            "series": [{"date": d, **v} for d, v in sorted(ts.items())]}
-
-
 # ============================================================ Product Explorer
 @app.get("/api/products")
 def list_products(q: str | None = None, country: str | None = None, category: str | None = None,
@@ -194,50 +213,112 @@ def list_products(q: str | None = None, country: str | None = None, category: st
                   max_advertisers: int | None = None, min_confidence: float | None = None, saturation_state: str | None = None,
                   hidden_only: bool = False, sort: str = "opportunity_score", order: str = "desc",
                   limit: int = Query(50, le=500), offset: int = 0, db: Session = Depends(get_db)):
-    rows = []
-    for p in db.scalars(select(Product)).all():
-        f = p.features or {}
-        if q and q.lower() not in p.canonical_name.lower() and q.upper() != p.product_code and not any(q.lower() in a.name.lower() for a in p.aliases):
-            continue
-        if not product_in_scope(p, country):
-            continue
-        if category and p.category != category:
-            continue
-        if recommendation and p.recommendation != recommendation:
-            continue
-        if lifecycle and p.lifecycle_status != lifecycle:
-            continue
-        if min_win is not None and p.win_score < min_win:
-            continue
-        if max_advertisers is not None and f.get("advertiser_count", 0) > max_advertisers:
-            continue
-        if min_confidence is not None and p.confidence_score < min_confidence:
-            continue
-        if saturation_state and p.saturation_state != saturation_state:
-            continue
-        if hidden_only and not is_hidden_winner(p):
-            continue
-        rows.append(product_card(p))
+    from .models import ProductAlias
+
+    pq = select(Product)
+    if q:
+        pq = pq.where(or_(Product.canonical_name.ilike(f"%{q}%"), Product.product_code == q.upper(),
+                          Product.id.in_(select(ProductAlias.product_id).where(ProductAlias.name.ilike(f"%{q}%")))))
+    if not country:  # ponytail: in_target NULL (never scored) counts as out of scope
+        pq = pq.where(Product.in_target.is_(True))
+    elif (codes := expand(country)) is not None:  # superset pre-filter on the JSON text; product_in_scope() below is exact
+        pq = pq.where(or_(Product.country.in_(codes), *[cast(Product.features, String).like(f'%"{c}"%') for c in codes]))
+    pq = pq.where(Product.category == category) if category else pq.where(or_(Product.category.is_(None), Product.category != "non_product"))
+    for col, val in ((Product.recommendation, recommendation), (Product.lifecycle_status, lifecycle), (Product.saturation_state, saturation_state)):
+        if val:
+            pq = pq.where(col == val)
+    if min_win is not None:
+        pq = pq.where(Product.win_score >= min_win)
+    if min_confidence is not None:
+        pq = pq.where(Product.confidence_score >= min_confidence)
+    col = Product.__table__.c.get({"name": "canonical_name"}.get(sort, sort))
+    if col is not None and not country and max_advertisers is None and not hidden_only:  # fast path: everything in SQL
+        total = db.scalar(select(func.count()).select_from(pq.subquery()))
+        page = db.scalars(pq.order_by((col.desc() if order == "desc" else col.asc()).nullslast(), Product.id).offset(offset).limit(limit)).all()
+        return {"total": total, "rows": [product_card(p) for p in page]}
+    rows = [product_card(p) for p in db.scalars(pq)
+            if product_in_scope(p, country) and (max_advertisers is None or (p.features or {}).get("advertiser_count", 0) <= max_advertisers)
+            and (not hidden_only or is_hidden_winner(p))]
     with_val = sorted((r for r in rows if r.get(sort) is not None), key=lambda r: r[sort], reverse=(order == "desc"))
     rows = with_val + [r for r in rows if r.get(sort) is None]
     return {"total": len(rows), "rows": rows[offset: offset + limit]}
 
 
 @app.get("/api/products/hidden-winners")
-def hidden_winners(tag: str | None = None, db: Session = Depends(get_db)):
-    rows = [product_card(p) for p in db.scalars(select(Product)).all() if is_hidden_winner(p) and product_in_scope(p, None)]
-    if tag:
-        rows = [r for r in rows if tag in r["tags"]]
-    rows.sort(key=lambda r: -r["rare_winner_score"])
-    tags = Counter(t for r in rows for t in r["tags"])
-    # also show "near misses" so the team sees what is about to qualify
-    near = [product_card(p) for p in db.scalars(select(Product)).all()
-            if not is_hidden_winner(p) and p.rare_winner_score >= 45 and (p.features or {}).get("advertiser_count", 99) <= 25]
-    near.sort(key=lambda r: -r["rare_winner_score"])
-    return {"rows": rows, "tags": dict(tags), "near_misses": near[:10]}
+def hidden_winners(tag: str | None = None, scope: str | None = None, limit: int = Query(50, le=500), offset: int = 0,
+                   db: Session = Depends(get_db)):
+    """Few sellers + real winning signals (long-running / duplicated / multiplying ads), computed live from the ads."""
+    from .routers.intel import covers, landing_links
+    from .routers.intel import cached
+    from .routers.intel import product_card as media_card
+    from .services import hidden
+
+    allrows = cached(("hidden", scope), lambda: hidden.compute(db, scope))
+    tags = Counter(t for r in allrows for t in r["tags"])  # counts before the tag filter → every chip shows its number
+    tagged = [r for r in allrows if not tag or tag in r["tags"]]
+    rows = tagged[offset: offset + limit]
+    prods = [r["product"] for r in rows]
+    cov, lp = covers(db, prods), landing_links(db, prods)
+    out = [media_card(r["product"], cov.get(r["product"].id)) | {k: v for k, v in r.items() if k != "product"}
+           | {"landing_url": lp.get(r["product"].id)} for r in rows]
+    return {"rows": out, "total": len(allrows), "has_more": offset + len(rows) < len(tagged), "tags": dict(tags), "tag_labels": hidden.TAGS}
 
 
 # ============================================================ Product 360
+def mkt_summary(ads: list[Ad], advs: dict) -> dict:
+    """What a marketer checks first: floor price per marketplace, supplier price → margin, engagement on the ads,
+    marketplace proof (reviews / sold / rank), how long the ads have run and where they send traffic."""
+    from urllib.parse import urlparse
+
+    from .services.enrichment import to_usd
+
+    listings = [a for a in ads if a.channel == "commerce"]
+    spy = [a for a in ads if a.channel != "commerce" and not a.is_internal]
+    usd = lambda a: to_usd(a.price, a.currency) if a.price else None
+    floor: dict[str, dict] = {}
+    for a in listings:
+        u = usd(a)
+        if u and (a.network not in floor or u < floor[a.network]["usd"]):
+            floor[a.network] = {"network": a.network, "price": a.price, "currency": a.currency, "usd": round(u, 2),
+                                "title": a.title or a.raw_product_name, "url": a.landing_url, "rating": a.rating,
+                                "reviews": a.review_count, "sold": a.sold_count}
+    retail = sorted(u for a in listings if a.network != "aliexpress" and (u := usd(a)))
+    ad_prices = sorted(u for a in spy if (u := usd(a)))
+    supplier = floor.get("aliexpress", {}).get("usd")
+    sell = (ad_prices or retail or [None])[len(ad_prices or retail or [None]) // 2]
+    eng = lambda a: (a.likes or 0) + 3 * (a.comments_count or 0) + 5 * (a.shares or 0)
+    top = sorted((a for a in spy if eng(a) or a.views), key=lambda a: (eng(a), a.views or 0), reverse=True)[:5]
+    now = datetime.utcnow()
+    days = [((a.last_seen_at if not a.is_active else now) - a.first_seen_at).days for a in spy if a.first_seen_at]
+    domains = Counter(urlparse(a.landing_url).netloc.removeprefix("www.") for a in spy if a.landing_url)
+    return {
+        "floor": sorted(floor.values(), key=lambda r: r["usd"]),
+        "floor_usd": min((r["usd"] for r in floor.values() if r["network"] != "aliexpress"), default=None),
+        "supplier_usd": supplier,
+        "sell_usd": round(sell, 2) if sell else None,  # median price competitors advertise (else retail median)
+        "ad_price_range_usd": [round(ad_prices[0], 2), round(ad_prices[-1], 2)] if ad_prices else None,
+        "margin_est": round(1 - supplier * 1.6 / sell, 3) if supplier and sell else None,  # landed ≈ supplier × 1.6
+        "engagement": {"likes": sum(a.likes or 0 for a in spy), "comments": sum(a.comments_count or 0 for a in spy),
+                       "shares": sum(a.shares or 0 for a in spy), "views": sum(a.views or 0 for a in ads),
+                       "page_likes": max((a.page_likes or 0 for a in spy), default=0) or None},
+        "marketplace": {"listings": len(listings), "reviews": sum(a.review_count or 0 for a in listings),
+                        "sold": sum(a.sold_count or 0 for a in listings),
+                        "rating": round(sum(a.rating for a in listings if a.rating) / max(1, sum(1 for a in listings if a.rating)), 2)
+                        if any(a.rating for a in listings) else None},
+        "ads": {"total": len(spy), "active": sum(1 for a in spy if a.is_active),
+                "advertisers": len({a.advertiser_id for a in spy} - {None}),
+                "longest_days": max(days, default=None), "median_days": sorted(days)[len(days) // 2] if days else None,
+                "networks": dict(Counter(a.network or "meta" for a in spy)), "funnels": dict(Counter(a.funnel or "other" for a in spy)),
+                "reach": sum(a.reach or 0 for a in spy) or None},
+        "landing_domains": [{"domain": d, "ads": n} for d, n in domains.most_common(8)],
+        "top_ads": [{"id": a.id, "advertiser": advs[a.advertiser_id].name if a.advertiser_id in advs else None,
+                     "text": (a.ad_text or a.title or "")[:200], "likes": a.likes, "comments": a.comments_count, "shares": a.shares,
+                     "views": a.views, "network": a.network, "url": a.snapshot_url or a.landing_url, "active": a.is_active,
+                     "days": ((now if a.is_active else a.last_seen_at) - a.first_seen_at).days if a.first_seen_at else None}
+                    for a in top],
+    }
+
+
 @app.get("/api/products/{pid}")
 def product_360(pid: int, db: Session = Depends(get_db)):
     p = db.get(Product, pid)
@@ -292,6 +373,7 @@ def product_360(pid: int, db: Session = Depends(get_db)):
                     "aliases": [{"name": a.name, "source": a.source, "match_score": a.match_score} for a in p.aliases]},
         "features": {k: v for k, v in f.items() if not k.startswith("_")},
         "breakdown": f.get("_breakdown", {}), "derived": f.get("_scores", {}),
+        "mkt": mkt_summary(ads, advs),
         "market_performance": [{"country": c, "active_ads": n} for c, n in by_country.most_common()],
         "advertisers": advertisers[:50],
         "creatives": creative_lib,
@@ -309,7 +391,8 @@ def product_360(pid: int, db: Session = Depends(get_db)):
                       "events": [{"from": e.from_status, "to": e.to_status, "reason": e.reason, "at": e.created_at} for e in events]},
         "recent_ads": [{"id": a.id, "advertiser": advs[a.advertiser_id].name if a.advertiser_id in advs else None, "country": a.country,
                         "platform": a.platform, "text": a.ad_text, "price": a.price, "first_seen": a.first_seen_at,
-                        "active": a.is_active, "source": a.source, "landing_url": a.landing_url} for a in ads[:30]],
+                        "active": a.is_active, "source": a.source, "landing_url": a.landing_url}
+                       for a in [x for x in ads if x.channel != "commerce"][:30]],  # listings: own card (/ads?channel=commerce)
     }
 
 
@@ -337,7 +420,7 @@ def explain(pid: int, db: Session = Depends(get_db)):
     p = db.get(Product, pid)
     if not p:
         raise HTTPException(404)
-    return {"explanation": agent.explain_product(p), "engine": "claude" if llm.available() else "template"}
+    return {"explanation": agent.explain_product(p), "engine": llm.engine() if llm.available() else "template"}
 
 
 class MergeIn(BaseModel):
@@ -533,15 +616,23 @@ def analyze(body: AnalyzeIn):
 
 # ============================================================ Competitor Radar
 @app.get("/api/competitors")
-def competitors(country: str | None = None, watched_only: bool = False, db: Session = Depends(get_db)):
+def competitors(country: str | None = None, watched_only: bool = False, offset: int = 0, limit: int = Query(50, le=500),
+                db: Session = Depends(get_db)):
+    from .routers.intel import cached
+
+    rows = cached(("competitors", country, watched_only), lambda: _competitor_rows(country, watched_only, db))
+    return {"rows": rows[offset: offset + limit], "total": len(rows), "has_more": offset + limit < len(rows),
+            "scaling": sum(1 for r in rows if r["scaling"])}
+
+
+def _competitor_rows(country: str | None, watched_only: bool, db: Session) -> list[dict]:
     now = datetime.utcnow()
-    ads = db.scalars(select(Ad).where(Ad.is_internal.is_(False), Ad.advertiser_id.is_not(None))).all()
+    ads = db.scalars(select(Ad).where(Ad.is_internal.is_(False), ADS_ONLY, Ad.advertiser_id.is_not(None))).all()
     by = defaultdict(list)
     for a in ads:
         by[a.advertiser_id].append(a)
     advs = {a.id: a for a in db.scalars(select(Advertiser)).all()}
     products = {p.id: p for p in db.scalars(select(Product)).all()}
-    from .markets import expand
     from .models import ad_markets
 
     _codes = expand(country)
@@ -566,7 +657,7 @@ def competitors(country: str | None = None, watched_only: bool = False, db: Sess
             "scaling": n7 >= 8 and n7 >= 2 * max(p7, 1),
         })
     rows.sort(key=lambda r: (-int(r["scaling"]), -r["new_ads_7d"], -r["active_ads"]))
-    return {"rows": rows[:200], "total": len(rows), "scaling": sum(1 for r in rows if r["scaling"])}
+    return rows
 
 
 @app.get("/api/competitors/{aid}")
@@ -660,7 +751,7 @@ def alert_dict(a: Alert, db: Session | None = None) -> dict:
 
 
 @app.get("/api/alerts")
-def alerts(type: str | None = None, unread: bool = False, limit: int = 200, db: Session = Depends(get_db)):
+def alerts(type: str | None = None, unread: bool = False, limit: int = Query(200, le=500), db: Session = Depends(get_db)):
     q = select(Alert).order_by(Alert.created_at.desc(), Alert.id.desc())
     if type:
         q = q.where(Alert.type == type)
@@ -695,99 +786,7 @@ def learning(db: Session = Depends(get_db)):
     return learning_profile(db)
 
 
-# ============================================================ Connectors & data import (§3)
-def connector_dict(c: Connector) -> dict:
-    safe_cfg = {k: ("••••" if any(s in k.lower() for s in ("token", "key", "secret", "password")) and v else v) for k, v in (c.config or {}).items()}
-    return {"id": c.id, "name": c.name, "provider": c.provider, "kind": c.kind, "group": c.group, "enabled": c.enabled,
-            "status": c.status, "last_sync_at": c.last_sync_at, "last_sync_count": c.last_sync_count, "last_error": c.last_error,
-            "config": safe_cfg}
-
-
-@app.get("/api/connectors")
-def connectors(db: Session = Depends(get_db)):
-    raw_stats = dict(db.execute(select(RawRecord.entity_type, func.count(RawRecord.id)).group_by(RawRecord.entity_type)).all())
-    pending = db.scalar(select(func.count(RawRecord.id)).where(RawRecord.processed.is_(False)))
-    errors = db.scalars(select(RawRecord).where(RawRecord.error.is_not(None)).order_by(RawRecord.id.desc()).limit(10)).all()
-    return {"rows": [connector_dict(c) for c in db.scalars(select(Connector).order_by(Connector.group, Connector.name)).all()],
-            "providers": {k: {"name": v[0], "kind": v[1], "group": v[2]} for k, v in PROVIDERS.items()},
-            "raw_lake": {"by_type": raw_stats, "pending": pending,
-                         "recent_errors": [{"id": r.id, "entity_type": r.entity_type, "error": r.error} for r in errors]}}
-
-
-class ConnectorIn(BaseModel):
-    name: str | None = None
-    provider: str
-    config: dict = {}
-    enabled: bool = True
-
-
-@app.post("/api/connectors")
-def create_connector(body: ConnectorIn, db: Session = Depends(get_db)):
-    if body.provider not in PROVIDERS:
-        raise HTTPException(400, "unknown provider")
-    name, kind, group = PROVIDERS[body.provider]
-    c = Connector(name=body.name or name, provider=body.provider, kind=kind, group=group, config=body.config,
-                  enabled=body.enabled, status="ready" if body.config else "not_configured")
-    db.add(c)
-    db.commit()
-    return connector_dict(c)
-
-
-class ConnectorPatch(BaseModel):
-    config: dict | None = None
-    enabled: bool | None = None
-    name: str | None = None
-
-
-@app.patch("/api/connectors/{cid}")
-def update_connector(cid: int, body: ConnectorPatch, db: Session = Depends(get_db)):
-    c = db.get(Connector, cid)
-    if not c:
-        raise HTTPException(404)
-    if body.config is not None:
-        merged = dict(c.config or {})
-        for k, v in body.config.items():
-            if v != "••••":
-                merged[k] = v
-        c.config = merged
-        if c.status == "not_configured":
-            c.status = "ready"
-    if body.enabled is not None:
-        c.enabled = body.enabled
-    if body.name:
-        c.name = body.name
-    db.commit()
-    return connector_dict(c)
-
-
-@app.post("/api/connectors/{cid}/sync")
-def sync(cid: int, normalize: bool = True, db: Session = Depends(get_db)):
-    c = db.get(Connector, cid)
-    if not c:
-        raise HTTPException(404)
-    n = sync_connector(db, c)
-    stats = normalize_pending(db) if normalize and n else None
-    db.commit()
-    return {"connector": connector_dict(c), "fetched": n, "normalized": stats}
-
-
-@app.post("/api/connectors/{cid}/webhook")
-def webhook(cid: int, payload: dict, db: Session = Depends(get_db)):
-    """Body: {"entity_type": "order", "records": [...]} — CRM / Pancake / carrier / comment push."""
-    c = db.get(Connector, cid)
-    if not c:
-        raise HTTPException(404)
-    et = payload.get("entity_type")
-    recs = payload.get("records") or []
-    if et not in ENTITY_TYPES or not isinstance(recs, list):
-        raise HTTPException(400, f"entity_type ∈ {ENTITY_TYPES}, records: list")
-    n = store_raw(db, et, recs, c.id)
-    c.last_sync_at, c.last_sync_count, c.status = datetime.utcnow(), n, "ok"
-    stats = normalize_pending(db)
-    db.commit()
-    return {"received": n, "normalized": stats}
-
-
+# ============================================================ Data import (§3): CSV templates / upload, manual URL
 @app.get("/api/import/templates")
 def templates():
     return CSV_TEMPLATES
@@ -841,23 +840,6 @@ def pipeline(pull: bool = True, db: Session = Depends(get_db)):
     return {"id": run.id, "status": run.status, "steps": run.steps, "started_at": run.started_at, "finished_at": run.finished_at}
 
 
-@app.get("/api/pipeline/runs")
-def runs(db: Session = Depends(get_db)):
-    return [{"id": r.id, "status": r.status, "steps": r.steps, "started_at": r.started_at, "finished_at": r.finished_at}
-            for r in db.scalars(select(PipelineRun).order_by(PipelineRun.id.desc()).limit(20)).all()]
-
-
-@app.post("/api/admin/demo-data")
-def demo_data():
-    """Simulated data for UI testing only — refused unless ALLOW_DEMO_DATA=1. Demo products are flagged is_demo."""
-    if os.getenv("ALLOW_DEMO_DATA") != "1":
-        raise HTTPException(403, "Demo data disabled (ALLOW_DEMO_DATA=1 to enable)")
-    from .seed import seed
-
-    seed(reset=True)
-    return {"ok": True}
-
-
 # ============================================================ AI Agent
 class AskIn(BaseModel):
     question: str
@@ -870,4 +852,8 @@ def ask(body: AskIn, db: Session = Depends(get_db)):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "llm": llm.available()}
+    import time
+
+    cooling = time.time() < getattr(llm, "_cool_until", 0)
+    return {"ok": True, "llm": llm.available(),
+            "llm_reason": "disabled" if llm._disabled else f"rate-limited, retry in {int(llm._cool_until - time.time())}s" if cooling else None}

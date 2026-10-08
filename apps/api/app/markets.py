@@ -8,28 +8,33 @@ from __future__ import annotations
 
 import os
 
-REGIONS: dict[str, list[str]] = {
+REGIONS: dict[str, list[str]] = {  # order = priority order (UI chips, region tables)
+    "PH": ["PH"],
     "ME": ["SA", "AE", "KW", "QA", "OM", "BH", "JO", "EG", "IQ"],
     "US": ["US"],
     "EU": ["GB", "DE", "FR", "IT", "ES", "NL", "BE", "AT", "SE", "DK", "FI", "IE", "PT", "PL", "CZ", "RO", "GR"],
     "AU": ["AU", "NZ"],
+    "VN": ["VN"],
     "WW": ["ALL"],  # ads found by worldwide Ad Library searches (country not disclosed)
 }
-REGION_LABEL = {"ME": "Trung Đông", "US": "Mỹ", "EU": "Châu Âu (+UK)", "AU": "Úc / NZ", "WW": "Toàn cầu"}
-DEFAULT_TARGETS = [c for r in ("ME", "US", "EU", "AU") for c in REGIONS[r]]
+REGION_LABEL = {"PH": "Philippines", "ME": "Trung Đông", "US": "Mỹ", "EU": "Châu Âu (+UK)", "AU": "Úc / NZ", "VN": "Việt Nam", "WW": "Toàn cầu"}
+DEFAULT_TARGETS = [c for r in ("PH", "ME", "US", "EU", "AU", "VN") for c in REGIONS[r]]
+
+
+def priority_markets() -> set[str]:
+    """Markets ranked above every other one (PRIORITY_MARKETS in .env, default PH)."""
+    return {c.strip().upper() for c in os.getenv("PRIORITY_MARKETS", "PH").split(",") if c.strip()}
+
+
+def priority_boost(markets: list[str]) -> float:
+    """Opportunity-score bonus for products running in a priority market."""
+    return float(os.getenv("PRIORITY_BOOST", "15")) if priority_markets() & {m.upper() for m in markets if m} else 0.0
 
 
 def targets() -> list[str]:
     raw = os.getenv("TARGET_MARKETS", "")
     codes = [c.strip().upper() for c in raw.split(",") if c.strip()]
     return codes or DEFAULT_TARGETS
-
-
-def region_of(code: str | None) -> str | None:
-    for r, cs in REGIONS.items():
-        if code in cs:
-            return r
-    return None
 
 
 def expand(scope: str | None) -> list[str] | None:
@@ -42,6 +47,12 @@ def expand(scope: str | None) -> list[str] | None:
     if s in REGIONS:
         return [c for c in REGIONS[s] if c in targets() or c == "ALL"] or REGIONS[s]
     return [c.strip() for c in s.split(",") if c.strip()]
+
+
+def known_country(a) -> str | None:
+    """First real ISO-2 code of an Ad / AdRecord; 'ALL' (worldwide search) is a scope, not a country."""
+    return next((c.upper()[:2] for c in [getattr(a, "country", None), *(getattr(a, "countries", None) or [])]
+                 if c and c.upper() != "ALL"), None)
 
 
 def ad_in_targets(markets: list[str]) -> bool:

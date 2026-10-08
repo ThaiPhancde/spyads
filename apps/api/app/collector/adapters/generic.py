@@ -6,7 +6,7 @@ import csv
 import io
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -35,8 +35,13 @@ ALIASES = {
     "views": ["views", "playcount", "impressions", "viewcount"],
     "price": ["price", "productprice"],
     "currency": ["currency"],
+    "sold": ["sold", "soldcount", "sales", "salescount", "monthsold", "monthlysales", "tradecount"],
     "days_running": ["daysrunning", "days", "runningdays", "duration"],
 }
+
+# exports / APIs without a platform column: the tool tells us the network (else ingest would default to facebook)
+SOURCE_PLATFORM = {"pipiads": "tiktok", "tiktok": "tiktok", "tiktok_cc": "tiktok", "minea": "facebook", "bigspy": "facebook",
+                   "foreplay": "facebook", "adspy": "facebook", "1688": "1688", "taobao": "taobao"}
 
 
 def _norm(h: str) -> str:
@@ -82,11 +87,13 @@ def row_to_record(row: dict, source: str, default_country: str | None = None, ma
         from datetime import timedelta
         first = (datetime.utcnow() - timedelta(days=_num(get("days_running")))).date().isoformat()
     return AdRecord(
-        source=source, source_ad_id=str(ad_id), platform=(get("platform") or "").lower() or None, country=country,
+        source=source, source_ad_id=str(ad_id), platform=(get("platform") or "").lower() or SOURCE_PLATFORM.get(source),
+        country=country,
         page_id=get("page_id"), advertiser=get("advertiser"), ad_text=get("ad_text"), title=get("title"),
         cta_text=get("cta_text"), creative_type="video" if get("video") else ("image" if get("image") else None),
         media=media, landing_page=get("landing_page"), product_name=get("title"), product_url=get("landing_page"),
-        price=_num(get("price")), currency=get("currency"), first_seen=str(first) if first else None,
+        price=_num(get("price")), currency=get("currency"),
+        sold_count=int(_num(get("sold"))) if _num(get("sold")) else None, first_seen=str(first) if first else None,
         last_seen=get("last_seen"), active=True,
         likes=_num(get("likes")), comments=_num(get("comments")), shares=_num(get("shares")), views=_num(get("views")),
         raw_source=row,
@@ -265,10 +272,11 @@ class TikTokCommercialConnector(BaseConnector):
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
         self.authenticate()
         tok = self._token()
-        today = datetime.utcnow().strftime("%Y%m%d")
-        body = {"filters": {"ad_published_date_range": {"min": params.since.replace("-", "") if params.since else "20240101", "max": today},
+        now = datetime.utcnow()
+        since = params.since.replace("-", "")[:8] if params.since else (now - timedelta(days=90)).strftime("%Y%m%d")
+        body = {"filters": {"ad_published_date_range": {"min": since, "max": now.strftime("%Y%m%d")},
                             "country_code": (params.countries or ["ALL"])[0]},
-                "search_term": params.query or "", "max_count": min(params.limit, 50)}
+                "search_term": params.query or "", "search_type": "fuzzy_phrase", "max_count": min(params.limit, 50)}
         r = self.request("POST", "https://open.tiktokapis.com/v2/research/adlib/ad/query/?fields=ad,advertiser",
                          headers={"Authorization": f"Bearer {tok}"}, json=body)
         for it in (r.json().get("data") or {}).get("ads", []):

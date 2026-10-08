@@ -52,8 +52,6 @@ const REC_STYLE: Record<string, { bg: string; icon: string }> = {
   ITERATE: { bg: "var(--serious)", icon: "↻" },
   STOP: { bg: "var(--critical)", icon: "■" },
   TEST_NOW: { bg: "var(--good)", icon: "🔥" },
-  EXPERIMENT: { bg: "var(--series-7)", icon: "💎" },
-  DISCOVER: { bg: "var(--muted)", icon: "○" },
   SKIP: { bg: "var(--critical)", icon: "↷" },
   REVIEW: { bg: "var(--serious)", icon: "⚠" },
 };
@@ -107,7 +105,7 @@ export function ProductLink({ id, name, code }: { id: number; name: string; code
 }
 
 export function Loading({ error }: { error?: string | null }) {
-  if (error) return <div className="card p-4 text-sm" style={{ color: "var(--critical)" }}>Lỗi: {error} — kiểm tra API (http://localhost:8000) đang chạy.</div>;
+  if (error) return <div className="card p-4 text-sm" style={{ color: "var(--critical)" }}>Lỗi: {error} — kiểm tra API đang chạy.</div>;
   return <div className="text-sm text-muted p-6">Đang tải…</div>;
 }
 
