@@ -55,6 +55,63 @@ def _reach(s: dict) -> int | None:
     return None
 
 
+_CHALLENGE = re.compile(r"fetch\('(/__rd_verify_[^']+)'")
+
+
+def _balanced(html: str, key: str) -> str | None:
+    """The balanced {...} JSON object following `key` (from reference/AdsLibrary, MIT)."""
+    i = html.find(key)
+    i = html.find("{", i) if i >= 0 else -1
+    if i < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for j in range(i, len(html)):
+        c = html[j]
+        if esc:
+            esc = False
+        elif c == "\\":
+            esc = in_str
+        elif c == '"':
+            in_str = not in_str
+        elif not in_str:
+            depth += (c == "{") - (c == "}")
+            if depth == 0:
+                return html[i:j + 1]
+    return None
+
+
+def ssr_search(query: str, country: str, active_only: bool, page_ids: list[str] | None, media_type: str | None,
+               proxy: str | None = None) -> list[dict]:
+    """Fallback when the GraphQL doc_id rotates: the Ad Library server-renders page 1 (~30 ads) as a Relay payload.
+    No doc_id needed, and no political filter — commercial only. ponytail: first page only, no cursor."""
+    import json
+    import requests
+
+    params = {"active_status": "active" if active_only else "all", "ad_type": "all", "country": country,
+              "media_type": media_type or "all"}
+    params.update({"view_all_page_id": page_ids[0], "search_type": "page"} if page_ids
+                  else {"q": query, "search_type": "keyword_unordered"})
+    url = "https://www.facebook.com/ads/library/"
+    with requests.Session() as ses:
+        ses.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
+        if proxy:
+            h, po, *cred = proxy.split(":")
+            ses.proxies = {"https": f"http://{':'.join(cred[:1])}:{':'.join(cred[1:])}@{h}:{po}" if cred else f"http://{h}:{po}"}
+        r = ses.get(url, params=params, timeout=30)
+        m = _CHALLENGE.search(r.text)  # anti-bot: POST the one-off verify URL, then retry
+        if m:
+            ses.post("https://www.facebook.com" + m.group(1), timeout=30)
+            r = ses.get(url, params=params, timeout=30)
+    blob = _balanced(r.text, '"search_results_connection":')
+    if not blob:
+        return []
+    out = []
+    for edge in json.loads(blob).get("edges", []):
+        node = edge.get("node", {})
+        out += [x for x in node.get("collated_results") or [node] if x.get("ad_archive_id")]
+    return out
+
+
 def extract_ads(payload) -> list[dict]:
     """Shape-agnostic fallback (sonda-imperial parser): every dict holding ad_archive_id + snapshot is an ad."""
     out: list[dict] = []
@@ -90,7 +147,7 @@ def map_library_ad(raw: dict, source: str, country: str | None) -> AdRecord:
         url = v.get("video_hd_url") or v.get("video_sd_url")
         if url:
             media.append(MediaItem("video", url, preview_url=v.get("video_preview_image_url"),
-                                   quality="hd" if v.get("video_hd_url") else "sd"))
+                                   quality="hd" if v.get("video_hd_url") else "sd", sd_url=v.get("video_sd_url")))
     for im in (s.get("images") or []) + [c for c in cards if not (c.get("video_hd_url") or c.get("video_sd_url"))]:
         url = im.get("original_image_url") or im.get("resized_image_url")
         if url:
@@ -192,7 +249,16 @@ class MetaLibraryConnector(BaseConnector):
                 search_type="PAGE" if params.page_ids else "KEYWORD_UNORDERED", page_ids=params.page_ids or None,
                 cursor=st.get("cursor"), first=30, sort_mode=None, session_id=st["sid"], collation_token=st["tok"])
         except Exception as e:
-            raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}") from e
+            if st.get("cursor"):
+                raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}") from e
+            try:  # GraphQL broke on page 1 → server-rendered payload (first page only)
+                raw_ads = ssr_search(params.query or "", country.upper(), params.active_only, params.page_ids,
+                                     params.media_type, self.config.get("proxy") or None)
+            except Exception as e2:
+                raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}; SSR: {type(e2).__name__}: {e2}") from e
+            if not raw_ads:
+                raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}") from e
+            resp, cursor = {"ads": raw_ads}, None
         items = resp.get("ads") or extract_ads(resp.get("raw"))
         # Meta shows one card per collation group (the first item carries collation_count); siblings are the same creative
         # ponytail: dedupe within a page only — siblings split across pages become extra ads
@@ -276,52 +342,3 @@ class ApifyMetaConnector(BaseConnector):
             )
             for item in r.json():
                 yield map_library_ad(item, self.key, country)
-
-
-class MetaAdsInsightsConnector(BaseConnector):
-    """Own ad accounts via Meta Marketing API (Tier 1, every 5 min). Writes ad_metrics, not AdRecords.
-
-    Product mapping: put the product code (PRD_0000123) in the campaign/ad name, or give a JSON
-    map {"keyword in ad name": "PRD_0000123"}.
-    """
-
-    key = "meta_ads"
-    name = "Meta Ads — tài khoản quảng cáo của công ty"
-    kind = "first_party"
-    group = "internal_ads"
-    rate_limit = RateLimit(requests_per_minute=60, retries=4)
-    config_fields = [
-        {"key": "access_token", "label": "System user token (ads_read)", "secret": True, "required": True},
-        {"key": "ad_account_ids", "label": "Ad account id (act_123,act_456)", "required": True},
-        {"key": "product_map", "label": "Map tên ad → mã SP (JSON, tuỳ chọn)"},
-        {"key": "api_version", "label": "API version (mặc định v21.0)"},
-    ]
-    LEAD_ACTIONS = ("onsite_conversion.messaging_conversation_started_7d", "lead", "onsite_conversion.lead_grouped")
-
-    def fetch_ads(self, params: FetchParams):
-        return iter(())
-
-    def fetch_metrics(self, date_preset: str = "today") -> list[dict]:
-        self.authenticate()
-        ver = self.config.get("api_version", "v21.0")
-        out = []
-        for acct in [a.strip() for a in str(self.config["ad_account_ids"]).split(",") if a.strip()]:
-            acct = acct if acct.startswith("act_") else f"act_{acct}"
-            url = f"https://graph.facebook.com/{ver}/{acct}/insights"
-            q = {"access_token": self.config["access_token"], "level": "ad", "date_preset": date_preset, "time_increment": 1,
-                 "fields": "date_start,campaign_id,campaign_name,adset_id,ad_id,ad_name,spend,impressions,clicks,actions,account_currency",
-                 "limit": 500}
-            while url:
-                data = self.request("GET", url, params=q).json()
-                for r in data.get("data", []):
-                    acts = {a["action_type"]: float(a["value"]) for a in r.get("actions") or []}
-                    out.append({
-                        "date": r["date_start"], "account_id": acct, "campaign_id": r.get("campaign_id"),
-                        "campaign_name": r.get("campaign_name"), "adset_id": r.get("adset_id"), "ad_id": r["ad_id"],
-                        "ad_name": r.get("ad_name"), "spend": float(r.get("spend") or 0), "impressions": int(r.get("impressions") or 0),
-                        "clicks": int(r.get("clicks") or 0), "leads": int(sum(acts.get(k, 0) for k in self.LEAD_ACTIONS)),
-                        "purchases": int(acts.get("purchase", 0) or acts.get("offsite_conversion.fb_pixel_purchase", 0)),
-                        "currency": r.get("account_currency"),
-                    })
-                url, q = (data.get("paging") or {}).get("next"), None
-        return out

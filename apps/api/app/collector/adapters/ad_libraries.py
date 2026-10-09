@@ -15,7 +15,7 @@ import re
 import time
 from typing import Iterator
 
-from ..base import ConnectorError, FetchParams, NotConfigured, RateLimit
+from ..base import BaseConnector, ConnectorError, FetchParams, NotConfigured, RateLimit
 from ..contract import AdRecord, MediaItem
 from .free import _CffiConnector, _csv, _iso
 
@@ -272,6 +272,89 @@ class TikTokTopAdsConnector(_CffiConnector):
                     yield map_tiktok_top_ad({**m, **det}, country, q or None)
                 if not (data.get("pagination") or {}).get("has_more"):
                     break
+
+
+class TikTokTopAdsHeadlessConnector(BaseConnector):
+    """Creative Center Top Ads WITHOUT a login: a real headless Edge/Chrome loads the public page, TikTok's own JS signs the
+    request and we only read the answer (nothing forged or replayed). Anonymous visitors get ~10 pages (≈150 ads, period=180)
+    before a login wall — the free-account connector above is the 500-ad source; rows share its source, so ids merge.
+    """
+
+    key = "tiktok_top_ads_headless"
+    name = "TikTok Creative Center · Top Ads (không cần đăng nhập · ~150 ad / nước)"
+    kind = "browser"
+    group = "ad_intel"
+    rate_limit = RateLimit(requests_per_minute=2)
+    browses = True  # no keyword search: the scheduler walks the public top list per country
+    config_fields = [
+        {"key": "countries", "label": "Quốc gia (PH, US, GB, DE, FR, AU, SA, AE …)"},
+        {"key": "period", "label": "Khoảng ngày: 7 / 30 / 180 (mặc định 180 — 30 chỉ ra ~50 ad)"},
+        {"key": "objectives", "label": "Mục tiêu giữ lại (mặc định conversion, lead_generation, traffic, product_sales, shop_purchases)"},
+    ]
+    URL = "https://ads.tiktok.com/business/creativecenter/inspiration/topads/pc/en?period={period}&region={country}"
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+          "Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0")  # default headless UA says "HeadlessChrome"
+
+    def _scrape(self, country: str, period: str) -> list[dict]:
+        from playwright.sync_api import sync_playwright
+
+        seen: list[dict] = []
+
+        def on_response(r):
+            if "/top_ads/v2/list" in r.url and r.status == 200:
+                try:
+                    seen.append(r.json())
+                except Exception:
+                    pass
+
+        with sync_playwright() as p:
+            for ch in ("msedge", "chrome"):
+                try:
+                    b = p.chromium.launch(channel=ch, headless=True)
+                    break
+                except Exception as e:
+                    err = e
+            else:
+                raise NotConfigured(f"cần cài Microsoft Edge hoặc Google Chrome trên máy chạy API ({err})")
+            try:
+                pg = b.new_context(locale="en-US", viewport={"width": 1400, "height": 900}, user_agent=self.UA).new_page()
+                pg.on("response", on_response)
+                try:
+                    pg.goto(self.URL.format(period=period, country=country), wait_until="domcontentloaded", timeout=60000)
+                except Exception as e:
+                    log.warning("tiktok_top_ads_headless %s: %s", country, str(e).splitlines()[0])
+                pg.wait_for_timeout(8000)
+                pg.keyboard.press("Escape")  # promo popup covers the page
+                for _ in range(8):  # the list pages with a "View More" button; the login wall ends it
+                    btn = pg.get_by_text("View More", exact=False)
+                    if not btn.count():
+                        break
+                    before = len(seen)
+                    btn.first.click(timeout=8000)
+                    pg.wait_for_timeout(3500)
+                    if len(seen) == before:
+                        break
+            finally:
+                b.close()
+        return seen
+
+    def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        cfg = self.config
+        countries = [c.upper() for c in params.countries or [] if c.upper() != "ALL"] or _csv(cfg.get("countries"), "PH")
+        objectives = set(_csv(cfg.get("objectives"), "conversion,lead_generation,traffic,product_sales,shop_purchases"))
+        done: set[str] = set()
+        for country in countries:
+            self.bucket.take()
+            with ThreadPoolExecutor(1) as ex:  # sync Playwright refuses to run inside an asyncio loop thread
+                pages = ex.submit(self._scrape, country, str(cfg.get("period") or 180)).result()
+            for page in pages:
+                for m in (page.get("data") or {}).get("materials") or []:
+                    if m["id"] in done or str(m.get("objective_key") or "").replace("campaign_objective_", "") not in objectives:
+                        continue  # reach / video views = brand awareness, not a product being sold
+                    done.add(m["id"])
+                    yield map_tiktok_top_ad(m, country, None)
 
 
 def map_tiktok_top_ad(m: dict, country: str, query: str | None) -> AdRecord:

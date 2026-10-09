@@ -94,7 +94,9 @@ export function usePaged<T = any>(path: string, pageSize = 40) {
     }
   }, [path, pageSize, sep]);
 
-  useEffect(() => { count.current = 0; setRows([]); setTotal(0); load(0, true); }, [load]);
+  // keep the old rows on screen until the new path answers: live search changes the path every poll (ids=…), and
+  // blanking the list each time made the page flash back to "Đang tải…", jump to the top and restart every video
+  useEffect(() => { load(0, true); }, [load]);
   const loadMore = useCallback(() => { if (!loading) load(count.current, false); }, [load, loading]);
   /** refresh what is already on screen (keeps the scroll position / loaded pages). Driven by realtime events that can
    *  fire many times a second (CREATIVE_STORED): never cancel a load in flight, at most one refresh per 15 s —

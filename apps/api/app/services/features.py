@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..markets import priority_markets
-from ..models import Ad, ad_markets, AdMetric, Comment, Experiment, Order, Product, Store
+from ..models import Ad, ad_markets, Comment, Product, Store
 from ..platforms import REMOVED_NETWORKS
 from .enrichment import to_usd
 
@@ -23,9 +23,6 @@ class ProductData:
     ads: list[Ad] = field(default_factory=list)
     comments: list[Comment] = field(default_factory=list)
     stores: list[Store] = field(default_factory=list)
-    orders: list[Order] = field(default_factory=list)
-    experiments: list[Experiment] = field(default_factory=list)
-    metrics: list = field(default_factory=list)
 
 
 def load_product_data(db: Session, product: Product) -> ProductData:
@@ -35,9 +32,6 @@ def load_product_data(db: Session, product: Product) -> ProductData:
         ads=list(db.scalars(select(Ad).where(Ad.product_id == pid))),
         comments=list(db.scalars(select(Comment).where(Comment.product_id == pid))),
         stores=list(db.scalars(select(Store).where(Store.product_id == pid))),
-        orders=list(db.scalars(select(Order).where(Order.product_id == pid))),
-        experiments=list(db.scalars(select(Experiment).where(Experiment.product_id == pid))),
-        metrics=list(db.scalars(select(AdMetric).where(AdMetric.product_id == pid))),
     )
 
 
@@ -111,7 +105,7 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
     traffic_growth = _safe_div(sum((s.traffic_growth or 0) * (s.estimated_traffic or 1) for s in stores),
                                sum((s.estimated_traffic or 1) for s in stores), 0.0)
 
-    # prices in USD: ads of one product come in PHP / SAR / AUD … (readers: margin_potential, internal AOV, alerts ratio)
+    # prices in USD: ads of one product come in PHP / SAR / AUD … (readers: margin_potential, alerts ratio)
     prices_recent = [to_usd(a.price, a.currency) for a in ext_ads if a.price and a.first_seen_at > d14]
     prices_old = [to_usd(a.price, a.currency) for a in ext_ads if a.price and a.first_seen_at <= d14]
     avg_price = _safe_div(sum(prices_recent + prices_old), len(prices_recent + prices_old), None) if (prices_recent or prices_old) else to_usd(p.price, p.currency)
@@ -190,7 +184,6 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
         "source_count": len(sources),
     }
     feats.update(compute_channel_features(seen_by, end))
-    feats.update(compute_internal_features(data, as_of))
     return feats
 
 
@@ -217,81 +210,4 @@ def compute_channel_features(rows: list, end: datetime) -> dict:
         "supplier_price_usd": round(min(supplier), 2) if supplier else None,
         "organic_posts": len(organic),
         "organic_views": sum(a.views or 0 for a in organic),
-    }
-
-
-def compute_internal_features(data: ProductData, as_of: date) -> dict:
-    """First-party ads + CRM + COD/logistics features (§9, §16)."""
-    end = _end(as_of)
-    exps = [e for e in data.experiments if e.started_at <= as_of]
-    orders = [o for o in data.orders if o.created_at <= end]
-    if not exps and not orders and not data.metrics:
-        return {"has_internal": False}
-
-    metrics = [m for m in data.metrics if m.date <= as_of]
-    m_spend = sum(m.spend for m in metrics)
-    spend = max(sum(e.spend for e in exps), m_spend)  # experiments or live ad-account metrics, never both
-    impressions = max(sum(e.impressions for e in exps), sum(m.impressions for m in metrics))
-    clicks = max(sum(e.clicks for e in exps), sum(m.clicks for m in metrics))
-    lpv = sum(e.landing_views for e in exps)
-    ads_sub = sum(e.ads_submitted for e in exps)
-    ads_rej = sum(e.ads_rejected for e in exps)
-
-    n = len(orders)
-    st = Counter(o.status for o in orders)
-    confirmed = n - st["pending"] - st["cancelled"]
-    shipped = st["shipped"] + st["delivered"] + st["refused"] + st["failed"] + st["returned"]
-    delivered = st["delivered"] + st["returned"]
-    refused = st["refused"]
-    returned = st["returned"] + sum(1 for o in orders if o.refunded and o.status == "delivered")
-    attempts = delivered + refused + st["failed"]
-
-    delivered_orders = [o for o in orders if o.status == "delivered" and not o.refunded]
-    revenue_booked = sum(o.amount for o in orders if o.status not in ("cancelled",))
-    revenue_delivered = sum(o.amount for o in delivered_orders)
-    cogs = sum(o.cogs for o in delivered_orders)
-    ship_cost = sum(o.shipping_cost for o in orders if o.status in ("shipped", "delivered", "refused", "failed", "returned"))
-    fees = sum((o.cod_fee or 0) + (o.sales_commission or 0) + (o.payment_fee or 0) for o in delivered_orders)         + sum(o.return_cost or 0 for o in orders if o.status in ("refused", "returned", "failed"))
-    profit = revenue_delivered - cogs - ship_cost - fees - spend
-    closed = delivered + refused + st["failed"]  # in-transit shipments are not failures (realtime §13)
-
-    phones = Counter(o.customer_phone_hash for o in orders if o.customer_phone_hash)
-    repeat_rate = _safe_div(sum(1 for c in phones.values() if c > 1), len(phones))
-
-    reasons = Counter(o.refusal_reason for o in orders if o.refusal_reason)
-
-    return {
-        "has_internal": True,
-        "experiments": len(exps),
-        "internal_spend": round(spend, 2),
-        "impressions": impressions,
-        "clicks": clicks,
-        "ctr": round(_safe_div(clicks, impressions), 4),
-        "cpc": round(_safe_div(spend, clicks), 3),
-        "orders": n,
-        "confirmed_orders": confirmed,
-        "shipped": shipped,
-        "delivered": delivered,
-        "refused": refused,
-        "returned": returned,
-        "revenue": round(revenue_booked, 2),
-        "revenue_delivered": round(revenue_delivered, 2),
-        "profit": round(profit, 2),
-        "contribution_margin": round(_safe_div(profit, revenue_delivered, -1.0), 3),
-        "gross_margin": round(_safe_div(revenue_delivered - cogs, revenue_delivered), 3) if revenue_delivered else None,
-        "cpa": round(_safe_div(spend, n), 2) if n else None,
-        "roas": round(_safe_div(revenue_booked, spend), 2) if spend else None,
-        "mer": round(_safe_div(revenue_delivered, spend), 2) if spend else None,
-        "cvr": round(_safe_div(n, lpv or clicks), 4),
-        "aov": round(_safe_div(revenue_booked, n), 2) if n else None,
-        "confirm_rate": round(_safe_div(confirmed, n), 3) if n else None,
-        "delivery_rate": round(_safe_div(delivered, closed), 3) if closed else None,
-        "in_transit": st["shipped"],
-        "fees": round(fees, 2),
-        "cost_per_delivered": round(_safe_div(spend, delivered), 2) if delivered else None,
-        "refusal_rate": round(_safe_div(refused, attempts), 3) if attempts else None,
-        "return_rate": round(_safe_div(returned, delivered), 3) if delivered else None,
-        "repeat_rate": round(repeat_rate, 3),
-        "ad_rejection_rate": round(_safe_div(ads_rej, ads_sub), 3) if ads_sub else None,
-        "refusal_reasons": dict(reasons.most_common()),
     }

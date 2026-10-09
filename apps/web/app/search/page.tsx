@@ -1,44 +1,31 @@
 "use client";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
+import { AlertCircle, AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, Info, Settings2, Zap } from "lucide-react";
 import { ProductMediaCard } from "@/components/media";
 import { liveCountries, MarketPicker } from "@/components/MarketPicker";
 import { LoadMore } from "@/components/paging";
 import { Card, Empty, Loading, PageHeader } from "@/components/ui";
+import { splitTags as split, TagInput } from "@/components/filters/tag-input";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Spinner } from "@/components/ui/spinner";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, qs, useApi, usePaged } from "@/lib/api";
 import { NetworkBadge, usePlatforms } from "@/components/platforms";
 import { getUser, useTeam } from "@/lib/realtime";
+import { cn } from "@/lib/utils";
 
 const FUNNELS: [string, string][] = [["", "Tất cả funnel"], ["mess", "💬 MKT Mess (inbox/WhatsApp)"], ["ladi", "🧾 MKT Ladi (landing page)"], ["form", "Form"]];
 const SORTS: [string, string][] = [["opportunity", "Opportunity"], ["wave", "Wave potential"], ["novelty", "Độ mới lạ"],
   ["creative", "Creative potential"], ["demand", "Market demand"], ["growth", "Tăng trưởng 7d"], ["newest", "Mới phát hiện"], ["ads", "Số ads"]];
-
-const split = (s: string) => s.split(/[|,\n]/).map((x) => x.trim()).filter(Boolean);
-
-/** Gõ từ khoá → Enter (hoặc dấu phẩy) thành tag; × để xoá; Backspace ở ô trống xoá tag cuối. */
-function TagInput({ tags, setTags, draft, setDraft, placeholder, tone, onSubmit }: {
-  tags: string[]; setTags: (t: string[]) => void; draft: string; setDraft: (s: string) => void; placeholder: string; tone?: string;
-  onSubmit?: (live: boolean) => void }) {
-  const add = (s: string) => { const n = split(s).filter((x) => !tags.some((t) => t.toLowerCase() === x.toLowerCase())); if (n.length) setTags([...tags, ...n]); setDraft(""); };
-  return (
-    <div className="input flex flex-wrap items-center gap-1 flex-1 min-w-[240px] text-sm">
-      {tags.map((t) => (
-        <span key={t} className="rounded-full border px-2 py-0.5 text-xs flex items-center gap-1" style={{ borderColor: tone || "var(--series-1)" }}>
-          {t}<button type="button" aria-label={`Xoá ${t}`} onClick={() => setTags(tags.filter((x) => x !== t))}>×</button>
-        </span>
-      ))}
-      <input className="flex-1 min-w-[140px] bg-transparent outline-none" value={draft} placeholder={tags.length ? "+ Thêm từ khoá" : placeholder}
-             onChange={(e) => e.target.value.includes(",") ? add(e.target.value) : setDraft(e.target.value)}
-             onPaste={(e) => { const t = e.clipboardData.getData("text"); if (/[|,\n]/.test(t)) { e.preventDefault(); add(draft + t); } }}
-             onKeyDown={(e) => {
-               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onSubmit?.(true); }
-               else if (e.key === "Enter" && draft.trim()) { e.preventDefault(); add(draft); }
-               else if (e.key === "Enter" && tags.length) { e.preventDefault(); onSubmit?.(false); }
-               else if (e.key === "Backspace" && !draft && tags.length) setTags(tags.slice(0, -1));
-             }} />
-    </div>
-  );
-}
 
 type Src = { network: string; fetched: number; stored?: number; new: number; failed: number; error?: string | null };
 type Job = { id: number; status: string; found: number; new_ads: number; has_more: boolean; error: string | null; products?: number;
@@ -61,10 +48,14 @@ function SearchPage() {
   const [minDays, setMinDays] = useState("");
   const [maxAdv, setMaxAdv] = useState("");
   const [track, setTrack] = useState(false);
-  const [limit, setLimit] = useState(100);
+  const [limit, setLimit] = useState(50);  // ads / market crawled per results page
   const [liveMedia, setLiveMedia] = useState("");
   const [job, setJob] = useState<Job | null>(null);
-  const [jobIds, setJobIds] = useState("");  // sản phẩm của lượt quét trực tiếp — hiện đúng những gì vừa lấy được
+  const [jobIds, setJobIds] = useState("");  // sản phẩm của trang đang xem — hiện đúng những gì vừa lấy được
+  const [page, setPageState] = useState(0);  // mỗi trang = 1 lượt crawl mới từ nguồn
+  const pageRef = useRef(0);
+  const pages = useRef<number[][]>([]);  // id sản phẩm của các trang đã crawl — quay lại trang cũ không crawl lại
+  const setPage = (i: number) => { pageRef.current = i; setPageState(i); };
   const [msg, setMsg] = useState("");
   const [crossOnly, setCrossOnly] = useState(false);
   const [off, setOff] = useState<string[]>([]);  // live-search sources the user switched off for this search
@@ -78,10 +69,14 @@ function SearchPage() {
   const sources: any[] = (coll.data?.connectors || []).filter((c: any) => c.enabled && c.supports_search);
   const isPaid = (c: any) => String(c.adapter).startsWith("apify");
   const active = sources.filter((c) => !off.includes(c.adapter) && (paid || !isPaid(c)));
+  // chip tắt = cũng lọc danh sách kết quả theo nền tảng (không chỉ bỏ nguồn khi quét)
+  const nets = (l: any[]) => [...new Set(l.map((c) => c.network))];
+  const picked = nets(sources.filter((c) => !off.includes(c.adapter)));
+  const network = picked.length < nets(sources).length ? picked.join(",") : "";
 
   const exclude = exTags.join("|");  // chỉ tag đã chốt — tránh tải lại theo từng phím gõ
   const path = `/search${qs({ q: submitted, exclude, country: scope, funnel, sort, has_video: videoOnly, min_days: minDays, max_advertisers: maxAdv,
-                             ids: jobIds, min_networks: crossOnly ? 2 : "" })}`;
+                             ids: jobIds, min_networks: crossOnly ? 2 : "", network })}`;
   const { rows, total, loading, error, hasMore, loadMore, reload, last } = usePaged(path, 36);
   const reloadRef = useRef(reload);
   reloadRef.current = reload;  // poller always calls the reload bound to the current path (ids/filters)
@@ -93,7 +88,7 @@ function SearchPage() {
       try {
         const j = await api(`/search/jobs/${id}`);
         setJob(j);
-        if (j.product_ids?.length) setJobIds(j.product_ids.join(","));
+        if (j.product_ids?.length) { pages.current[pageRef.current] = j.product_ids; setJobIds(j.product_ids.join(",")); }
         if (++n % 2 === 0 || j.status !== "running") reloadRef.current();
         if (j.status !== "running") {
           clearInterval(timer.current);
@@ -115,15 +110,19 @@ function SearchPage() {
       const r = await api("/search/live", { method: "POST", body: JSON.stringify({
         query: k.join("|"), countries: liveCountries(scope), user: getUser().name, track, limit, media_type: liveMedia || null, paid,
         adapters: active.length < sources.length ? active.map((c) => c.adapter) : [] }) });
+      pages.current = []; setPage(0); setJobIds("0");  // "0" = chưa có sản phẩm nào cho tới khi trang 1 về
       setJob({ id: r.job_id, status: "running", found: 0, new_ads: 0, has_more: false, error: null });
       poll(r.job_id);
     } catch (e: any) { setMsg(`Không bắt đầu được: ${e.message}`); }
   };
-  const more = async (count: number) => {
+  const goto = (i: number) => { setPage(i); setJobIds((pages.current[i] || [0]).join(",")); };
+  const next = async () => {
     if (!job) return;
+    if (pages.current[page + 1]) return goto(page + 1);  // đã crawl rồi: lấy từ kho
     try {
-      await api(`/search/jobs/${job.id}/more`, { method: "POST", body: JSON.stringify({ count }) });
-      setJob({ ...job, status: "running" });
+      await api(`/search/jobs/${job.id}/more`, { method: "POST", body: JSON.stringify({ count: limit }) });
+      setPage(page + 1); setJobIds("0");
+      setJob({ ...job, status: "running", found: 0, new_ads: 0 });
       poll(job.id);
     } catch (e: any) { setMsg(e.message); }
   };
@@ -133,106 +132,139 @@ function SearchPage() {
     <div>
       <PageHeader title="Tìm sản phẩm" subtitle="Tìm trong kho, hoặc quét trực tiếp mọi nguồn đang bật cùng lúc — quảng cáo (Meta Ad Library, TikTok Ads) và nguồn hàng TQ (AliExpress, 1688, Taobao) để biết giá nhập. Kết quả gộp theo sản phẩm." />
       <Card className="mb-4">
-        <div className="flex flex-wrap gap-2 pt-3">
+        <div className="flex flex-wrap gap-2">
           <TagInput tags={tags} setTags={setTags} draft={q} setDraft={setQ} onSubmit={(l) => (l ? live() : submit())}
                     placeholder="Nhiều từ khoá, Enter sau mỗi từ: fengshui ⏎ lucky bracelet ⏎ pixiu ⏎ (khớp BẤT KỲ từ nào)" />
-          <button type="button" className="btn" onClick={submit}>Tìm trong kho</button>
-          <button type="button" className="btn btn-primary" onClick={live} disabled={running || !kws().length}
-                  title={!kws().length ? "Nhập từ khoá trước" : `Quét ngay ${active.length} nguồn đang bật × ${kws().length} từ khoá (Ctrl+Enter)`}>
-            {running ? "Đang tìm trên nguồn…" : "⚡ Tìm trực tiếp trên nguồn"}
-          </button>
+          <Button type="button" variant="outline" onClick={submit}>Tìm trong kho</Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <Button type="button" onClick={live} disabled={running || !kws().length}>
+                  {running ? <><Spinner /> Đang tìm trên nguồn…</> : <><Zap /> Tìm trực tiếp trên nguồn</>}
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{!kws().length ? "Nhập từ khoá trước" : `Quét ngay ${active.length} nguồn đang bật × ${kws().length} từ khoá (Ctrl+Enter)`}</TooltipContent>
+          </Tooltip>
         </div>
-        <div className="flex flex-wrap gap-2 mt-2 items-center">
-          <span className="text-xs text-muted w-20">Loại trừ:</span>
-          <TagInput tags={exTags} setTags={setExTags} draft={exDraft} setDraft={setExDraft} tone="var(--critical)"
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="w-20 text-xs text-muted-foreground">Loại trừ:</span>
+          <TagInput tags={exTags} setTags={setExTags} draft={exDraft} setDraft={setExDraft} tone="destructive"
                     placeholder="kids, children, DIY, free pattern … (bỏ sản phẩm chứa từ này)" />
         </div>
         <div className="mt-3"><MarketPicker value={scope} onChange={(v) => { setJobIds(""); setScope(v); }} /></div>
-        <div className="flex flex-wrap gap-2 mt-3 items-center">
-          <div className="flex rounded-lg border overflow-hidden" style={{ borderColor: "var(--border)" }}>
-            {FUNNELS.map(([k, l]) => (
-              <button key={k} onClick={() => setFunnel(k)} className="text-xs px-3 py-1.5"
-                      style={{ background: funnel === k ? "var(--series-1)" : "var(--surface-1)", color: funnel === k ? "#fff" : "var(--text-secondary)" }}>{l}</button>
-            ))}
-          </div>
-          <select className="input" value={sort} onChange={(e) => setSort(e.target.value)}>{SORTS.map(([k, l]) => <option key={k} value={k}>Sắp xếp: {l}</option>)}</select>
-          <input className="input w-36" placeholder="Chạy ≥ N ngày" value={minDays} onChange={(e) => setMinDays(e.target.value.replace(/\D/g, ""))} />
-          <input className="input w-40" placeholder="≤ N advertiser" value={maxAdv} onChange={(e) => setMaxAdv(e.target.value.replace(/\D/g, ""))} />
-          <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={videoOnly} onChange={(e) => setVideoOnly(e.target.checked)} /> Chỉ có video</label>
-          <label className="text-xs flex items-center gap-1" title="Sản phẩm xuất hiện trên ≥ 2 nền tảng (ads + nguồn hàng TQ) — đã được thị trường xác nhận chéo">
-            <input type="checkbox" checked={crossOnly} onChange={(e) => setCrossOnly(e.target.checked)} /> Có trên ≥ 2 nền tảng</label>
-        </div>
-        <div className="flex flex-wrap gap-3 mt-3 pt-3 items-center border-t text-xs" style={{ borderColor: "var(--grid)" }}>
-          <span className="text-muted">Khi tìm trực tiếp:</span>
-          <label className="flex items-center gap-1">Lấy
-            <select className="input" value={limit} onChange={(e) => setLimit(Number(e.target.value))}>{[50, 100, 200, 500, 1000].map((n) => <option key={n} value={n}>{n}</option>)}</select>
-            quảng cáo / thị trường
-          </label>
-          <label className="flex items-center gap-1">Loại
-            <select className="input" value={liveMedia} onChange={(e) => setLiveMedia(e.target.value)}><option value="">Tất cả</option><option value="video">Video</option><option value="image">Ảnh</option></select>
-          </label>
-          <label className="flex items-center gap-1"><input type="checkbox" checked={track} onChange={(e) => setTrack(e.target.checked)} /> Theo dõi từ khoá này (tự quét lại mỗi giờ)</label>
-          <label className="flex items-center gap-1" title="Mỗi lượt quét Apify tốn tiền — chỉ bật khi cần"><input type="checkbox" checked={paid} onChange={(e) => setPaid(e.target.checked)} /> Dùng nguồn trả phí (Apify)</label>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <ToggleGroup type="single" variant="outline" size="sm" spacing={1} value={funnel} onValueChange={(v) => v !== undefined && setFunnel(v)} className="flex-wrap">
+            {FUNNELS.map(([k, l]) => <ToggleGroupItem key={k} value={k} className="text-xs" aria-label={l}>{l}</ToggleGroupItem>)}
+          </ToggleGroup>
+          <Select value={sort} onValueChange={setSort}>
+            <SelectTrigger size="sm" className="text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>{SORTS.map(([k, l]) => <SelectItem key={k} value={k}>Sắp xếp: {l}</SelectItem>)}</SelectContent>
+          </Select>
+          <Input className="h-8 w-36 text-xs" placeholder="Chạy ≥ N ngày" inputMode="numeric" value={minDays} onChange={(e) => setMinDays(e.target.value.replace(/\D/g, ""))} />
+          <Input className="h-8 w-40 text-xs" placeholder="≤ N advertiser" inputMode="numeric" value={maxAdv} onChange={(e) => setMaxAdv(e.target.value.replace(/\D/g, ""))} />
+          <Label className="text-xs"><Checkbox checked={videoOnly} onCheckedChange={(v) => setVideoOnly(v === true)} /> Chỉ có video</Label>
+          <Label className="text-xs" title="Sản phẩm xuất hiện trên ≥ 2 nền tảng (ads + nguồn hàng TQ) — đã được thị trường xác nhận chéo">
+            <Checkbox checked={crossOnly} onCheckedChange={(v) => setCrossOnly(v === true)} /> Có trên ≥ 2 nền tảng</Label>
+          <Collapsible className="contents">
+            <CollapsibleTrigger asChild>
+              <Button type="button" variant="outline" size="sm" className="text-xs group/adv"><Settings2 /> Tuỳ chọn quét <ChevronDown className="transition-transform group-data-[state=open]/adv:rotate-180" /></Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="basis-full">
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+                <span className="font-medium">Khi tìm trực tiếp:</span>
+                <div className="flex items-center gap-2">
+                  <span>Mỗi trang lấy</span>
+                  <Select value={String(limit)} onValueChange={(v) => setLimit(Number(v))}>
+                    <SelectTrigger size="sm" className="w-20 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>{[20, 30, 50, 100].map((n) => <SelectItem key={n} value={String(n)}>{n}</SelectItem>)}</SelectContent>
+                  </Select>
+                  <span>quảng cáo / thị trường</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span>Loại</span>
+                  <Select value={liveMedia || "all"} onValueChange={(v) => setLiveMedia(v === "all" ? "" : v)}>
+                    <SelectTrigger size="sm" className="w-28 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="all">Tất cả</SelectItem><SelectItem value="video">Video</SelectItem><SelectItem value="image">Ảnh</SelectItem></SelectContent>
+                  </Select>
+                </div>
+                <Label className="text-xs"><Checkbox checked={track} onCheckedChange={(v) => setTrack(v === true)} /> Theo dõi từ khoá này (tự quét lại mỗi giờ)</Label>
+                <Label className="text-xs" title="Mỗi lượt quét Apify tốn tiền — chỉ bật khi cần"><Checkbox checked={paid} onCheckedChange={(v) => setPaid(v === true)} /> Dùng nguồn trả phí (Apify)</Label>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
         </div>
         {sources.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-2 items-center text-xs">
-            <span className="text-muted mr-1">Nguồn sẽ quét:</span>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="mr-1 text-muted-foreground">Nguồn sẽ quét:</span>
             {sources.map((c) => {
               const on = active.includes(c);
               return (
-                <button key={c.id} type="button" title={!paid && isPaid(c) ? `${c.name} — bật "Dùng nguồn trả phí" để quét` : c.name} disabled={!paid && isPaid(c)}
-                        onClick={() => setOff(on ? [...off, c.adapter] : off.filter((a) => a !== c.adapter))}
-                        className="rounded-full border px-1 py-0.5" style={{ borderColor: on ? "var(--series-1)" : "var(--border)", opacity: on ? 1 : 0.45 }}>
-                  <NetworkBadge network={c.network} byKey={byKey} small />
-                </button>
+                <Badge key={c.id} asChild variant="outline" className={cn("cursor-pointer px-1 py-0.5", on ? "border-series-1" : "opacity-45")}>
+                  <button type="button" title={!paid && isPaid(c) ? `${c.name} — bật "Dùng nguồn trả phí" để quét` : c.name} disabled={!paid && isPaid(c)} aria-pressed={on}
+                          onClick={() => setOff(on ? [...off, c.adapter] : off.filter((a) => a !== c.adapter))}>
+                    <NetworkBadge network={c.network} byKey={byKey} small />
+                  </button>
+                </Badge>
               );
             })}
           </div>
         )}
         {job && (
-          <div className="text-sm mt-3 flex flex-wrap items-center gap-3">
-            <span className="text-ink2">
-              {running ? "Đang quét… " : "Đã quét xong: "}
+          <Alert className="mt-3 bg-muted/40">
+            {running ? <Spinner className="text-muted-foreground" /> : <Info />}
+            <AlertDescription className="flex flex-wrap items-center gap-3 text-sm text-ink2">
+            <span>
+              {running ? `Đang quét trang ${page + 1}… ` : `Trang ${page + 1} đã quét xong: `}
               <b>{job.found}</b> ads / listing khác nhau đã lưu (<b>{job.new_ads}</b> lần đầu vào kho) · <b>{job.product_ids?.length ?? 0}</b> sản phẩm
-              <span className="text-muted" title="Gồm mọi nguồn & mọi nước đã quét (cả listing AliExpress / 1688 / Taobao). Thư viện quảng cáo lọc theo thị trường + đang chạy nên con số ở đó nhỏ hơn."> ⓘ</span>
+              <Tooltip>
+                <TooltipTrigger asChild><button type="button" className="ml-1 align-middle text-muted-foreground"><Info className="size-3.5" /></button></TooltipTrigger>
+                <TooltipContent className="max-w-xs">Gồm mọi nguồn & mọi nước đã quét (cả listing AliExpress / 1688 / Taobao). Thư viện quảng cáo lọc theo thị trường + đang chạy nên con số ở đó nhỏ hơn.</TooltipContent>
+              </Tooltip>
               {!running && !job.has_more && job.found > 0 ? " — nguồn đã hết kết quả" : ""}
             </span>
-            {!running && job.has_more && (
-              <>
-                <button className="btn btn-primary text-xs" onClick={() => more(100)}>Tải thêm 100 từ nguồn</button>
-                <button className="btn text-xs" onClick={() => more(300)}>+300</button>
-              </>
-            )}
-          </div>
+            <span className="flex items-center gap-1">
+              <Button variant="outline" size="xs" disabled={running || page === 0} onClick={() => goto(page - 1)}><ChevronLeft /> Trang trước</Button>
+              <Button variant="outline" size="xs" disabled={running || (!job.has_more && !pages.current[page + 1])} onClick={next}
+                      title="Trang sau = crawl mới tiếp từ chỗ dừng (chỉ metadata + ảnh bìa nhỏ). Nguồn AliExpress / 1688 / Taobao / Apify chỉ quét ở trang 1.">
+                Trang sau <ChevronRight />
+              </Button>
+            </span>
+            </AlertDescription>
+          </Alert>
         )}
         {job?.sources && Object.keys(job.sources).length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-2 text-xs">
+          <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
             {Object.entries(job.sources).map(([name, s]) => (
-              <span key={name} title={s.error || name} className="rounded-full border px-2 py-0.5 flex items-center gap-1"
-                    style={{ borderColor: s.error ? "var(--critical)" : "var(--border)" }}>
-                <NetworkBadge network={s.network} byKey={byKey} small />
-                {s.error ? <span style={{ color: "var(--critical)" }}>lỗi</span>
-                  : <span title={`${s.fetched} dòng nhận về (gồm trùng)`}>{s.stored ?? s.fetched}{s.new ? ` · ${s.new} mới` : ""}{s.failed ? ` · ${s.failed} không lưu được` : ""}</span>}
-              </span>
+              <Tooltip key={name}>
+                <TooltipTrigger asChild>
+                  <Badge variant="outline" className={cn("gap-1 px-2 py-0.5", s.error && "border-critical")}>
+                    <NetworkBadge network={s.network} byKey={byKey} small />
+                    {s.error ? <span className="text-critical">lỗi</span>
+                      : <span>{s.stored ?? s.fetched}{s.new ? ` · ${s.new} mới` : ""}{s.failed ? ` · ${s.failed} không lưu được` : ""}</span>}
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">{s.error || `${name} — ${s.fetched} dòng nhận về (gồm trùng)`}</TooltipContent>
+              </Tooltip>
             ))}
           </div>
         )}
         {job && !running && jobIds && (
-          <div className="text-xs mt-1 text-muted">
+          <div className="mt-1 text-xs text-muted-foreground">
             Danh sách dưới = sản phẩm của lượt quét này, chỉ tính ads <b>đang chạy</b>{funnel ? <> thuộc funnel <b>{funnel}</b></> : null}
-            {videoOnly ? ", có video" : ""}{crossOnly ? ", có trên ≥ 2 nền tảng" : ""} — bỏ bớt bộ lọc nếu thấy ít hơn số sản phẩm ở trên.
-            <button className="underline ml-2" onClick={() => setJobIds("")}>Xem toàn bộ kho khớp từ khoá</button>
+            {network ? `, từ ${network}` : ""}{videoOnly ? ", có video" : ""}{crossOnly ? ", có trên ≥ 2 nền tảng" : ""} — bỏ bớt bộ lọc nếu thấy ít hơn số sản phẩm ở trên.
+            <button type="button" className="ml-2 underline" onClick={() => setJobIds("")}>Xem toàn bộ kho khớp từ khoá</button>
           </div>
         )}
-        {msg && <div className="text-sm mt-2" style={{ color: "var(--critical)" }}>{msg}</div>}
+        {msg && <Alert variant="destructive" className="mt-2"><AlertCircle /><AlertTitle>Lỗi</AlertTitle><AlertDescription>{msg}</AlertDescription></Alert>}
         {!running && job?.error && job.found > 0 && (
-          <div className="text-xs mt-2 text-ink2">⚠ Một số nguồn lỗi (các nguồn khác vẫn trả kết quả): {job.error}</div>
+          <div className="mt-2 flex items-start gap-1 text-xs text-ink2"><AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" /> Một số nguồn lỗi (các nguồn khác vẫn trả kết quả): {job.error}</div>
         )}
       </Card>
 
       {error ? <Loading error={error} /> : rows.length === 0 && loading ? <Loading /> : (
         <>
-          <div className="text-sm text-ink2 mb-3">
+          <div className="mb-3 text-sm text-ink2">
             {total.toLocaleString()} sản phẩm{submitted ? ` khớp “${split(submitted).join("” hoặc “")}”` : ""}{exclude ? ` · loại trừ: ${split(exclude).join(", ")}` : ""}
             {last?.funnels && Object.keys(last.funnels).length > 0 && <> · ads theo funnel: {Object.entries(last.funnels).map(([k, v]) => `${k} ${v}`).join(" · ")}</>}
           </div>
@@ -243,7 +275,7 @@ function SearchPage() {
             </Empty></Card>
           ) : (
             <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                 {rows.map((p: any) => <ProductMediaCard key={p.id} p={p} />)}
               </div>
               <LoadMore hasMore={hasMore} loading={loading} onMore={loadMore} shown={rows.length} total={total} />

@@ -37,7 +37,7 @@ export function ExperimentCard({ e, onEdit }: { e: any; onEdit?: () => void }) {
           {[["Impressions", fmt.n(e.impressions)], ["Spend", fmt.money(e.spend)], ["Revenue", fmt.money(e.revenue)], ["ROAS", fmt.n(m.roas, 2)], ["CTR", fmt.pct(m.ctr, 2)], ["CPC", `$${fmt.n(m.cpc, 2)}`],
             ["CVR", fmt.pct(m.cvr, 2)], ["CPA", fmt.money(m.cpa)], ["Refused", e.refused], ["Returned", e.returned], ["Delivery", fmt.pct(m.delivery_rate)],
             ["Refusal", fmt.pct(m.refusal_rate)], ["Ad rejected", `${e.ads_rejected}/${e.ads_submitted}`]].map(([l, v]) => (
-            <div key={l as string} className="rounded-lg px-2 py-1.5" style={{ background: "var(--surface-2)" }}>
+            <div key={l as string} className="rounded-lg px-2 py-1.5" style={{ background: "var(--muted)" }}>
               <div className="text-muted">{l}</div><div className="font-semibold tnum text-sm">{v as any}</div>
             </div>
           ))}

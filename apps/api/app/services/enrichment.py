@@ -1,8 +1,7 @@
 """AI Enrichment (blueprint §2, §15-17, §20): unstructured → structured.
 
 Rule-based classifiers ship by default (vi + en lexicons). When an Anthropic key
-is configured, comment ABSA and refusal-reason classification are upgraded to
-Claude via structured outputs, in batches.
+is configured, comment ABSA is upgraded to Claude via structured outputs, in batches.
 """
 import hashlib
 import re
@@ -215,63 +214,6 @@ def analyze_comments(texts: list[str]) -> tuple[list[dict], str]:
         if out:
             return out, "claude"
     return [analyze_comment_rules(t) for t in texts], "rules"
-
-
-# ============================================================ COD refusal reasons (§16.1)
-REFUSAL_REASONS = {
-    "changed_mind": ["đổi ý", "không cần nữa", "changed mind", "change mind", "không muốn mua", "no longer want", "không lấy nữa"],
-    "price_too_high": ["đắt", "giá cao", "mắc", "expensive", "too expensive", "price high", "không đủ tiền", "no money"],
-    "fake_order": ["fake", "đặt bừa", "đặt nhầm", "không đặt", "didn't order", "prank", "trẻ con đặt", "ảo"],
-    "cannot_contact": ["không nghe máy", "thuê bao", "không liên lạc", "no answer", "unreachable", "switched off", "sai số", "wrong number", "tắt máy"],
-    "expectation_mismatch": ["không giống", "khác hình", "khác quảng cáo", "not as described", "different from ad", "nhỏ hơn", "not like picture", "không như"],
-    "delivery_too_slow": ["lâu quá", "chậm", "too slow", "took too long", "late", "đợi lâu"],
-    "duplicate_order": ["trùng", "duplicate", "đặt 2 lần", "double order", "đã nhận đơn khác"],
-    "bought_elsewhere": ["mua chỗ khác", "đã mua", "bought elsewhere", "already bought", "mua ngoài"],
-    "quality_concern": ["chất lượng", "kém", "quality", "sợ hỏng", "looks cheap", "broken", "hỏng"],
-    "trust_issue": ["lừa", "scam", "không tin", "sợ lừa", "don't trust", "kiểm hàng", "không cho xem hàng", "not allowed to check"],
-}
-
-
-def classify_refusal_rules(note: str | None) -> str | None:
-    if not note:
-        return None
-    t = note.lower()
-    for reason, words in REFUSAL_REASONS.items():
-        if _has(t, words):
-            return reason
-    return "other"
-
-
-_REFUSAL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "results": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"i": {"type": "integer"}, "reason": {"type": "string", "enum": [*REFUSAL_REASONS.keys(), "other"]}},
-                "required": ["i", "reason"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["results"],
-    "additionalProperties": False,
-}
-
-
-def classify_refusals(notes: list[str]) -> list[str | None]:
-    if llm.available() and notes:
-        numbered = "\n".join(f"{i}. {n}" for i, n in enumerate(notes))
-        data = llm.complete_json(
-            system="Classify why a COD customer refused the delivery, based on the call-center / courier note.",
-            user=numbered,
-            schema=_REFUSAL_SCHEMA,
-        )
-        if data:
-            by_i = {r["i"]: r["reason"] for r in data["results"]}
-            return [by_i.get(i) or classify_refusal_rules(n) for i, n in enumerate(notes)]
-    return [classify_refusal_rules(n) for n in notes]
 
 
 # ============================================================ Creative: hook / angle / offer (§20)

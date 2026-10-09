@@ -49,6 +49,23 @@ Nguồn (Meta, TikTok, Pipiads, Minea, Pancake, hãng vận chuyển…)
 | **TikTok Creative Center Top Ads** | — | — | ⚠️ Không giả chữ ký `user-sign` (repo `tiktok-creative-center-api` dùng `tiktok-user-sign`): chỉ dùng preset dán headers từ tài khoản của bạn | — |
 | **Chrome extension "Save to Intelligence"** ([apps/extension](../apps/extension)) | MKT duyệt Meta Ad Library như bình thường; extension bắt dữ liệu trang đã tải (gồm link video) và gửi vào kho. Có nút lưu trang sản phẩm bất kỳ | `INGEST_TOKEN` (nếu đã đặt) | ✅ Đã viết, 7 test offline với dữ liệu thật pass. **Chưa chạy thử trong Chrome thật** | **Cách vào dữ liệu khi không có API.** Không gọi Meta thay bạn, chỉ đọc những gì trang đã tải cho tài khoản của bạn |
 
+### 2.1b Giá bán của đối thủ và review khách (`apps/api/app/services/spy.py`)
+
+Ad library (Meta / TikTok / Google) **không** trả giá bán lẫn comment. Thẻ "Thông tin cho MKT" trên trang sản phẩm vì vậy lấy từ:
+
+| Dữ liệu | Nguồn | Cách lấy | Ghi trên row |
+|---|---|---|---|
+| Giá đối thủ đang bán | nội dung ad (regex ₱ / $ / 199k / 299.000đ / SAR…) | lúc ingest + quét lại | `ads.price`, `price_source=ad_text` |
+| Giá đối thủ đang bán | **landing page** của ad (Shopify `/products/x.json`, JSON-LD `offers`, `og:price`) | `curl_cffi` giả Chrome (httpx bị 429), 1 fetch / URL, cache 14 ngày (`landing_checked_at`) | `price_source=landing`, `original_price` = compare-at |
+| Giá bán lẻ sàn (Walmart / Amazon) | listing commerce | adapter | hiện riêng (`retail_usd`), **không** gộp vào giá đối thủ |
+| Review khách | AliExpress feedback API công khai (listing nguồn hàng của sản phẩm) | 2 trang × 20 review / listing, 14 ngày quét lại (`reviews_checked_at`) | `comments.source=review`, `rating` (sao) → `overall` |
+| Review khách | JSON-LD `review` trên landing page (Judge.me / Loox…) | cùng lượt fetch landing | `comments.source=landing_review` |
+
+`sell_usd` = median giá của **các ad có giá** (không bao giờ là median giá sàn); API trả thêm `price_coverage` (bao nhiêu ad có giá,
+nguồn nào, bao nhiêu ad dẫn về inbox nên không có trang giá) và `sell_by_advertiser` (giá từng đối thủ + nguồn) để MKT tự kiểm.
+Chạy: nút "Quét giá & review đối thủ" (`POST /api/products/{id}/scan`, ~30 s) hoặc scheduler mỗi `SPY_EVERY_MIN` (10) phút,
+`SPY_URLS_PER_RUN` (40) URL ưu tiên sản phẩm WATCHLIST / TESTING / CANDIDATE. Ad dẫn về inbox / app store (`SKIP_HOST`) chỉ có giá khi copy ghi giá.
+
 ### 2.2 Dữ liệu nội bộ (Company Fit)
 
 | Nguồn | API | Trong app | Tier |

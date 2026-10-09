@@ -1,5 +1,9 @@
 """Creative Vault worker (discovery §3-§6).
 
+Spy Ads is a research tool, not a media host: collecting an ad saves its metadata + one small JPEG thumbnail
+(thumbs/, ≤480 px) — images and videos alike. The player streams the source URL on Play. VIDEO_DOWNLOAD=1 brings
+the old full-file vault back; a single creative is still saved on demand (POST /api/creatives/{id}/retry).
+
 pending Creative → download original (CDN URLs expire within hours, so this runs right after
 ingest) → sha256 content address → store creatives/<aa>/<sha>.<ext> → poster/thumbnail →
 perceptual hash (dHash) → creative family (near-duplicate grouping).
@@ -18,7 +22,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,7 +30,6 @@ import httpx
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 
-from . import hls
 from .db import SessionLocal, read_only
 from .events import publish
 from .models import Creative
@@ -44,7 +47,18 @@ HEADERS = {
 }
 EXT = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm", "image/jpeg": ".jpg", "image/png": ".png",
        "image/webp": ".webp", "image/gif": ".gif"}
-FFMPEG = shutil.which("ffmpeg") or hls.ffmpeg_exe()  # PATH, else the imageio_ffmpeg binary (what hls.py transcodes with)
+
+
+def _ffmpeg_exe() -> str | None:
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+FFMPEG = shutil.which("ffmpeg") or _ffmpeg_exe()  # PATH, else the imageio_ffmpeg binary
 FFPROBE = shutil.which("ffprobe") or (FFMPEG and next((str(p) for p in Path(FFMPEG).parent.glob("ffprobe*") if p.is_file()), None))
 if not FFMPEG:
     log.warning("ffmpeg not found (PATH / imageio_ffmpeg): video posters, phash and creative families are disabled")
@@ -135,10 +149,7 @@ def _shrink_image(path: Path) -> str | None:
 
 def _probe(path: Path) -> dict:
     if not FFPROBE:
-        try:
-            return hls.probe(path) if FFMPEG else {}  # width/height/duration from ffmpeg's banner — no ffprobe needed
-        except Exception:
-            return {}
+        return {}
     try:
         out = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
                               "stream=width,height:format=duration", "-of", "default=nw=1", str(path)],
@@ -163,13 +174,14 @@ def _frame(path: Path) -> bytes | None:
 
 
 def source_alive(url: str | None, margin_s: int = 600) -> bool:
-    """Signed CDN links carry their expiry (fbcdn `oe=<hex unix time>`, TikTok `x-expires=<unix>`); true while the
-    original is still playable. Links without an expiry (AliExpress / 1688 images) stay playable."""
+    """Signed CDN links carry their expiry (fbcdn `oe=<hex unix time>`, TikTok `x-expires=<unix>`, tiktokcdn video
+    `/<sig>/<hex unix time>/video/`, TikTok Ad Library `/api/v1/cdn/<unix>/`); true while the original is still
+    playable. Links without an expiry (AliExpress / 1688 images) stay playable."""
     if not url:
         return False
-    if m := re.search(r"[?&]oe=([0-9A-Fa-f]+)", url):
+    if m := (re.search(r"[?&]oe=([0-9A-Fa-f]+)", url) or re.search(r"tiktokcdn[\w.-]*/[0-9a-f]{32}/([0-9a-f]{8})/", url)):
         return int(m.group(1), 16) - margin_s > time.time()
-    if m := re.search(r"[?&]x-expires=(\d+)", url):
+    if m := (re.search(r"[?&]x-expires=(\d+)", url) or re.search(r"tiktok\.com/api/v1/cdn/(\d{10})/", url)):
         return int(m.group(1)) - margin_s > time.time()
     return True
 
@@ -180,7 +192,7 @@ def _strip(url: str | None) -> str:
 
 
 _SHARED = ("storage_key", "thumb_key", "sha256", "phash", "mime", "size_bytes", "width", "height", "duration_sec", "family_id",
-           "hls_key", "download_key", "renditions", "stored_bytes")
+           "stored_bytes")
 
 
 def _twin(db, c: Creative, cond) -> Creative | None:
@@ -194,8 +206,7 @@ def _same_owner(a: Creative, b: Creative) -> bool:
 
 
 def _in_store(d: Creative) -> bool:
-    k = d.hls_key or d.storage_key
-    return bool(k) and store().exists(k)
+    return bool(d.storage_key) and store().exists(d.storage_key)
 
 
 def process_creative(cid: int):
@@ -276,12 +287,9 @@ def _process(cid: int):
                         except httpx.HTTPError:
                             pass
                     poster = poster or _frame(tmp)
-                if c.type == "video" and VOD_ENABLED:
-                    _store_hls(c, tmp, sha)
-                else:
-                    c.stored_bytes = tmp.stat().st_size  # after shrink, what the store holds — put_file moves/unlinks tmp
-                    if not store().exists(key):
-                        store().put_file(key, tmp, mime)
+                c.stored_bytes = tmp.stat().st_size  # after shrink, what the store holds — put_file moves/unlinks tmp
+                if not store().exists(key):
+                    store().put_file(key, tmp, mime)
                 if poster:
                     try:
                         c.phash, w, h = dhash(poster)
@@ -324,7 +332,7 @@ def _process(cid: int):
             tmp.unlink(missing_ok=True)
 
 
-VOD_ENABLED = os.getenv("VOD", "1") != "0"
+VIDEO_DOWNLOAD = os.getenv("VIDEO_DOWNLOAD", "0") == "1"  # bulk-download every collected video into the vault
 MIN_FREE_BYTES = int(float(os.getenv("MIN_FREE_GB", "5")) * 1024 ** 3)
 
 
@@ -345,25 +353,6 @@ def _skip_reason(db, c: Creative) -> str | None:
     return None
 
 
-def _store_hls(c: Creative, src: Path, sha: str):
-    """Video on Demand: original → adaptive HLS ladder (360p/540p), uploaded file by file, original discarded."""
-    # per-job dir: two workers on the same sha used to share tmp/hls_<sha> and rmtree each other mid-transcode
-    out = Path(tempfile.mkdtemp(prefix=f"hls_{sha}_", dir=DATA_DIR / "tmp"))
-    try:
-        res = hls.transcode(src, out)
-        prefix = f"hls/{sha}"
-        if not store().exists(f"{prefix}/master.m3u8"):
-            for f, rel in hls.files(out):  # media first, master playlist last
-                store().put_file(f"{prefix}/{rel}", f, hls.content_type(f))
-        top = hls.top_rendition(res["renditions"])
-        c.hls_key = f"{prefix}/master.m3u8"
-        c.download_key = c.storage_key = f"{prefix}/{top}/index.m4s"
-        c.renditions, c.stored_bytes, c.mime = res["renditions"], res["bytes"], "video/mp4"
-        c.width, c.height, c.duration_sec = res["width"], res["height"], res["duration"]
-    finally:
-        hls.cleanup(out)
-
-
 def assign_family(db, c: Creative) -> int:
     if c.sha256:
         same = db.scalar(select(Creative.family_id).where(Creative.sha256 == c.sha256, Creative.family_id.is_not(None), Creative.id != c.id))
@@ -377,12 +366,52 @@ def assign_family(db, c: Creative) -> int:
     return c.id
 
 
-def enqueue(ids: list[int]):
+def grab_thumb(cid: int) -> str | None:
+    """Save one small JPEG (≤480 px) for a creative the moment it is collected: a video's cover frame, an image itself.
+    Signed CDN links (Meta / TikTok) die within hours and marketplace CDNs block hotlinking, so this is what the cards
+    show. Returns the thumb key (None when the source is gone); also called on demand by GET /api/creatives/{id}/thumb."""
+    try:
+        with SessionLocal() as db, read_only():
+            c = db.get(Creative, cid)
+            if not c:
+                return None
+            if c.thumb_key:
+                return c.thumb_key
+            url = c.preview_source_url if c.type == "video" else c.source_url
+            if not source_alive(url):
+                return None
+        r = httpx.get(url, headers=HEADERS, timeout=20, follow_redirects=True)
+        if r.status_code != 200 or not r.content:
+            if c.type == "image" and r.status_code in (403, 404, 410):
+                with SessionLocal() as db:
+                    db.execute(update(Creative).where(Creative.id == cid, Creative.status == "pending")
+                               .values(status="expired", error=f"Ảnh gốc không còn (HTTP {r.status_code})"))
+                    db.commit()
+            return None
+        sha = hashlib.sha256(r.content).hexdigest()
+        tkey = f"thumbs/{sha[:2]}/{sha}.jpg"
+        if not store().exists(tkey):
+            store().put(tkey, _thumb_jpeg(r.content), "image/jpeg")
+        with SessionLocal() as db:
+            db.execute(update(Creative).where(Creative.id == cid, Creative.thumb_key.is_(None)).values(thumb_key=tkey))
+            db.commit()
+        return tkey
+    except Exception as e:  # network blip / not an image: the next enqueue_pending tick tries again
+        log.warning("thumb grab failed for creative %s: %s", cid, e)
+        return None
+
+
+def enqueue(ids: list[int], force: bool = False):
+    """Every creative: one small thumbnail, nothing else. The full file (video / original image) only when `force`
+    (a user asked to save that one) or VIDEO_DOWNLOAD=1 — collecting ads never downloads media in bulk."""
     if not ids:
         return
     with SessionLocal() as db, read_only():
-        types =dict(db.execute(select(Creative.id, Creative.type).where(Creative.id.in_(ids))).all())
+        types = dict(db.execute(select(Creative.id, Creative.type).where(Creative.id.in_(ids))).all())
     for cid in ids:  # submission order = priority order
+        if not (force or (VIDEO_DOWNLOAD and types.get(cid) == "video")):
+            _img_pool.submit(grab_thumb, cid)
+            continue
         with _lock:
             if cid in _inflight:
                 continue
@@ -426,7 +455,7 @@ def expire_dead_links() -> int:
 
 def enqueue_pending(limit: int = 500) -> int:
     """Target-market ads first, then strongest ads (force score = days running + variants + placements), newest first
-    among equals. When today's video quota is used up only images are queued."""
+    among equals. Thumbnails always; full videos only with VIDEO_DOWNLOAD=1 and today's quota left."""
     from .models import Ad, Product
     from .retention import BUCKETS, bucket_of, video_quota_left
 
@@ -437,8 +466,10 @@ def enqueue_pending(limit: int = 500) -> int:
              .join(Product, Product.id == Creative.product_id, isouter=True).where(Creative.status == "pending")
              .order_by(Ad.in_target.desc().nulls_last(), Product.opportunity_score.desc().nulls_last(),
                        Ad.force_score.desc().nulls_last(), Creative.id.desc()))
-        # two lanes: images never sit behind the video backlog (and keep flowing once the video quota is used)
-        ids = list(db.scalars(q.where(Creative.type == "image").limit(limit)))
+        # thumbnails still missing, last day only: older signed links are dead, the rest is fetched on view
+        # (GET /api/creatives/{id}/thumb) — re-scanning 20k dead rows every tick would starve the fresh ones
+        recent = Creative.collected_at >= datetime.utcnow() - timedelta(days=1)
+        ids = list(db.scalars(q.where(Creative.thumb_key.is_(None), recent).limit(limit)))
         # videos: one lane per network bucket, interleaved, so a Meta backlog never starves TikTok / Snapchat;
         # lane size grows with the backlog (80 per tick never caught up with 18k pending)
         nets = {b: [n for n in NETWORKS if bucket_of(n) == b] for b in BUCKETS}
@@ -448,7 +479,7 @@ def enqueue_pending(limit: int = 500) -> int:
             if net in NETWORKS:
                 backlog[bucket_of(net)] += n
         lanes = [list(db.scalars(q.where(Creative.type == "video", Creative.network.in_(nets[b])).limit(max(80, backlog[b] // 20))))
-                 for b in BUCKETS if backlog[b] and video_quota_left(db, b) != 0]
+                 for b in BUCKETS if VIDEO_DOWNLOAD and backlog[b] and video_quota_left(db, b) != 0]
         ids += [cid for tier in itertools.zip_longest(*lanes) for cid in tier if cid is not None]
     enqueue(ids)
     return len(ids)

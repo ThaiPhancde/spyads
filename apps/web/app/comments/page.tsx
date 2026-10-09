@@ -49,7 +49,7 @@ export default function CommentIntel() {
                 <div className="mt-3 space-y-2">
                   <div className="text-[11px] text-muted">Engine: {res.engine}</div>
                   {res.results.map((r: any, i: number) => (
-                    <div key={i} className="text-xs rounded-lg p-2" style={{ background: "var(--surface-2)" }}>
+                    <div key={i} className="text-xs rounded-lg p-2" style={{ background: "var(--muted)" }}>
                       <div className="mb-1">“{r.text}”</div>
                       <pre className="text-[11px] whitespace-pre-wrap">{JSON.stringify({ overall: r.overall, ...r.aspects, purchase_intent: r.purchase_intent }, null, 2)}</pre>
                     </div>

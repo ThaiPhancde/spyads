@@ -14,7 +14,6 @@ What costs space is video: ~12 MB each, vs a whole database of ~14 MB. So by def
 Never expired automatically (protected):
   · creatives pinned by a user (📌)
   · products somebody voted LOVE / TEST / WATCH on
-  · products with orders, experiments or ad spend (company data)
   · ads saved through the Chrome extension / manual import (saved_by)
 
 Set a retention value to 0 to disable that rule. Archived videos can be re-downloaded ("Thử lại") only while
@@ -28,7 +27,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .models import Ad, AdMetric, Creative, Event, Experiment, Order, Vote
+from .models import Ad, Creative, Event, Vote
 from .storage import BACKEND, DATA_DIR, store
 
 
@@ -140,9 +139,6 @@ def video_quota_left(db: Session, bucket: str | None = None) -> int | None:
 def protected_products(db: Session) -> set[int]:
     ids: set[int] = set()
     ids |= {p for (p,) in db.execute(select(Vote.product_id).where(Vote.decision.in_(["LOVE", "TEST", "WATCH"])))}
-    ids |= {p for (p,) in db.execute(select(Order.product_id).distinct())}
-    ids |= {p for (p,) in db.execute(select(Experiment.product_id).distinct())}
-    ids |= {p for (p,) in db.execute(select(AdMetric.product_id).where(AdMetric.product_id.is_not(None)).distinct())}
     ids |= {p for (p,) in db.execute(select(Ad.product_id).where(Ad.saved_by.is_not(None), Ad.product_id.is_not(None)).distinct())}
     return ids
 
@@ -158,7 +154,7 @@ def usage(db: Session) -> dict:
     files = stored_files(db, fresh=True)
     for r in files:
         out[r.type]["count"] += r.files
-        out[r.type]["bytes"] += int(r.bytes or 0)  # stored_bytes (HLS ladder) when available, each file once
+        out[r.type]["bytes"] += int(r.bytes or 0)  # stored_bytes when available, each file once
     for st, n in db.execute(select(Creative.status, func.count()).where(Creative.status.in_(["archived", "pending"])).group_by(Creative.status)):
         out[st] = n
     out["pinned"] = sum(int(r.pinned or 0) for r in files)  # pinned rows in the vault — same scan, not a second one (no index on pinned)
@@ -211,9 +207,8 @@ def trim_over_budget(db: Session, prot: set[int], now: datetime, dry_run: bool =
             res["trimmed_bytes"] += size
             if dry_run:
                 continue
-            hls_dir = key.rsplit("/", 2)[0] if key and key.startswith("hls/") else None
             try:
-                store().delete_prefix(hls_dir + "/") if hls_dir else store().delete(key)
+                store().delete(key)
             except Exception:
                 continue
             for cr in group:
@@ -272,7 +267,6 @@ def run_cleanup(db: Session, dry_run: bool = False, reset: bool = False) -> dict
             if key in keep_keys:
                 res["kept_shared"] += len(group)
                 continue
-            hls_dir = key.rsplit("/", 2)[0] if key and key.startswith("hls/") else None  # hls/<sha>/<r>/index.m4s → hls/<sha>
             size = group[0].stored_bytes or (store().size(key) if key else 0) or group[0].size_bytes or 0
             res["freed_bytes"] += size
             res["archived"] += len(group)
@@ -280,7 +274,7 @@ def run_cleanup(db: Session, dry_run: bool = False, reset: bool = False) -> dict
                 continue
             if key:
                 try:
-                    store().delete_prefix(hls_dir + "/") if hls_dir else store().delete(key)
+                    store().delete(key)
                 except Exception:
                     continue
             for cr in group:
@@ -324,7 +318,7 @@ def run_cleanup(db: Session, dry_run: bool = False, reset: bool = False) -> dict
     if BACKEND == "local" and tmp.exists():
         import shutil
 
-        for f in tmp.iterdir():  # *.part downloads and leaked hls_* transcode dirs
+        for f in tmp.iterdir():  # leaked *.part downloads
             if now.timestamp() - f.stat().st_mtime > 86400:
                 res["tmp_deleted"] += 1
                 if not dry_run:

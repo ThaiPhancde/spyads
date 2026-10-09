@@ -188,6 +188,9 @@ JUNK_NAME = re.compile(r"[₱$€£¥]\s?\d[\d.,]*|\d[\d.,]*\s?(php|sar|aed|usd|
                        r"|\b(sale|discount|promo|free ?shipping|cod|buy now|order now|giảm giá|freeship|only|lang|فقط)\b", re.I)
 
 
+BUCKET_NAME = re.compile(r"\(chưa đặt tên\)\s*$| creative$", re.I)  # ingest.guess_product_name / the fallback above
+
+
 def clean_name(name: str | None, advertiser: str | None = None) -> str | None:
     """Ad-copy junk is not a product name: price / discount fragments are stripped, the advertiser's own name is rejected."""
     n = re.sub(r"\s+", " ", JUNK_NAME.sub(" ", name or "")).strip(" -,.|:!")
@@ -206,7 +209,11 @@ def resolve_product(db: Session, candidate: dict, source: str | None = None) -> 
     # ingest can pass `advertiser` to enable the equal-to-page-name check
     name = clean_name(candidate["name"], adv) or (f"{adv} creative" if adv else candidate["name"].strip())
     candidate = {**candidate, "name": name}
-    product, score = find_best_match(db, candidate)
+    if BUCKET_NAME.search(name):  # advertiser bucket: exact page name only — "Beplain Vietnam (chưa đặt tên)" used to
+        product = db.scalar(select(Product).where(func.lower(Product.canonical_name) == name.strip().lower()))  # land in "J&T Express Vietnam (chưa đặt tên)"
+        score = 1.0 if product else 0.0
+    else:
+        product, score = find_best_match(db, candidate)
     created = False
     if product is None or score < MATCH_THRESHOLD:
         product = Product(
@@ -238,9 +245,9 @@ def resolve_product(db: Session, candidate: dict, source: str | None = None) -> 
 
 def merge_products(db: Session, source: Product, target: Product):
     """Manual correction: merge `source` into `target` (all child rows re-pointed)."""
-    from ..models import Ad, Comment, Experiment, Order, ProductDailySnapshot, Store, Alert, LifecycleEvent
+    from ..models import Ad, Comment, ProductDailySnapshot, Store, Alert, LifecycleEvent
 
-    for model in (Ad, Comment, Experiment, Order, Store, Alert):
+    for model in (Ad, Comment, Store, Alert):
         for row in db.scalars(select(model).where(model.product_id == source.id)).all():
             row.product_id = target.id
     for model in (ProductDailySnapshot, LifecycleEvent):

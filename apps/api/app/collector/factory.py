@@ -1,13 +1,15 @@
 """Connector Factory (spy_app_chat_summary §10). Adding a source = add one class here."""
 from __future__ import annotations
 
-from .adapters.ad_libraries import SnapchatAdsLibraryConnector, TikTokAdLibraryConnector, TikTokTopAdsConnector
+from .adapters.ad_libraries import (SnapchatAdsLibraryConnector, TikTokAdLibraryConnector, TikTokTopAdsConnector,
+                                    TikTokTopAdsHeadlessConnector)
+from .adapters.ali1688 import Ali1688Connector
 from .adapters.apify import (Apify1688Connector, ApifyTaobaoConnector,
                              ApifyTikTokLibraryConnector, ApifyTikTokTopAdsConnector)
 from .adapters.generic import (ApifyActorConnector, ExportFolderConnector, GenericHttpConnector,
                                TikTokCommercialConnector)
 from .adapters.marketplaces import AliExpressSearchConnector
-from .adapters.meta import ApifyMetaConnector, MetaAdsInsightsConnector, MetaGraphConnector, MetaLibraryConnector
+from .adapters.meta import ApifyMetaConnector, MetaGraphConnector, MetaLibraryConnector
 from .base import BaseConnector
 
 
@@ -15,9 +17,9 @@ class ConnectorFactory:
     connectors: dict[str, type[BaseConnector]] = {
         c.key: c for c in (
             MetaLibraryConnector, MetaGraphConnector, ApifyMetaConnector,
-            TikTokCommercialConnector, ApifyActorConnector, GenericHttpConnector, ExportFolderConnector, MetaAdsInsightsConnector,
+            TikTokCommercialConnector, ApifyActorConnector, GenericHttpConnector, ExportFolderConnector,
             SnapchatAdsLibraryConnector, TikTokAdLibraryConnector, TikTokTopAdsConnector,
-            AliExpressSearchConnector, Apify1688Connector, ApifyTaobaoConnector, ApifyTikTokTopAdsConnector,
+            TikTokTopAdsHeadlessConnector, AliExpressSearchConnector, Ali1688Connector, Apify1688Connector, ApifyTaobaoConnector, ApifyTikTokTopAdsConnector,
             ApifyTikTokLibraryConnector,
         )
     }
@@ -36,11 +38,7 @@ class ConnectorFactory:
                 for k, c in cls.connectors.items()]
 
 
-# Push-only sources (no fetch): data arrives through POST /ingest/* or /webhooks/*
+# Push-only sources (no fetch): data arrives through POST /ingest/*
 PUSH_SOURCES = {
     "extension": "Chrome extension (MKT Save to Intelligence)",
-    "pancake": "Pancake POS / CRM (webhook)",
-    "crm": "CRM / Order system (webhook)",
-    "carrier": "Hãng vận chuyển (webhook)",
-    "comments": "Comments / inbox (webhook)",
 }

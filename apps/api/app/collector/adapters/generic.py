@@ -5,13 +5,17 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
+import httpx
+
 from ...storage import DATA_DIR
-from ..base import BaseConnector, FetchParams, NotConfigured, RateLimit
+from ..base import AuthExpired, BaseConnector, ConnectorError, FetchParams, NotConfigured, RateLimit
 from ..contract import AdRecord, MediaItem
 
 # Header aliases seen in spy-tool exports (lower-cased, spaces/underscores ignored).
@@ -249,45 +253,147 @@ def _flatten(d: dict, prefix: str = "") -> dict:
     return out
 
 
+# Commercial Content API only holds ads delivered in these countries (docs: commercial-content-api-supported-countries).
+TIKTOK_CCA_COUNTRIES = {"AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT", "LV", "LT",
+                        "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE", "NO", "IS", "LI", "GB", "CH"}
+TIKTOK_CCA_QUERY_FIELDS = ("ad.id,ad.first_shown_date,ad.last_shown_date,ad.status,ad.status_statement,ad.videos,ad.image_urls,"
+                           "ad.reach,advertiser.business_id,advertiser.business_name,advertiser.paid_for_by")
+TIKTOK_CCA_DETAIL_FIELDS = ("ad.id,ad.title,ad.external_url,ad.call_to_action,ad.advertising_objective,advertiser.country_code,"
+                            "advertiser.follower_count,advertiser.profile_url,ad_group.targeting_info")
+_tiktok_tokens: dict[str, tuple[str, float]] = {}  # client_key -> (access_token, expires_at)
+
+
+def _tiktok_count(v) -> int | None:
+    """Reach comes abbreviated ("11K", "1.2M", "100K+") — keep the lower bound as an int."""
+    m = re.match(r"([\d.]+)\s*([KMB]?)", str(v or "").upper())
+    return int(float(m.group(1)) * {"": 1, "K": 1e3, "M": 1e6, "B": 1e9}[m.group(2)]) if m else None
+
+
+def _tiktok_date(v) -> str | None:
+    v = str(v or "")
+    return f"{v[:4]}-{v[4:6]}-{v[6:8]}" if len(v) == 8 and v.isdigit() else None
+
+
+def map_tiktok_commercial(it: dict, det: dict, countries: list[str], query: str | None) -> AdRecord:
+    ad, adv = {**it.get("ad", {}), **(det.get("ad") or {})}, {**it.get("advertiser", {}), **(det.get("advertiser") or {})}
+    targeted = sorted(c.upper() for c in ((det.get("ad_group") or {}).get("targeting_info") or {}).get("country") or [])
+    cs = targeted or countries
+    vids, reach = ad.get("videos") or [], (ad.get("reach") or {}).get("unique_users_seen")
+    return AdRecord(
+        source="tiktok_commercial", source_ad_id=str(ad.get("id")), platform="tiktok", platforms=["tiktok"],
+        country=cs[0] if len(cs) == 1 else None, countries=cs or ["ALL"],
+        advertiser=adv.get("business_name"), page_id=str(adv.get("business_id") or "") or None, advertiser_url=adv.get("profile_url"),
+        title=ad.get("title"), ad_text=ad.get("title"), cta_text=ad.get("call_to_action"),
+        creative_type="video" if vids else ("image" if ad.get("image_urls") else None),
+        media=[MediaItem("video", v["url"], preview_url=v.get("cover_image_url")) for v in vids if v.get("url")]
+        + [MediaItem("image", u) for u in ad.get("image_urls") or []],
+        landing_page=ad.get("external_url"), product_url=ad.get("external_url"),
+        first_seen=_tiktok_date(ad.get("first_shown_date")), last_seen=_tiktok_date(ad.get("last_shown_date")),
+        active=ad.get("status") == "active" if ad.get("status") else None,
+        reach=_tiktok_count(reach), impressions_text=str(reach) if reach else None, page_likes=adv.get("follower_count"),
+        matched_query=query, snapshot_url=f"https://library.tiktok.com/ads/detail/?ad_id={ad.get('id')}",
+        raw_source={"query": it, "detail": det},
+    )
+
+
 class TikTokCommercialConnector(BaseConnector):
-    """TikTok Commercial Content API (official; ads shown in EU/EEA/UK/CH). Needs approved research access."""
+    """TikTok Commercial Content API (official) — same ads as library.tiktok.com, but stable instead of 429 scraping.
+
+    Coverage = ads delivered in EU/EEA/UK/CH only: PH / SA / AE / US / VN return nothing (no fallback to "all",
+    or EU ads leak into PH jobs). Query: max 10 ads/request, paged with search_id; detail = 1 request/ad, so only
+    the first `details` ads get landing page / CTA / targeting. Token: client_credentials, ~2 h, cached per process.
+    """
 
     key = "tiktok_commercial"
-    name = "TikTok Commercial Content API (official)"
+    name = "TikTok Commercial Content API (official · EU/UK)"
     kind = "official_api"
     group = "transparency"
     rate_limit = RateLimit(requests_per_minute=30, retries=3)
     supports_search = True
     config_fields = [
-        {"key": "client_key", "label": "Client key", "secret": True, "required": True},
-        {"key": "client_secret", "label": "Client secret", "secret": True, "required": True},
+        {"key": "client_key", "label": "Client key (để trống = TIKTOK_CLIENT_KEY trong .env)", "secret": True},
+        {"key": "client_secret", "label": "Client secret (để trống = TIKTOK_CLIENT_SECRET trong .env)", "secret": True},
+        {"key": "details", "label": "Số ad lấy chi tiết (landing page, CTA, targeting) mỗi lần tìm — mặc định 10"},
+        {"key": "days", "label": "Số ngày gần nhất (mặc định 90, tối đa 365)"},
     ]
+    API = "https://open.tiktokapis.com/v2"
+
+    def authenticate(self) -> None:
+        self.ck = self.config.get("client_key") or os.getenv("TIKTOK_CLIENT_KEY")
+        self.cs = self.config.get("client_secret") or os.getenv("TIKTOK_CLIENT_SECRET")
+        if not (self.ck and self.cs):
+            raise NotConfigured("Thiếu TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET (.env hoặc cấu hình connector)")
 
     def _token(self) -> str:
-        r = self.request("POST", "https://open.tiktokapis.com/v2/oauth/token/",
-                         data={"client_key": self.config["client_key"], "client_secret": self.config["client_secret"],
-                               "grant_type": "client_credentials"})
-        return r.json()["access_token"]
+        tok, exp = _tiktok_tokens.get(self.ck, ("", 0.0))
+        if time.time() < exp:
+            return tok
+        j = self.request("POST", f"{self.API}/oauth/token/", data={
+            "client_key": self.ck, "client_secret": self.cs, "grant_type": "client_credentials"}).json()
+        if not j.get("access_token"):  # wrong key/secret: {"error": "invalid_client", ...}
+            raise AuthExpired(f"TikTok OAuth: {j.get('error')} — {j.get('error_description')}")
+        _tiktok_tokens[self.ck] = (j["access_token"], time.time() + int(j.get("expires_in") or 7200) - 300)
+        return j["access_token"]
+
+    def _post(self, path: str, fields: str, body: dict) -> dict:
+        try:
+            r = self.request("POST", f"{self.API}/research/adlib/{path}/", params={"fields": fields},
+                             headers={"Authorization": f"Bearer {self._token()}"}, json=body)
+        except httpx.HTTPStatusError as e:  # 400 carries the reason in error.message
+            raise ConnectorError(f"TikTok {path} HTTP {e.response.status_code}: {e.response.text[:300]}") from None
+        j = r.json()
+        err = j.get("error") or {}
+        if err.get("code") not in (None, "ok"):
+            raise ConnectorError(f"TikTok {path}: {err.get('code')} {err.get('message')} (log_id {err.get('log_id')})")
+        return j.get("data") or {}
+
+    def query(self, query: str, countries: list[str], days: int, active_only: bool, video_only: bool, search_id: str = "") -> dict:
+        now = datetime.utcnow()
+        filters = {"ad_published_date_range": {"min": (now - timedelta(days=min(days, 365))).strftime("%Y%m%d"),
+                                               "max": now.strftime("%Y%m%d")}}
+        if countries:
+            filters["country_code_list"] = countries
+        if active_only:
+            filters["ad_status"] = "ACTIVE"
+        if video_only:
+            filters["ad_type"] = "VIDEO"
+        body = {"filters": filters, "search_term": query[:50], "search_type": "fuzzy_phrase", "max_count": 10}
+        if search_id:
+            body["search_id"] = search_id
+        return self._post("ad/query", TIKTOK_CCA_QUERY_FIELDS, body)
 
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
         self.authenticate()
-        tok = self._token()
-        now = datetime.utcnow()
-        since = params.since.replace("-", "")[:8] if params.since else (now - timedelta(days=90)).strftime("%Y%m%d")
-        body = {"filters": {"ad_published_date_range": {"min": since, "max": now.strftime("%Y%m%d")},
-                            "country_code": (params.countries or ["ALL"])[0]},
-                "search_term": params.query or "", "search_type": "fuzzy_phrase", "max_count": min(params.limit, 50)}
-        r = self.request("POST", "https://open.tiktokapis.com/v2/research/adlib/ad/query/?fields=ad,advertiser",
-                         headers={"Authorization": f"Bearer {tok}"}, json=body)
-        for it in (r.json().get("data") or {}).get("ads", []):
-            ad, adv = it.get("ad", {}), it.get("advertiser", {})
-            vids = ad.get("videos") or []
-            yield AdRecord(
-                source=self.key, source_ad_id=str(ad.get("id")), platform="tiktok", country=body["filters"]["country_code"],
-                advertiser=adv.get("business_name"), page_id=str(adv.get("business_id") or ""),
-                first_seen=ad.get("first_shown_date"), last_seen=ad.get("last_shown_date"), active=ad.get("status") == "active",
-                creative_type="video" if vids else ("image" if ad.get("image_urls") else None),
-                media=[MediaItem("video", v["url"], preview_url=v.get("cover_image_url")) for v in vids if v.get("url")]
-                + [MediaItem("image", u) for u in ad.get("image_urls") or []],
-                raw_source=it,
-            )
+        q = (params.query or "").strip()
+        if not q:
+            return
+        codes = [c.upper() for c in params.countries or [] if c.upper() != "ALL"]
+        eu = [c for c in codes if c in TIKTOK_CCA_COUNTRIES]
+        if codes and not eu:
+            return  # PH / SA / US …: not covered by the API
+        days, details_left = int(self.config.get("days") or 90), int(self.config.get("details") or 10)
+        sid, got, seen = "", 0, set()
+        while got < params.limit:
+            data = self.query(q, eu, days, params.active_only, params.media_type == "video", sid)
+            for it in data.get("ads") or []:
+                aid = (it.get("ad") or {}).get("id")
+                if not aid or aid in seen:
+                    continue
+                seen.add(aid)
+                det = {}
+                if details_left > 0:
+                    details_left -= 1
+                    try:
+                        det = self._post("ad/detail", TIKTOK_CCA_DETAIL_FIELDS, {"ad_id": aid})
+                    except ConnectorError:
+                        pass  # the query row alone is still a valid ad
+                got += 1
+                yield map_tiktok_commercial(it, det, eu, q)
+            sid = data.get("search_id") or ""
+            if not data.get("has_more") or not data.get("ads") or not sid:
+                break
+
+    def health_check(self) -> dict:
+        self.authenticate()
+        n = len(self.query("shop", ["FR"], 30, False, False).get("ads") or [])
+        return {"status": "healthy" if n else "degraded", "probe": "shop/FR", "ads": n}

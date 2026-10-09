@@ -22,7 +22,7 @@ from ..collector.factory import PUSH_SOURCES, ConnectorFactory
 from ..db import get_db
 from ..ingest import ingest_ads
 from ..markets import REGION_LABEL, REGIONS, ad_scope_filter, product_in_scope, targets
-from ..models import (Ad, AdMetric, AdSource, Advertiser, Comment, Connector, Creative, Event, Order, Product, SearchJob,
+from ..models import (Ad, AdSource, Advertiser, Connector, Creative, Event, Product, SearchJob,
                       TrackedQuery, Vote)
 from ..services.discovery import VOTE_REASONS, VOTE_VALUE, market_dna
 from ..storage import BACKEND, DATA_DIR, store
@@ -64,18 +64,7 @@ def media_url(key: str | None, download_name: str | None = None) -> str | None:
     return f"/api/media/{key}" + (f"?dl={download_name}" if download_name else "")
 
 
-def source_alive(url: str | None, margin_s: int = 600) -> bool:
-    """Signed CDN links carry their expiry (fbcdn `oe=<hex unix time>`, TikTok `x-expires=<unix>`); true while the
-    original is still playable. Links without an expiry (AliExpress / 1688 images) stay playable."""
-    import time
-
-    if not url:
-        return False
-    if m := re.search(r"[?&]oe=([0-9A-Fa-f]+)", url):
-        return int(m.group(1), 16) - margin_s > time.time()
-    if m := re.search(r"[?&]x-expires=(\d+)", url):
-        return int(m.group(1)) - margin_s > time.time()
-    return True
+source_alive = media.source_alive
 
 
 def creative_dict(c: Creative, ad: Ad | None = None, adv_name: str | None = None) -> dict:
@@ -84,14 +73,16 @@ def creative_dict(c: Creative, ad: Ad | None = None, adv_name: str | None = None
     return {
         "id": c.id, "type": c.type, "status": c.status, "error": c.error, "product_id": c.product_id, "ad_id": c.ad_id,
         "url": media_url(c.storage_key) if c.status == "stored" else None,
-        "hls": media_url(c.hls_key) if c.status == "stored" and c.hls_key else None,  # adaptive stream (VOD)
-        "renditions": c.renditions or [],
-        # no saved thumbnail yet (video still pending / expired): poster from the original preview link so MKT sees the product
-        "thumb": media_url(c.thumb_key) if c.thumb_key else (c.preview_source_url if c.type == "video" and source_alive(c.preview_source_url) else None),
+        # saved ≤480 px JPEG; not grabbed yet → /thumb fetches + saves it on first view (fast, no hotlink / expiry issues)
+        "thumb": media_url(c.thumb_key) if c.thumb_key else (
+            f"/api/creatives/{c.id}/thumb" if source_alive(c.preview_source_url if c.type == "video" else c.source_url) else None),
         "download": f"/api/creatives/{c.id}/download" if c.status == "stored" else None,
         "source": c.source, "source_platform": c.source_platform, "source_ad_id": c.source_ad_id,
         "width": c.width, "height": c.height, "duration": c.duration_sec, "size": c.size_bytes, "family_id": c.family_id,
-        "stream_url": c.source_url if c.status != "stored" and source_alive(c.source_url) else None,  # not in our vault (yet): show from origin
+        # not in our vault: the player streams the source on Play — light (~360p) rendition first, never re-encoded
+        "stream_url": next((u for u in (c.sd_source_url, c.source_url) if source_alive(u)), None) if c.status != "stored" else None,
+        "origin_url": c.source_url,  # original link as collected (copy / open / download in the browser); may have expired
+        "origin_alive": source_alive(c.source_url),
         "pinned": bool(c.pinned), "archived": c.status == "archived", "sha256": c.sha256, "first_seen_at": c.first_seen_at, "collected_at": c.collected_at, "file_name": name,
         **({"ad": ad_brief(ad, adv_name)} if ad else {}),
     }
@@ -154,26 +145,35 @@ def landing_links(db: Session, products: list[Product]) -> dict[int, str]:
     return {pid: v[1] for pid, v in best.items()}
 
 
-def covers(db: Session, products: list[Product]) -> dict[int, Creative]:
+def covers(db: Session, products: list[Product], nets: list[str] | None = None) -> dict[int, Creative]:
+    """Product → card media. `nets` (source filter) = only creatives from those networks (NULL network = old Meta rows)."""
+    in_nets = (lambda c: c.network in nets or (c.network is None and "meta" in nets)) if nets else (lambda c: True)
     ids = [p.cover_creative_id for p in products if p.cover_creative_id]
     out = {c.id: c for c in db.scalars(select(Creative).where(Creative.id.in_(ids)))} if ids else {}
     res = {p.id: out.get(p.cover_creative_id) for p in products}
-    # the stored cover can be archived / expired later while the product still has another playable creative
-    bad = [pid for pid, c in res.items() if c is None or c.status != "stored"]
+    # the stored cover can be archived / expired later, or be an image while a video still plays from its source
+    bad = [pid for pid, c in res.items() if c is None or c.status != "stored" or c.type != "video" or not in_nets(c)]
     if bad:
         best: dict[int, Creative] = {}
         for c in db.scalars(select(Creative).where(Creative.product_id.in_(bad), Creative.status == "stored")
                             .order_by(Creative.type.desc(), Creative.id)):  # "video" sorts before "image" when descending
-            best.setdefault(c.product_id, c)
-        still = [pid for pid in bad if pid not in best]
-        if still:  # nothing stored yet → a creative whose original link still works (shown straight from the source)
+            if in_nets(c):
+                best.setdefault(c.product_id, c)
+        still = [pid for pid in bad if pid not in best or best[pid].type != "video"]
+        dead: dict[int, Creative] = {}  # last resort: a video whose link expired — the card says so + links the ad page
+        if still:  # nothing stored (or only images; videos aren't downloaded by default) → a creative whose original link still works
             for c in db.scalars(select(Creative).where(Creative.product_id.in_(still), Creative.status.in_(["pending", "skipped", "failed", "archived", "expired"]))
                                 .order_by(Creative.type.desc(), Creative.id.desc())):
-                if c.product_id not in best and source_alive(c.source_url):
+                cur = best.get(c.product_id)
+                if (cur is None or (cur.type != "video" and c.type == "video")) and in_nets(c) and source_alive(c.source_url):
                     best[c.product_id] = c
+                elif c.type == "video" and in_nets(c):
+                    dead.setdefault(c.product_id, c)
         for pid in bad:
             if pid in best:
                 res[pid] = best[pid]
+            elif res[pid] is None or not in_nets(res[pid]):
+                res[pid] = dead.get(pid)  # never another network's media under a source filter
     return res
 
 
@@ -286,57 +286,6 @@ def ingest_creative(body: IngestCreative, db: Session = Depends(get_db)):
     return {"creative_id": c.id}
 
 
-# ============================================================ Tier 0 webhooks: orders / shipments / comments / ad metrics
-class WebhookBatch(BaseModel):
-    records: list[dict]
-
-
-@router.post("/api/webhooks/orders", dependencies=[Depends(require_token)])
-@router.post("/api/webhooks/shipments", dependencies=[Depends(require_token)])
-def webhook_orders(body: WebhookBatch, db: Session = Depends(get_db)):
-    """Pancake / CRM / carrier push. Each record: external_id or tracking_code, product_code|product_name,
-    status|carrier_status (any carrier wording — normalized), amounts, fees, attribution ids."""
-    touched: set[int] = set()
-    out = {"received": len(body.records), "applied": 0, "errors": []}
-    for r in body.records:
-        try:
-            with db.begin_nested():
-                o, ev = realtime.apply_order_event(db, r)
-                db.flush()
-                touched.add(o.product_id)
-                out["applied"] += 1
-                if ev:
-                    events.publish(ev, {"order": o.external_id, "stage": o.stage, "carrier_status": o.carrier_status_raw},
-                                   product_id=o.product_id, db=db)
-        except Exception as e:
-            out["errors"].append(f"{r.get('external_id') or r.get('tracking_code')}: {e}")
-    from ..services.connectors import classify_order_refusals
-
-    classify_order_refusals(db)
-    realtime.after_business_events(db, touched)
-    return out
-
-
-@router.post("/api/webhooks/comments", dependencies=[Depends(require_token)])
-def webhook_comments(body: WebhookBatch, db: Session = Depends(get_db)):
-    from ..services.connectors import normalize_pending, store_raw
-
-    store_raw(db, "comment", body.records)
-    stats = normalize_pending(db)
-    pids = {c.product_id for c in db.scalars(select(Comment).where(Comment.created_at > datetime.utcnow() - timedelta(minutes=5))) if c.product_id}
-    events.publish("COMMENT_CREATED", {"count": stats.get("comment", 0)}, db=db)
-    realtime.after_business_events(db, pids)
-    return stats
-
-
-@router.post("/api/webhooks/ad-metrics", dependencies=[Depends(require_token)])
-def webhook_ad_metrics(body: WebhookBatch, db: Session = Depends(get_db)):
-    """Spend per ad per day from any ads platform / n8n: date, ad_id, campaign_id, spend, impressions, clicks, leads, product_code."""
-    pids = realtime.upsert_ad_metrics(db, body.records, {})
-    realtime.after_business_events(db, pids)
-    return {"rows": len(body.records), "products": len(pids)}
-
-
 # ============================================================ Product Search (main task #1)
 SORTS = {
     "opportunity": lambda c: c["opportunity"] or 0, "newest": lambda c: c["first_seen_at"] or datetime.min,
@@ -381,8 +330,9 @@ def search(q: str | None = None, country: str | None = None, funnel: str | None 
         aq = aq.where(Ad.funnel == funnel)
     if platform:
         aq = aq.where(Ad.platform == platform)
-    if network:
-        aq = aq.where(Ad.network == network)
+    nets = [n for n in (network or "").split(",") if n]  # source filter: only products with an ad from these networks
+    if nets:
+        aq = aq.where(or_(Ad.network.in_(nets), Ad.network.is_(None)) if "meta" in nets else Ad.network.in_(nets))  # NULL = pre-network Meta rows
     if media_type:
         aq = aq.where(Ad.media_type == media_type)
     if active_only and not id_list:
@@ -390,7 +340,8 @@ def search(q: str | None = None, country: str | None = None, funnel: str | None 
     kw_hit = lambda kw: and_(*[_ad_has(t) for t in kw.split()])
     if kws:
         aq = aq.where(or_(*[kw_hit(k) for k in kws]))  # OR between keywords, AND between the words of one keyword
-    matches: dict[int, int] = dict.fromkeys(id_list, 0)  # product → matched ads (seeded so id products with no ad still show)
+    # product → matched ads (seeded so id products with no ad still show — not under a source filter)
+    matches: dict[int, int] = dict.fromkeys([] if nets else id_list, 0)
     now = datetime.utcnow()
     for pid, n, first, last in db.execute(aq.with_only_columns(Ad.product_id, func.count(Ad.id), func.min(Ad.first_seen_at),
                                                                 func.max(Ad.last_seen_at)).group_by(Ad.product_id)):
@@ -405,7 +356,7 @@ def search(q: str | None = None, country: str | None = None, funnel: str | None 
             for (pid,) in db.execute(aq.with_only_columns(Ad.product_id).where(kw_hit(kw)).distinct()):
                 matched_kw.setdefault(pid, []).append(kw)
         for p in db.scalars(select(Product).where(Product.canonical_name.ilike(f"%{kw}%"))):  # also canonical names
-            if product_in_scope(p, country):
+            if product_in_scope(p, country) and (not nets or p.id in matches):
                 matches.setdefault(p.id, 0)
                 if kw not in matched_kw.setdefault(p.id, []):
                     matched_kw[p.id].append(kw)
@@ -421,7 +372,7 @@ def search(q: str | None = None, country: str | None = None, funnel: str | None 
         products = [p for p in products if p.classification == quadrant]
     if min_networks:  # cross-platform validated: seen on ≥ N networks (ads, marketplaces, viral)
         products = [p for p in products if len((p.features or {}).get("networks") or []) >= min_networks]
-    cov = covers(db, products)
+    cov = covers(db, products, nets)
     if has_video:
         products = [p for p in products if cov.get(p.id) and cov[p.id].type == "video"]
     cards = [product_card(p, cov.get(p.id)) | {"matched_ads": matches.get(p.id, 0),
@@ -433,8 +384,12 @@ def search(q: str | None = None, country: str | None = None, funnel: str | None 
         cards.sort(key=key, reverse=True)
     page = cards[offset: offset + limit]
     lp = landing_links(db, [p for p in products if p.id in {c["id"] for c in page}])
+    aids = [c["cover"]["ad_id"] for c in page if c["cover"] and c["cover"]["ad_id"]]
+    snaps = dict(db.execute(select(Ad.id, Ad.snapshot_url).where(Ad.id.in_(aids))).all()) if aids else {}
     for c in page:
         c["landing_url"] = lp.get(c["id"])
+        if c["cover"]:  # the ad's own page (Ad Library / TikTok Creative Center): where to watch once the CDN link died
+            c["cover"]["ad"] = {"snapshot_url": snaps.get(c["cover"]["ad_id"])}
     return {"total": len(cards), "rows": page, "funnels": {k: v for k, v in funnels.items() if k and v},
             "keywords": kws, "exclude": exs}
 
@@ -447,8 +402,9 @@ class LiveSearch(BaseModel):
     user: str | None = None
     track: bool = False  # also save as a tracked query (scheduler re-runs it)
     every_minutes: int = 60
-    limit: int = 100  # ads to pull per country (≈10 per page)
+    limit: int = 50  # ads per country for one results page (≈10 per source page); next page = POST /jobs/{id}/more
     media_type: str | None = None  # video | image
+    reuse_hours: int = 0  # > 0: the same query + sources still running or done within N hours → return that job, no new crawl
 
 
 @router.post("/api/search/live")
@@ -461,9 +417,20 @@ def live_search(body: LiveSearch, bg: BackgroundTasks, db: Session = Depends(get
     adapters = body.adapters
     if not adapters and not body.paid:  # [] means "every source" downstream → pin the free search connectors explicitly
         adapters = [c.adapter for c in db.scalars(select(Connector).where(Connector.enabled.is_(True), Connector.adapter.is_not(None)))
-                    if (cls := ConnectorFactory.connectors.get(c.adapter)) and cls.supports_search and not c.adapter.startswith("apify")]
+                    if (cls := ConnectorFactory.connectors.get(c.adapter)) and cls.supports_search
+                    and (not c.adapter.startswith("apify") or c.adapter == "apify_tiktok_top_ads")  # Apify Top Ads = the PH/SA/AE TikTok source, always on (budget-capped)
+                    and (c.adapter != "ali1688" or (c.config or {}).get("ak") or os.getenv("ALI_1688_AK"))]  # no AK → skip, not an error per search
         if not adapters:
             raise HTTPException(400, "không có nguồn miễn phí nào được bật — chọn adapters hoặc paid=true")
+    if body.reuse_hours > 0 and not body.track:  # TTL + job dedupe (1688 "Tìm mới"): don't re-crawl / re-bill a search we already have
+        since = datetime.utcnow() - timedelta(hours=body.reuse_hours)
+        for old in db.scalars(select(SearchJob).where(SearchJob.query == " | ".join(kws), SearchJob.created_at >= since)
+                              .order_by(SearchJob.id.desc())):
+            got = old.found + sum(s.get("listings", 0) for s in (old.sources or {}).values())
+            same = (sorted(old.adapters or []) == sorted(adapters) and sorted(old.countries or []) == sorted(countries)
+                    and old.media_type == (body.media_type or None) and old.limit >= max(10, min(body.limit, 1000)))
+            if same and ((old.status == "running" and old.id in realtime.LIVE_JOBS) or (old.status == "done" and got)):
+                return {"job_id": old.id, "reused": True}
     job = SearchJob(query=" | ".join(kws), countries=countries, adapters=adapters, created_by=body.user,
                     limit=max(10, min(body.limit, 1000)), media_type=body.media_type or None)
     db.add(job)
@@ -476,6 +443,7 @@ def live_search(body: LiveSearch, bg: BackgroundTasks, db: Session = Depends(get
                     db.add(TrackedQuery(connector_id=c.id, query=kw, countries=countries,
                                         every_minutes=max(15, body.every_minutes), created_by=body.user))
     db.commit()
+    realtime.LIVE_JOBS.add(job.id)
     bg.add_task(realtime.run_search, job.id)
     return {"job_id": job.id}
 
@@ -485,27 +453,33 @@ def search_job(jid: int, db: Session = Depends(get_db)):
     j = db.get(SearchJob, jid)
     if not j:
         raise HTTPException(404)
+    if j.status == "running" and jid not in realtime.LIVE_JOBS:  # its thread died (server restart) — don't leave it running forever
+        j.status, j.error, j.finished_at = "error", j.error or "Tìm kiếm bị ngắt (server khởi động lại) — chạy lại", datetime.utcnow()
+        db.commit()
     return {"id": j.id, "query": j.query, "countries": j.countries, "status": j.status, "found": j.found, "new_ads": j.new_ads,
             "product_ids": j.product_ids, "error": j.error, "created_at": j.created_at, "finished_at": j.finished_at,
             "has_more": j.has_more, "limit": j.limit, "media_type": j.media_type, "sources": j.sources or {}}
 
 
 class MoreIn(BaseModel):
-    count: int = 100
+    count: int = 30
 
 
 @router.post("/api/search/jobs/{jid}/more")
 def search_more(jid: int, body: MoreIn, bg: BackgroundTasks, db: Session = Depends(get_db)):
-    """Continue a live search from its saved cursor and pull `count` more ads per country."""
+    """Next results page: continue the live search from its saved cursor, `count` more ads per country."""
     j = db.get(SearchJob, jid)
     if not j:
         raise HTTPException(404)
+    search_job(jid, db)  # expires a dead "running" job first
+    db.refresh(j)
     if j.status == "running":
         raise HTTPException(409, "tìm kiếm đang chạy")
     if not j.has_more:
         raise HTTPException(409, "nguồn đã hết kết quả")
     j.status = "running"
     db.commit()
+    realtime.LIVE_JOBS.add(jid)
     bg.add_task(realtime.run_search, jid, max(10, min(body.count, 1000)))
     return {"ok": True}
 
@@ -552,7 +526,7 @@ def download_creative(cid: int, db: Session = Depends(get_db)):
     ad = db.get(Ad, c.ad_id) if c.ad_id else None
     adv = db.get(Advertiser, ad.advertiser_id) if ad and ad.advertiser_id else None
     name = creative_dict(c, None, adv.name if adv else None)["file_name"]
-    key = c.download_key or c.storage_key  # VOD: top rendition (a normal, playable MP4)
+    key = c.storage_key
     if not store().exists(key):  # ponytail: GET stays read-only; retention flips the row to archived
         raise HTTPException(410, "File đã bị xoá khỏi kho")
     if BACKEND in ("r2", "s3"):
@@ -567,14 +541,26 @@ def retry_creative(cid: int, db: Session = Depends(get_db)):
         raise HTTPException(404)
     c.status, c.attempts, c.error = "pending", 0, None
     db.commit()
-    media.enqueue([cid])
+    media.enqueue([cid], force=True)  # explicit request: the one place a video is still downloaded by default
     return {"ok": True}
+
+
+@router.get("/api/creatives/{cid}/thumb")
+def creative_thumb(cid: int):
+    """Thumbnail on first view: fetch the source once (server side — no hotlink block, right Referer), save ≤480 px
+    JPEG, serve it; later views hit /api/media/thumbs/… directly."""
+    key = media.grab_thumb(cid)
+    if not key:
+        raise HTTPException(404, "ảnh gốc không còn")
+    if BACKEND in ("r2", "s3"):
+        return RedirectResponse(store().public_url(key))
+    return FileResponse(store().path(key), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @router.api_route("/api/media/{key:path}", methods=["GET", "HEAD"])
 def serve_media(key: str, dl: str | None = None):
     """Local storage only (R2 serves directly / via presigned URL). Supports HTTP Range for video seeking."""
-    if not key.startswith(("creatives/", "thumbs/", "hls/")):
+    if not key.startswith(("creatives/", "thumbs/")):
         raise HTTPException(404)
     try:
         p = store().path(key)
@@ -582,8 +568,7 @@ def serve_media(key: str, dl: str | None = None):
         raise HTTPException(404)
     if not p.exists():
         raise HTTPException(404)
-    ctype = {".m3u8": "application/vnd.apple.mpegurl", ".m4s": "video/mp4"}.get(p.suffix) or mimetypes.guess_type(p.name)[0]
-    return FileResponse(p, media_type=ctype or "application/octet-stream",
+    return FileResponse(p, media_type=mimetypes.guess_type(p.name)[0] or "application/octet-stream",
                         filename=dl, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
@@ -678,7 +663,6 @@ def _discovery_tab(tab: str, country: str | None, funnel: str | None, limit: int
     now = datetime.utcnow()
     loved = {pid for (pid,) in db.execute(select(Vote.product_id).where(Vote.decision.in_(["LOVE", "TEST"])))}
     saved = {pid for (pid,) in db.execute(select(Ad.product_id).where(Ad.saved_by.is_not(None)))}
-    tested = {pid for (pid,) in db.execute(select(Order.product_id).distinct())}
     fx = {
         "new": (lambda p: p.first_seen_at and p.first_seen_at > now - timedelta(days=7), lambda p: p.first_seen_at),
         "hidden": (lambda p: (p.features or {}).get("advertiser_count", 99) <= 10 and vec(p, "wave_potential") >= 45, lambda p: vec(p, "opportunity")),
@@ -698,7 +682,7 @@ def _discovery_tab(tab: str, country: str | None, funnel: str | None, limit: int
     flt, key = fx[tab]
     rows = sorted([p for p in products if flt(p)], key=lambda p: key(p) or 0, reverse=True)[:limit]
     cov, lp = covers(db, rows), landing_links(db, rows)
-    return {"tab": tab, "title": TABS[tab], "rows": [product_card(p, cov.get(p.id)) | {"loved_untested": p.id in loved and p.id not in tested,
+    return {"tab": tab, "title": TABS[tab], "rows": [product_card(p, cov.get(p.id)) | {"loved_untested": p.id in loved,
                                                                                        "landing_url": lp.get(p.id)}
                                                      for p in rows], "tabs": TABS}
 
@@ -726,40 +710,6 @@ def dna(db: Session = Depends(get_db)):
     return market_dna(db)
 
 
-# ============================================================ Attribution (realtime §17-18)
-@router.get("/api/attribution")
-def attribution(by: str = "ad_external_id", days: int = 60, db: Session = Depends(get_db)):
-    if by not in ("ad_external_id", "campaign_id", "creative_ref", "sales_agent", "country"):
-        raise HTTPException(400)
-    since = datetime.utcnow() - timedelta(days=days)
-    rows: dict[str, Counter] = {}
-    for o in db.scalars(select(Order).where(Order.created_at > since)):
-        k = getattr(o, by) or "(không gắn)"
-        c = rows.setdefault(k, Counter())
-        c["orders"] += 1
-        c[o.status] += 1
-        c["revenue"] += o.amount if o.status == "delivered" else 0
-    spend: Counter = Counter()
-    if by in ("ad_external_id", "campaign_id"):
-        col = AdMetric.ad_id if by == "ad_external_id" else AdMetric.campaign_id
-        for k, s in db.execute(select(col, func.sum(AdMetric.spend)).where(AdMetric.date >= since.date()).group_by(col)):
-            spend[k or "(không gắn)"] = s or 0
-    out = []
-    for k in set(rows) | set(spend):
-        c = rows.get(k, Counter())
-        closed = c["delivered"] + c["returned"] + c["refused"] + c["failed"]
-        sp = spend.get(k)
-        out.append({"key": k, "orders": c["orders"], "confirmed": c["orders"] - c["pending"] - c["cancelled"],
-                    "delivered": c["delivered"] + c["returned"], "refused": c["refused"], "returned": c["returned"],
-                    "delivery_rate": round((c["delivered"] + c["returned"]) / closed, 3) if closed else None,
-                    "refusal_rate": round(c["refused"] / closed, 3) if closed else None, "spend": sp,
-                    "cpa": round(sp / c["orders"], 2) if sp and c["orders"] else None,
-                    "cost_per_delivered": round(sp / (c["delivered"] + c["returned"]), 2) if sp and (c["delivered"] + c["returned"]) else None,
-                    "revenue_delivered": round(c["revenue"], 2)})
-    out.sort(key=lambda r: -(r["orders"]))
-    return {"by": by, "rows": out[:200]}
-
-
 # ============================================================ Unified Collector admin (§21)
 from ..platforms import connector_network
 from ..models import ADS_ONLY
@@ -778,8 +728,8 @@ def _fresh(ts):
 
 @router.get("/api/collector")
 def collector_overview(db: Session = Depends(get_db)):
-    conns = db.scalars(select(Connector).where(Connector.adapter.is_not(None)).order_by(Connector.id)).all()
     cat = {c["adapter"]: c for c in ConnectorFactory.catalogue()}
+    conns = [c for c in db.scalars(select(Connector).where(Connector.adapter.is_not(None)).order_by(Connector.id)) if c.adapter in cat]
     raw_today = sum(1 for _ in store().list("raw/")) if BACKEND == "local" else None
     return {
         "catalogue": list(cat.values()), "push_sources": PUSH_SOURCES,
@@ -981,15 +931,21 @@ async def export_upload(source: str = Form(...), country: str | None = Form(None
 def list_ads(q: str | None = None, country: str | None = None, funnel: str | None = None, platform: str | None = None,
              media_type: str | None = None, active: bool | None = None, product_id: int | None = None,
              advertiser_id: int | None = None, source: str | None = None, sort: str = "newest",
-             network: str | None = None, channel: str | None = None,
+             network: str | None = None, channel: str | None = None, strict: bool = False,
              limit: int = Query(40, le=200), offset: int = 0, db: Session = Depends(get_db)):
     from ..platforms import REMOVED_NETWORKS
 
     shown = or_(Ad.network.is_(None), Ad.network.not_in(REMOVED_NETWORKS))
     cq = select(Ad).where(Ad.is_internal.is_(False), shown)
-    if q:
-        for t in [t for t in re.split(r"\s+", q.lower().strip()) if t]:
-            cq = cq.where(or_(Ad.search_text.contains(t), Ad.ad_text.ilike(f"%{t}%")))
+    terms = [t for t in re.split(r"\s+", (q or "").lower().strip()) if t]
+
+    def kw_filter(t):
+        if strict:  # the product itself: title / product name / landing page — not a word buried in the story of the copy
+            return or_(Ad.title.ilike(f"%{t}%"), Ad.raw_product_name.ilike(f"%{t}%"), Ad.landing_url.ilike(f"%{t}%"))
+        return or_(Ad.search_text.contains(t), Ad.ad_text.ilike(f"%{t}%"))
+
+    for t in terms:
+        cq = cq.where(kw_filter(t))
     _f = ad_scope_filter(country)
     if _f is not None:
         cq = cq.where(_f)
@@ -1009,9 +965,8 @@ def list_ads(q: str | None = None, country: str | None = None, funnel: str | Non
         cq = cq.where(Ad.source == source)
     # tab counts per channel (ads / commerce / organic) for the keyword + market filters
     base = select(Ad.channel).where(Ad.is_internal.is_(False), shown)
-    if q:
-        for t in [t for t in re.split(r"\s+", q.lower().strip()) if t]:
-            base = base.where(or_(Ad.search_text.contains(t), Ad.ad_text.ilike(f"%{t}%")))
+    for t in terms:
+        base = base.where(kw_filter(t))
     if _f is not None:
         base = base.where(_f)
     sub = base.subquery()

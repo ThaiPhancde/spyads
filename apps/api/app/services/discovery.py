@@ -2,8 +2,7 @@
 
 Product Potential Vector instead of one Win Score:
   market_demand (validation) · novelty · wave_potential · creative_potential · market_fit (per market)
-  · mkt_appeal (team votes / taste model) · competition · economics · operational_fit
-  · compliance_risk · confidence · company_fit (internal, realtime §19)
+  · mkt_appeal (team votes / taste model) · competition · economics · compliance_risk · confidence
 → opportunity, radar quadrant (BREAKOUT / EXPERIMENTAL / STABLE_WINNER / LOW_SIGNAL), decision.
 
 Every number is a formula over stored data. AI never assigns these scores.
@@ -40,7 +39,7 @@ COMPLIANCE_PATTERNS = [
 TOOL_GUNS = re.compile(r"\b(massage|fascia|glue|nail|heat|spray|paint|tattoo|caulk|staple|grease) guns?\b")
 
 
-def compliance_risk(texts: list[str], rejected_rate: float | None = None) -> tuple[float, list[str]]:
+def compliance_risk(texts: list[str]) -> tuple[float, list[str]]:
     blob = TOOL_GUNS.sub(" ", " ".join(texts).lower())  # "massage gun" is a tool, not a weapon
     score, flags = 0.0, []
     for pat, w, flag in COMPLIANCE_PATTERNS:
@@ -50,8 +49,6 @@ def compliance_risk(texts: list[str], rejected_rate: float | None = None) -> tup
     if "brand" in flags and "counterfeit" not in flags and re.search(r"giá rẻ|cheap|\$\d{1,2}\b|99k|49k", blob):
         score += 20
         flags.append("cheap_luxury")
-    if rejected_rate:
-        score += 40 * rejected_rate
     return round(min(100.0, score), 1), flags
 
 
@@ -147,9 +144,9 @@ def ad_feature_set(hook, angle, funnel) -> set[str]:
 
 
 def market_dna(db: Session) -> dict[str, dict]:
-    """Learned, not hard-coded (discovery §12-14): per market, what wins / what the team loves / what runs."""
+    """Learned, not hard-coded (discovery §12-14): per market, what the team loves / what runs."""
     dna: dict[str, dict] = defaultdict(lambda: {"categories": Counter(), "angles": Counter(), "funnels": Counter(),
-                                                "loved": Counter(), "won": Counter(), "price": []})
+                                                "loved": Counter(), "price": []})
     for country, cat, angle, funnel, price in db.execute(
             select(Ad.country, Product.category, Ad.angle, Ad.funnel, Ad.price).join(Product, Product.id == Ad.product_id)
             .where(Ad.is_active.is_(True), Ad.is_internal.is_(False))):
@@ -163,11 +160,6 @@ def market_dna(db: Session) -> dict[str, dict]:
         p = db.get(Product, v.product_id)
         if p and (v.market or p.country):
             dna[v.market or p.country]["loved"][p.category] += 1
-    from ..models import Experiment
-    for e in db.scalars(select(Experiment).where(Experiment.status == "WIN")).all():
-        p = db.get(Product, e.product_id)
-        if p and e.market:
-            dna[e.market]["won"][p.category] += 1
     out = {}
     for m, d in dna.items():
         tot = sum(d["categories"].values()) or 1
@@ -176,7 +168,7 @@ def market_dna(db: Session) -> dict[str, dict]:
             "top_categories": [(k, round(v / tot, 3)) for k, v in d["categories"].most_common(6)],
             "top_angles": [(k, round(v / tot, 3)) for k, v in d["angles"].most_common(6)],
             "funnels": {k: round(v / tot, 3) for k, v in d["funnels"].most_common()},
-            "loved_categories": dict(d["loved"]), "won_categories": dict(d["won"]),
+            "loved_categories": dict(d["loved"]),
         }
     return out
 
@@ -193,8 +185,6 @@ def market_fit_score(dna: dict, market: str, category: str | None, angle: str | 
         parts.append(lin(angles.get(angle, 0), 0, 0.3))
     if d["loved_categories"]:
         parts.append(100 if category in d["loved_categories"] else 40)
-    if d["won_categories"]:
-        parts.append(100 if category in d["won_categories"] else 35)
     raw = sum(parts) / len(parts)
     return round(50 + (raw - 50) * weight, 1)
 
@@ -253,11 +243,10 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     per_market = {m: market_fit_score(dna, m, p.category, top_angle[0][0] if top_angle else None) for m in markets}
     market_fit = max(per_market.values()) if per_market else 50.0
 
-    risk, flags = compliance_risk([a.ad_text or "" for a in ext_ads[:60]] + [p.canonical_name], f.get("ad_rejection_rate"))
+    risk, flags = compliance_risk([a.ad_text or "" for a in ext_ads[:60]] + [p.canonical_name])
     competition = p.saturation_score or 0
     economics = (f.get("_scores") or {}).get("margin_potential") or 55.0
-    company_fit = company_fit_score(f)
-    operational = company_fit if company_fit is not None else 60.0
+    operational = 60.0  # neutral: no operations data feeds this term
     conf = p.confidence_score or 0
 
     raw = (0.16 * market_fit + 0.10 * mkt_appeal + 0.08 * operational + 0.14 * novelty + 0.18 * wave + 0.14 * creative
@@ -271,8 +260,7 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     vec = {
         "market_demand": demand, "novelty": novelty, "wave_potential": wave, "creative_potential": creative,
         "market_fit": market_fit, "mkt_appeal": mkt_appeal, "competition": competition, "saturation": p.saturation_score,
-        "economics": economics, "operational_fit": operational, "compliance_risk": risk, "confidence": conf,
-        "company_fit": company_fit, "opportunity": opportunity, "opportunity_raw": opportunity_raw, "priority_boost": boost,
+        "economics": economics, "compliance_risk": risk, "confidence": conf, "opportunity": opportunity, "opportunity_raw": opportunity_raw, "priority_boost": boost,
     }
     vec = {k: (round(v, 1) if isinstance(v, (int, float)) else v) for k, v in vec.items()}
     return {
@@ -302,20 +290,3 @@ def discovery_decision(v: dict, quadrant: str) -> tuple[str, list[str]]:
     if v["opportunity"] < 30:
         return "SKIP", [f"Opportunity {v['opportunity']:.0f}"]
     return "WATCH", ["Mới phát hiện — cần thêm dữ liệu"]
-
-
-# ------------------------------------------------------------ Company Product Fit (realtime §19)
-def company_fit_score(f: dict) -> float | None:
-    if not f.get("has_internal") or not f.get("orders"):
-        return None
-    parts = {
-        "marketing": (0.20, 0.5 * lin(f.get("roas"), 1, 4) + 0.5 * (100 - lin((f.get("cpa") or 0) / (f.get("aov") or 1), 0.15, 0.6))),
-        "sales": (0.15, lin(f.get("cvr"), 0.005, 0.04)),
-        "confirmation": (0.10, lin(f.get("confirm_rate"), 0.5, 0.9)),
-        "delivery": (0.20, lin(f.get("delivery_rate"), 0.5, 0.9)),
-        "refusal": (0.10, 100 - lin(f.get("refusal_rate"), 0.05, 0.35)),
-        "return": (0.05, 100 - lin(f.get("return_rate"), 0.02, 0.2)),
-        "margin": (0.15, lin(f.get("contribution_margin"), -0.1, 0.3)),
-        "customer": (0.05, lin((f.get("positive_comment_rate") or 0) - (f.get("negative_comment_rate") or 0), -0.5, 0.7)),
-    }
-    return round(sum(w * v for w, v in parts.values()), 1)

@@ -44,6 +44,15 @@ def _ms(v) -> str | None:
     return datetime.fromtimestamp(v / 1000, tz=timezone.utc).date().isoformat() if isinstance(v, (int, float)) and v else None
 
 
+def _pic(u: str | None) -> str | None:
+    """Taobao search hosts (g.search*.alicdn.com) serve a cert for another name: the same path works on img.alicdn.com.
+    'imgextra/0' style stubs are not images."""
+    if not u or len(u.rsplit("/", 1)[-1]) < 3:
+        return None
+    u = "https:" + u if u.startswith("//") else u
+    return re.sub(r"^https?://g\.search\d*\.alicdn\.com", "https://img.alicdn.com", u)
+
+
 def _short(name: str | None) -> str | None:
     return " ".join(str(name or "").split()[:9]) or None
 
@@ -68,16 +77,33 @@ class _Apify(BaseConnector):
     def cap(self, params: FetchParams) -> int:
         return max(1, min(params.limit, int(self.config.get("max_items") or self.max_items)))
 
-    def run(self, inp: dict) -> list[dict]:
-        token = self.config.get("token") or os.getenv("APIFY_TOKEN")
-        if not token:
-            raise NotConfigured("Thiếu APIFY_TOKEN (.env hoặc cấu hình connector)")
+    def check_budget(self, token: str) -> None:
+        """Three guards, fail closed: the account's monthly total, this connector's share (TikTok can't starve
+        1688 / Taobao and vice versa), and a daily cap so one bad day can't eat the month."""
         used, budget = monthly_usage(token), float(os.getenv("APIFY_MONTHLY_BUDGET_USD") or 14)
-        if used is None:  # fail closed: no usage figure → no paid run
+        if used is None:  # no usage figure → no paid run
             raise ConnectorError("Apify budget unknown — không đọc được /users/me/limits, không chạy actor trả phí")
         if used >= budget:
             raise ConnectorError(f"Apify đã dùng ${used:.2f} / ngân sách ${budget:.0f} tháng này — tạm dừng để không vượt chi phí "
                                  "(đổi APIFY_MONTHLY_BUDGET_USD trong .env)")
+        spend = run_spend(token)
+        if spend is None:
+            raise ConnectorError("Apify: không đọc được lịch sử run — không chạy actor trả phí")
+        actor = (self.config.get("actor") or self.actor).replace("/", "~")
+        grp = GROUP_OF.get(actor.replace("~", "/"), "other")
+        share = SHARES.get(grp, 0) / 100 * budget
+        if spend["month"].get(grp, 0) >= share:
+            raise ConnectorError(f"Apify quỹ '{grp}' đã dùng ${spend['month'].get(grp, 0):.2f} / ${share:.2f} tháng này "
+                                 f"({SHARES.get(grp, 0)}% của ${budget:.0f}) — chỉnh APIFY_SHARES trong .env nếu cần")
+        daily = float(os.getenv("APIFY_DAILY_BUDGET_USD") or budget / 10)
+        if spend["day"] >= daily:
+            raise ConnectorError(f"Apify đã dùng ${spend['day']:.2f} / trần ngày ${daily:.2f} (APIFY_DAILY_BUDGET_USD) — chờ 0h UTC")
+
+    def run(self, inp: dict) -> list[dict]:
+        token = self.config.get("token") or os.getenv("APIFY_TOKEN")
+        if not token:
+            raise NotConfigured("Thiếu APIFY_TOKEN (.env hoặc cấu hình connector)")
+        self.check_budget(token)
         actor = (self.config.get("actor") or self.actor).replace("/", "~")
         try:
             r = self.request("POST", f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items",
@@ -88,12 +114,46 @@ class _Apify(BaseConnector):
         except Exception as e:  # keep the subclass (AuthExpired…) but strip the token from the text
             raise (type(e) if isinstance(e, ConnectorError) else ConnectorError)(_redact(f"{e}")) from None
         finally:
-            _usage["at"] = 0  # spent something (even on error the actor may have billed): re-read the counter next time
+            _usage["at"] = _spend["at"] = 0  # spent something (even on error the actor may have billed): re-read the counter next time
         items = r.json()
         return items if isinstance(items, list) else []
 
 
 _usage = {"at": 0.0, "usd": None}
+# connector actors → budget group; unknown actors fall in "other" (APIFY_SHARES default gives it a small share)
+GROUP_OF = {"zen-studio/1688-wholesale-scraper": "sourcing", "zen-studio/taobao-search-scraper": "sourcing",
+            "sian.agency/taobao-tmall-product-scraper": "sourcing",
+            "lexis-solutions/tiktok-top-ads-scraper": "tiktok", "lexis-solutions/tiktok-ads-scraper": "tiktok"}
+SHARES = {k: float(v) for k, v in (p.split(":") for p in (os.getenv("APIFY_SHARES") or "sourcing:45,tiktok:45,other:10").split(","))}
+_spend: dict = {"at": 0.0, "v": None}
+_act_names: dict[str, str] = {}
+
+
+def run_spend(token: str) -> dict | None:
+    """{"month": {group: usd}, "day": usd} from the run history (usageTotalUsd per run), cached 60 s; None when unreadable."""
+    if time.time() - _spend["at"] < 60:
+        return _spend["v"]
+    try:
+        now = datetime.now(timezone.utc)
+        items = httpx.get("https://api.apify.com/v2/actor-runs", params={"token": token, "limit": 1000, "desc": 1},
+                          timeout=20).json()["data"]["items"]
+        month, day = {}, 0.0
+        for it in items:
+            if it["startedAt"][:7] != now.strftime("%Y-%m"):
+                continue
+            aid = it["actId"]
+            if aid not in _act_names:
+                a = httpx.get(f"https://api.apify.com/v2/acts/{aid}", params={"token": token}, timeout=15).json()["data"]
+                _act_names[aid] = f"{a['username']}/{a['name']}"
+            g, usd = GROUP_OF.get(_act_names[aid], "other"), it.get("usageTotalUsd") or 0.0
+            month[g] = month.get(g, 0.0) + usd
+            if it["startedAt"][:10] == now.strftime("%Y-%m-%d"):
+                day += usd
+        _spend["v"] = {"month": month, "day": day}
+    except Exception:
+        _spend["v"] = None
+    _spend["at"] = time.time()
+    return _spend["v"]
 
 
 def monthly_usage(token: str) -> float | None:
@@ -156,7 +216,7 @@ class ApifyTaobaoConnector(_Apify):
             shop = it.get("shop") or {}
             url = it.get("url") or f"https://item.taobao.com/item.htm?id={it['itemId']}"
             title = it.get("titleEn") or it.get("title")
-            pics = [it.get("mainPictureUrl"), *(it.get("pictures") or [])]
+            pics = [_pic(p) for p in (it.get("mainPictureUrl"), *(it.get("pictures") or []))]
             yield AdRecord(
                 source=self.key, source_ad_id=str(it["itemId"]), platform="taobao", platforms=["taobao"],
                 title=it.get("title"), product_name=_short(title), ad_text=title, creative_type="image",

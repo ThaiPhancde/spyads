@@ -6,14 +6,7 @@ Canonical record shapes (what every adapter / CSV / webhook must produce):
   ad:          external_id, source, platform, advertiser, product_name, ad_text, landing_url, country,
                media_type, media_url, price, currency, likes, comments_count, shares, first_seen, last_seen,
                is_active, category, brand, is_internal, rejected, rejection_reason
-  comment:     text, product_code | product_name | ad_external_id, source, created_at
-  order:       external_id, product_code | product_name, experiment_id, country, amount, cogs,
-               shipping_cost, status, refusal_note, refunded, phone, created_at, source
   store:       domain, product_code | product_name, country, price, estimated_traffic, traffic_growth
-  experiment:  product_code | product_name, name, market, platform, creative, creative_type, angle, offer,
-               funnel, sell_price, unit_cost, started_at, ended_at, spend, impressions, clicks,
-               landing_views, atc, checkout, purchase, revenue, confirmed_orders, shipped, delivered,
-               refused, returned, ads_submitted, ads_rejected
   product_signal: product_code | product_name, search_trend, keyword_competition   (Semrush / keyword tools)
 """
 import csv
@@ -25,11 +18,11 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Ad, Advertiser, Comment, Connector, Experiment, Order, Product, RawRecord, Store
+from ..models import Ad, Advertiser, Comment, Connector, Product, RawRecord, Store
 from . import enrichment as E
 from .entity_resolution import resolve_product
 
-ENTITY_TYPES = ["ad", "comment", "order", "store", "experiment", "product_signal"]
+ENTITY_TYPES = ["ad", "store", "product_signal"]
 
 # Default connectors (Unified Collector). Only the public Meta Ad Library works without credentials;
 # the others are templates the admin fills in (Data & Connectors screen). No simulated sources.
@@ -38,7 +31,6 @@ DEFAULT_CONNECTORS = [
     ("meta_library", "Meta Ad Library (public) — tìm kiếm & theo dõi", True, None, 2, {"countries": "SA,AE,VN", "max_per_query": 60, "search_limit": 40}),
     ("meta_graph", "Meta Ad Library API (official, EU/UK)", False, 360, 2, {}),
     ("apify_meta", "Apify · Facebook Ads Library (production volume)", False, 60, 2, {}),
-    ("meta_ads", "Meta Ads — tài khoản công ty (spend/CPA realtime)", False, 5, 1, {}),
     ("tiktok_commercial", "TikTok Commercial Content API (official, EU)", False, 360, 2, {}),
     ("apify_actor", "Apify · TikTok ads / Creative Center", False, 60, 2, {"source": "tiktok"}),
     ("http", "Pipiads API (Enterprise)", False, 60, 2, {"source": "pipiads"}),
@@ -46,8 +38,11 @@ DEFAULT_CONNECTORS = [
     ("export", "Export · minea", True, 5, 2, {"source": "minea"}),
     # the TikTok ad volume source: ≤ 500 top ads per country, MP4 + likes, incl. SA / AE. Runs on request headers pasted
     # from DevTools (ads.tiktok.com/business/creativecenter, logged in to a free account) — the app never signs requests
-    ("tiktok_top_ads", "TikTok Creative Center · Top Ads (free account) — US/EU/SA/AE", False, 360, 2,
-     {"countries": "US,GB,DE,FR,AU,SA,AE", "period": 30, "order_by": "ctr", "pages": 25, "details": 20}),
+    ("tiktok_top_ads", "TikTok Creative Center · Top Ads (free account) — PH/US/EU/SA/AE", False, 360, 2,
+     {"countries": "PH,US,GB,DE,FR,AU,SA,AE", "period": 30, "order_by": "ctr", "pages": 25, "details": 20}),
+    # no login: headless Edge/Chrome reads the public page (≈150 ads / country at period 180) — needs a browser on the API host
+    ("tiktok_top_ads_headless", "TikTok Creative Center · Top Ads (không cần đăng nhập) — PH/US/…", True, 720, 2,
+     {"countries": "PH,US,SA", "period": 180}),
     # ad libraries beyond Meta (EU transparency) — collector/adapters/ad_libraries.py
     # Snap searches brand names only and rate-limits non-EU IPs (429): opt-in, used for brand / competitor lookups
     ("snapchat_ads_library", "Snapchat Ads Library (free) — theo tên brand", False, None, 2, {"countries": "FR,DE"}),
@@ -57,13 +52,16 @@ DEFAULT_CONNECTORS = [
     ("aliexpress_search", "AliExpress (free) — giá nhập & đã bán", True, None, 2, {}),
     # Apify actors with typed mappings (collector/adapters/apify.py) — token from APIFY_TOKEN in .env, billed per item:
     # live search only (no schedule) and capped per search by `max_items`
+    # 1688 hybrid (docs/ToolSpy_1688_Hybrid_Connector.md): official AK API first (ALI_1688_AK in .env, free); when the
+    # search also selects apify_1688 it becomes this one's fallback instead of a second run (realtime._run_search)
+    ("ali1688", "1688 — API chính thức (AK) · fallback Apify", True, None, 2, {}),
     ("apify_1688", "1688 — giá xưởng TQ (Apify)", True, None, 2, {}),
     ("apify_taobao", "Taobao / Tmall — giá & đã bán TQ (Apify)", True, None, 2, {}),
     ("apify_tiktok_top_ads", "TikTok Ads · Creative Center Top Ads (Apify) — PH/US/EU/ME", True, None, 2, {}),
     # same TikTok Ad Library as the free connector above (EU/UK only), slower: off unless the free one breaks
     ("apify_tiktok_ads", "TikTok Ads · Ad Library EU/UK (Apify)", False, None, 2, {}),
 ]
-FREE_READY = ("meta_library", "export", "snapchat_ads_library", "tiktok_ad_library",
+FREE_READY = ("meta_library", "export", "snapchat_ads_library", "tiktok_ad_library", "tiktok_top_ads_headless",
               "aliexpress_search", "apify_1688", "apify_taobao", "apify_tiktok_top_ads", "apify_tiktok_ads")
 
 
@@ -90,11 +88,6 @@ def ensure_default_connectors(db: Session):
 def _dedupe_key(entity_type: str, rec: dict) -> str | None:
     if entity_type == "ad" and rec.get("external_id"):
         return f"ad:{rec.get('source')}:{rec['external_id']}"
-    if entity_type == "order" and rec.get("external_id"):
-        return f"order:{rec.get('source', 'crm')}:{rec['external_id']}"
-    if entity_type == "comment" and rec.get("text"):
-        h = rec.get("external_id") or hashlib.sha1(f"{rec.get('product_code') or rec.get('product_name') or rec.get('ad_external_id')}|{rec['text']}|{rec.get('created_at')}".encode()).hexdigest()[:20]
-        return f"comment:{h}"
     return None
 
 
@@ -241,57 +234,6 @@ def _norm_ad(db: Session, rec: dict, source_hint: str | None):
     return ad
 
 
-def _norm_comment(db: Session, rec: dict, pending_comments: list):
-    product = None
-    ad_id = None
-    if rec.get("ad_external_id"):
-        ad = db.scalar(select(Ad).where(Ad.external_id == str(rec["ad_external_id"])))
-        if ad:
-            product, ad_id = db.get(Product, ad.product_id), ad.id
-    product = product or _product_by_ref(db, rec, create=False)
-    c = Comment(product_id=product.id if product else None, ad_id=ad_id, source=rec.get("source") or "ad_comment",
-                text=rec["text"], created_at=_dt(rec.get("created_at"), datetime.utcnow()))
-    db.add(c)
-    pending_comments.append(c)
-
-
-ORDER_STATUS_MAP = {
-    "new": "pending", "pending": "pending", "chờ xác nhận": "pending", "confirmed": "confirmed", "đã xác nhận": "confirmed",
-    "cancelled": "cancelled", "canceled": "cancelled", "hủy": "cancelled", "shipped": "shipped", "đang giao": "shipped",
-    "in_transit": "shipped", "delivered": "delivered", "đã giao": "delivered", "thành công": "delivered",
-    "refused": "refused", "từ chối": "refused", "rejected": "refused", "hoàn": "returned", "returned": "returned",
-    "failed": "failed", "giao thất bại": "failed",
-}
-
-
-def _norm_order(db: Session, rec: dict, pending_refusals: list):
-    src = rec.get("source") or "crm"
-    if rec.get("external_id"):
-        o = db.scalar(select(Order).where(Order.external_id == str(rec["external_id"]), Order.source == src))
-        if o:  # status update from carrier / CRM
-            o.status = ORDER_STATUS_MAP.get(str(rec.get("status", o.status)).lower(), o.status)
-            if rec.get("refusal_note"):
-                o.refusal_reason_raw = rec["refusal_note"]
-                pending_refusals.append(o)
-            o.refunded = _b(rec.get("refunded"), o.refunded)
-            return
-    product = _product_by_ref(db, rec)
-    if not product:
-        raise ValueError("order needs product_code or product_name")
-    o = Order(
-        external_id=str(rec.get("external_id")) if rec.get("external_id") else None, product_id=product.id,
-        experiment_id=_i(rec.get("experiment_id"), None) or None, country=(rec.get("country") or "").upper() or None,
-        source=src, amount=_f(rec.get("amount"), 0), cogs=_f(rec.get("cogs"), 0), shipping_cost=_f(rec.get("shipping_cost"), 0),
-        customer_phone_hash=hashlib.sha1(str(rec["phone"]).encode()).hexdigest()[:16] if rec.get("phone") else None,
-        status=ORDER_STATUS_MAP.get(str(rec.get("status", "pending")).lower(), "pending"),
-        refusal_reason_raw=rec.get("refusal_note") or None, refunded=_b(rec.get("refunded")),
-        created_at=_dt(rec.get("created_at"), datetime.utcnow()),
-    )
-    db.add(o)
-    if o.refusal_reason_raw:
-        pending_refusals.append(o)
-
-
 def _norm_store(db: Session, rec: dict):
     product = _product_by_ref(db, rec)
     domain = (rec.get("domain") or "").lower().removeprefix("www.")
@@ -302,35 +244,6 @@ def _norm_store(db: Session, rec: dict):
     st.price = _f(rec.get("price"), st.price)
     st.estimated_traffic = _f(rec.get("estimated_traffic"), st.estimated_traffic or 0)
     st.traffic_growth = _f(rec.get("traffic_growth"), st.traffic_growth or 0)
-
-
-EXP_INT = ["impressions", "clicks", "landing_views", "atc", "checkout", "purchase", "confirmed_orders", "shipped",
-           "delivered", "refused", "returned", "ads_submitted", "ads_rejected"]
-
-
-def _norm_experiment(db: Session, rec: dict):
-    product = _product_by_ref(db, rec)
-    e = None
-    if rec.get("id"):
-        e = db.get(Experiment, _i(rec["id"]))
-    if not e and rec.get("name"):
-        e = db.scalar(select(Experiment).where(Experiment.name == rec["name"], Experiment.product_id == product.id))
-    if not e:
-        e = Experiment(product_id=product.id, name=rec.get("name") or f"Test {product.canonical_name}")
-        db.add(e)
-    for k in ("market", "platform", "creative", "creative_type", "angle", "offer", "funnel", "notes"):
-        if rec.get(k):
-            setattr(e, k, rec[k])
-    for k in ("sell_price", "unit_cost", "spend", "revenue"):
-        if rec.get(k) not in (None, ""):
-            setattr(e, k, _f(rec[k]))
-    for k in EXP_INT:
-        if rec.get(k) not in (None, ""):
-            setattr(e, k, _i(rec[k]))
-    if rec.get("started_at"):
-        e.started_at = _dt(rec["started_at"]).date()
-    if rec.get("ended_at"):
-        e.ended_at = _dt(rec["ended_at"]).date()
 
 
 def _norm_signal(db: Session, rec: dict):
@@ -347,45 +260,27 @@ def _norm_signal(db: Session, rec: dict):
 def normalize_pending(db: Session, limit: int = 20000) -> dict:
     """Raw lake → normalized tables, with dedup, entity resolution and AI enrichment."""
     raws = db.scalars(select(RawRecord).where(RawRecord.processed.is_(False)).order_by(RawRecord.id).limit(limit)).all()
-    stats = {t: 0 for t in ENTITY_TYPES} | {"errors": 0, "duplicates": 0}
-    pending_comments: list[Comment] = []
-    pending_refusals: list[Order] = []
-    seen_keys: set[str] = set()
+    stats = {t: 0 for t in ENTITY_TYPES} | {"errors": 0}
     connectors = {c.id: c.provider for c in db.scalars(select(Connector)).all()}
-    # process order matters: ads/stores/experiments create products before orders/comments reference them
-    order = {"ad": 0, "store": 1, "experiment": 2, "product_signal": 3, "order": 4, "comment": 5}
+    # process order matters: ads/stores create products before signals reference them
+    order = {"ad": 0, "store": 1, "product_signal": 2}
     for r in sorted(raws, key=lambda r: (order.get(r.entity_type, 9), r.id)):
         try:
-            if r.dedupe_key and r.entity_type == "comment":
-                if r.dedupe_key in seen_keys or db.scalar(select(RawRecord.id).where(
-                        RawRecord.dedupe_key == r.dedupe_key, RawRecord.processed.is_(True), RawRecord.error.is_(None))):
-                    stats["duplicates"] += 1
-                    r.processed = True
-                    continue
-                seen_keys.add(r.dedupe_key)
             with db.begin_nested():
                 rec = r.payload
                 if r.entity_type == "ad":
                     _norm_ad(db, rec, connectors.get(r.connector_id))
-                elif r.entity_type == "comment":
-                    _norm_comment(db, rec, pending_comments)
-                elif r.entity_type == "order":
-                    _norm_order(db, rec, pending_refusals)
                 elif r.entity_type == "store":
                     _norm_store(db, rec)
-                elif r.entity_type == "experiment":
-                    _norm_experiment(db, rec)
                 elif r.entity_type == "product_signal":
                     _norm_signal(db, rec)
                 db.flush()
-            stats[r.entity_type] += 1
+            stats[r.entity_type] = stats.get(r.entity_type, 0) + 1  # legacy raw rows (order/comment/…) count, never normalize
             r.processed = True
         except Exception as ex:  # keep raw row for inspection
             r.processed, r.error = True, f"{type(ex).__name__}: {ex}"
             stats["errors"] += 1
     db.flush()
-    stats["enriched_comments"], stats["comment_engine"] = enrich_comments(db, pending_comments)
-    stats["classified_refusals"] = classify_order_refusals(db, pending_refusals)
     return stats
 
 
@@ -401,18 +296,6 @@ def enrich_comments(db: Session, comments: list[Comment] | None = None) -> tuple
     return len(comments), engine
 
 
-def classify_order_refusals(db: Session, orders: list[Order] | None = None) -> int:
-    orders = orders if orders is not None else db.scalars(
-        select(Order).where(Order.refusal_reason_raw.is_not(None), Order.refusal_reason.is_(None))).all()
-    if not orders:
-        return 0
-    reasons = E.classify_refusals([o.refusal_reason_raw for o in orders])
-    for o, r in zip(orders, reasons):
-        o.refusal_reason = r
-    db.flush()
-    return len(orders)
-
-
 # ------------------------------------------------------------ CSV
 def parse_csv(content: bytes) -> list[dict]:
     text = content.decode("utf-8-sig", errors="replace")
@@ -421,10 +304,7 @@ def parse_csv(content: bytes) -> list[dict]:
 
 CSV_TEMPLATES = {
     "ad": "external_id,source,platform,advertiser,product_name,ad_text,landing_url,country,media_type,media_url,price,currency,likes,comments_count,shares,first_seen,last_seen,is_active,category",
-    "comment": "product_code,product_name,ad_external_id,source,text,created_at",
-    "order": "external_id,product_code,product_name,experiment_id,country,amount,cogs,shipping_cost,status,refusal_note,refunded,phone,created_at,source",
     "store": "domain,product_code,product_name,country,price,estimated_traffic,traffic_growth",
-    "experiment": "product_code,product_name,name,market,platform,creative,creative_type,angle,offer,funnel,sell_price,unit_cost,started_at,ended_at,spend,impressions,clicks,landing_views,atc,checkout,purchase,revenue,confirmed_orders,shipped,delivered,refused,returned,ads_submitted,ads_rejected",
     "product_signal": "product_code,product_name,search_trend,keyword_competition",
 }
 

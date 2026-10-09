@@ -16,7 +16,7 @@ export function CommentsPanel({ c }: { c: any }) {
           ))}
         </div>
         <div className="text-xs text-ink2 mt-4">Purchase intent: {Object.entries(c.purchase_intent).map(([k, v]) => `${k} ${v}`).join(" · ")} · Questions: {c.questions}</div>
-        <div className="text-[11px] text-muted mt-1">Engine: {Object.keys(c.engines).join(", ")}</div>
+        <div className="text-[11px] text-muted-foreground mt-1">Engine: {Object.keys(c.engines).join(", ")}</div>
       </Card>
       <Card title="Top positive"><BarList rows={c.top_positive.map((r: any) => ({ label: r.aspect, value: r.share }))} format={(v) => fmt.pct(v, 0)} /></Card>
       <Card title="Top complaints"><BarList rows={c.top_complaints.map((r: any) => ({ label: r.aspect, value: r.share }))} format={(v) => fmt.pct(v, 0)} color="var(--series-8)" /></Card>

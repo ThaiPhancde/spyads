@@ -1,7 +1,7 @@
 """Market Intelligence OS — API."""
 import os
 from collections import Counter, defaultdict
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,14 +12,14 @@ from sqlalchemy.orm import Session
 
 from .db import Base, ReadOnlyGets, engine, get_db
 from .markets import ad_scope_filter, expand, product_in_scope
-from .models import (ad_in_country, Ad, Advertiser, AdvertiserDailySnapshot, Alert, Comment, Connector, Experiment,
-                     LifecycleEvent, Order, Product, ProductDailySnapshot, Store)
+from .models import (ad_in_country, Ad, Advertiser, AdvertiserDailySnapshot, Alert, Comment, Connector, LifecycleEvent,
+                     Product, ProductDailySnapshot, Store)
 from .services import agent, llm
 from .services.connectors import (CSV_TEMPLATES, ENTITY_TYPES, ensure_default_connectors, manual_url_record, normalize_pending,
                                   parse_csv, store_raw)
-from .services.decision import BENCH, FAILURE_TYPES, LIFECYCLE_STATES, TH, TRANSITIONS, experiment_metrics, learning_profile, transition
+from .services.decision import LIFECYCLE_STATES, TRANSITIONS, transition
 from .services.engine import is_hidden_winner, is_potential_winner, score_all
-from .services.enrichment import ASPECTS, analyze_comments
+from .services.enrichment import ASPECTS
 from .services.entity_resolution import merge_products
 from .services.pipeline import run_pipeline
 from .services.scoring import confidence_label, win_label
@@ -29,7 +29,7 @@ app = FastAPI(title="Market Intelligence OS", version="0.1.0")
 
 class AdminGuard:
     """ASGI middleware: every write (non GET/HEAD/OPTIONS) needs `X-Admin-Token` = ADMIN_TOKEN (.env). Fails closed when
-    unset. /api/ingest/* and /api/webhooks/* use X-Ingest-Token instead; /api/health stays open for probes."""
+    unset. /api/ingest/* uses X-Ingest-Token instead; /api/health stays open for probes."""
 
     def __init__(self, app):
         self.app = app
@@ -37,7 +37,7 @@ class AdminGuard:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
             path = scope["path"]
-            if not path.startswith(("/api/ingest/", "/api/webhooks/")) and path != "/api/health":
+            if not path.startswith("/api/ingest/") and path != "/api/health":
                 want = os.getenv("ADMIN_TOKEN")
                 got = next((v.decode() for k, v in scope["headers"] if k == b"x-admin-token"), None)
                 if not want:
@@ -109,14 +109,14 @@ def product_card(p: Product) -> dict:
         "id": p.id, "product_code": p.product_code, "name": p.canonical_name, "category": p.category,
         "country": p.country, "markets": f.get("markets", []), "price": f.get("avg_price") or p.price, "currency": p.currency,
         "lifecycle": p.lifecycle_status, "recommendation": p.recommendation, "reasons": p.recommendation_reasons,
-        "win_score": p.win_score, "external_win_score": p.external_win_score, "internal_win_score": p.internal_win_score,
+        "win_score": p.win_score, "external_win_score": p.external_win_score,
         "rarity_score": p.rarity_score, "rare_winner_score": p.rare_winner_score, "saturation_score": p.saturation_score,
         "saturation_state": p.saturation_state, "opportunity_score": p.opportunity_score, "confidence_score": p.confidence_score,
         "confidence_label": confidence_label(p.confidence_score), "win_label": win_label(p.win_score),
-        "customer_rejection_score": p.customer_rejection_score, "sentiment_score": p.sentiment_score,
+        "sentiment_score": p.sentiment_score,
         "advertisers": f.get("advertiser_count", 0), "active_ads": f.get("active_ads", 0), "new_ads_7d": f.get("new_ads_7d", 0),
         "growth_7d": f.get("creative_growth_7d", 0), "stores": f.get("store_count", 0), "traffic_growth": f.get("traffic_growth"),
-        "refusal_rate": f.get("refusal_rate"), "roas": f.get("roas"), "tags": p.tags or [],
+        "tags": p.tags or [],
         "first_seen_at": p.first_seen_at, "last_seen_at": p.last_seen_at, "hidden_winner": is_hidden_winner(p),
         **platform_signals(f),
     }
@@ -136,8 +136,7 @@ def meta(db: Session = Depends(get_db)):
 
     countries = _targets()
     return {"countries": countries, "regions": {r: {"label": REGION_LABEL[r], "countries": REGIONS[r]} for r in REGIONS}, "categories": cats, "lifecycle_states": LIFECYCLE_STATES, "transitions": {k: sorted(v) for k, v in TRANSITIONS.items()},
-            "failure_types": FAILURE_TYPES, "aspects": ASPECTS, "recommendations": ["TEST_NOW", "TEST", "WATCH", "REVIEW", "SKIP", "SCALE", "HOLD", "ITERATE", "STOP"],
-            "thresholds": TH, "benchmarks": BENCH, "llm": llm.available(), "llm_model": llm.model() if llm.available() else None,
+            "aspects": ASPECTS, "recommendations": ["TEST_NOW", "TEST", "WATCH", "REVIEW", "SKIP"], "llm": llm.available(), "llm_model": llm.model() if llm.available() else None,
             "entity_types": ENTITY_TYPES, "platforms": platforms_catalogue()}
 
 
@@ -164,23 +163,6 @@ def _pulse(country: str | None, db: Session) -> dict:
         new_adv_ids &= {a.advertiser_id for a in new_ads}
     new_products = [p for p in products if p.first_seen_at > since]
 
-    exps = db.scalars(select(Experiment)).all()
-    if country:
-        exps = [e for e in exps if e.market == country]
-    running = [e for e in exps if e.ended_at is None]
-    st = Counter(e.status for e in exps)
-    orders = db.scalars(select(Order).where(Order.created_at > datetime.utcnow() - timedelta(days=14))).all()
-    if country:
-        orders = [o for o in orders if o.country == country]
-    att = sum(1 for o in orders if o.status in ("delivered", "refused", "failed", "returned"))
-    ref = sum(1 for o in orders if o.status == "refused")
-    prev_orders = db.scalars(select(Order).where(Order.created_at <= datetime.utcnow() - timedelta(days=14),
-                                                 Order.created_at > datetime.utcnow() - timedelta(days=35))).all()
-    if country:
-        prev_orders = [o for o in prev_orders if o.country == country]
-    patt = sum(1 for o in prev_orders if o.status in ("delivered", "refused", "failed", "returned"))
-    pref = sum(1 for o in prev_orders if o.status == "refused")
-
     from .services import hidden as _hidden
 
     hidden = [r["product"] for r in _hidden.compute(db, country)]
@@ -195,9 +177,6 @@ def _pulse(country: str | None, db: Session) -> dict:
             "new_advertisers": len(new_adv_ids), "potential_winners": sum(1 for p in products if is_potential_winner(p)),
             "hidden_winners": len(hidden), "saturated_products": sum(1 for p in products if p.saturation_state in ("Highly Saturated", "Declining")),
         },
-        "internal_tests": {"testing": len(running), "winning": st["WIN"], "promising": st["PROMISING"], "failed": st["FAILED"],
-                           "waiting_data": st["WAITING"],
-                           "cod_refusal": round(ref / att, 3) if att else None, "cod_refusal_prev": round(pref / patt, 3) if patt else None},
         "recommendations": dict(recs),
         "top_hidden_winners": [product_card(p) for p in hidden[:5]],
         "top_opportunities": [product_card(p) for p in sorted(products, key=lambda p: -p.opportunity_score)[:8]],
@@ -265,6 +244,9 @@ def hidden_winners(tag: str | None = None, scope: str | None = None, limit: int 
 
 
 # ============================================================ Product 360
+from .services.spy import SKIP_HOST as _SKIP_HOST
+
+
 def mkt_summary(ads: list[Ad], advs: dict) -> dict:
     """What a marketer checks first: floor price per marketplace, supplier price → margin, engagement on the ads,
     marketplace proof (reviews / sold / rank), how long the ads have run and where they send traffic."""
@@ -274,7 +256,8 @@ def mkt_summary(ads: list[Ad], advs: dict) -> dict:
 
     listings = [a for a in ads if a.channel == "commerce"]
     spy = [a for a in ads if a.channel != "commerce" and not a.is_internal]
-    usd = lambda a: to_usd(a.price, a.currency) if a.price else None
+    # an ad price without a currency ("199k" in a non-Vietnamese ad) is not a price we can show in USD
+    usd = lambda a: to_usd(a.price, a.currency) if a.price and (a.currency or a.channel == "commerce") else None
     floor: dict[str, dict] = {}
     for a in listings:
         u = usd(a)
@@ -283,9 +266,22 @@ def mkt_summary(ads: list[Ad], advs: dict) -> dict:
                                 "title": a.title or a.raw_product_name, "url": a.landing_url, "rating": a.rating,
                                 "reviews": a.review_count, "sold": a.sold_count}
     retail = sorted(u for a in listings if a.network != "aliexpress" and (u := usd(a)))
-    ad_prices = sorted(u for a in spy if (u := usd(a)))
+    priced = [a for a in spy if usd(a)]
+    ad_prices = sorted(usd(a) for a in priced)
     supplier = floor.get("aliexpress", {}).get("usd")
-    sell = (ad_prices or retail or [None])[len(ad_prices or retail or [None]) // 2]
+    # competitor price = what the ADS sell at (copy or landing page) — never a marketplace median dressed up as one
+    sell = ad_prices[len(ad_prices) // 2] if ad_prices else None
+    retail_med = retail[len(retail) // 2] if retail else None
+    by_adv: dict = defaultdict(list)
+    for a in priced:
+        by_adv[a.advertiser_id].append(a)
+    adv_prices = sorted(({"advertiser": advs[k].name if k in advs else None, "ads": len(v),
+                          "price": sorted(x.price for x in v)[len(v) // 2], "currency": v[0].currency,
+                          "usd": round(sorted(usd(x) for x in v)[len(v) // 2], 2), "source": Counter(x.price_source or "source" for x in v).most_common(1)[0][0],
+                          "domain": next((urlparse(x.landing_url).netloc.removeprefix("www.") for x in v if x.landing_url), None),
+                          "url": next((x.landing_url for x in v if x.landing_url), None), "active": sum(1 for x in v if x.is_active)}
+                         for k, v in by_adv.items()), key=lambda r: (-r["active"], -r["ads"]))
+    fetchable = [a for a in spy if a.landing_url and not _SKIP_HOST.search(urlparse(a.landing_url).netloc)]
     eng = lambda a: (a.likes or 0) + 3 * (a.comments_count or 0) + 5 * (a.shares or 0)
     top = sorted((a for a in spy if eng(a) or a.views), key=lambda a: (eng(a), a.views or 0), reverse=True)[:5]
     now = datetime.utcnow()
@@ -295,8 +291,14 @@ def mkt_summary(ads: list[Ad], advs: dict) -> dict:
         "floor": sorted(floor.values(), key=lambda r: r["usd"]),
         "floor_usd": min((r["usd"] for r in floor.values() if r["network"] != "aliexpress"), default=None),
         "supplier_usd": supplier,
-        "sell_usd": round(sell, 2) if sell else None,  # median price competitors advertise (else retail median)
+        "sell_usd": round(sell, 2) if sell else None,  # median of competitor selling prices (ads only)
+        "retail_usd": round(retail_med, 2) if retail_med else None,  # Walmart / Amazon listings — shown separately
         "ad_price_range_usd": [round(ad_prices[0], 2), round(ad_prices[-1], 2)] if ad_prices else None,
+        # transparency: how many ads the price rests on, where it came from, and what is still fetchable
+        "price_coverage": {"priced": len(priced), "ads": len(spy), "sources": dict(Counter(a.price_source or "source" for a in priced)),
+                           "fetchable": len(fetchable), "unchecked": sum(1 for a in fetchable if a.price is None and not a.landing_checked_at),
+                           "inbox": sum(1 for a in spy if not a.landing_url or _SKIP_HOST.search(urlparse(a.landing_url).netloc))},
+        "sell_by_advertiser": adv_prices[:10],
         "margin_est": round(1 - supplier * 1.6 / sell, 3) if supplier and sell else None,  # landed ≈ supplier × 1.6
         "engagement": {"likes": sum(a.likes or 0 for a in spy), "comments": sum(a.comments_count or 0 for a in spy),
                        "shares": sum(a.shares or 0 for a in spy), "views": sum(a.views or 0 for a in ads),
@@ -357,8 +359,6 @@ def product_360(pid: int, db: Session = Depends(get_db)):
 
     snaps = db.scalars(select(ProductDailySnapshot).where(ProductDailySnapshot.product_id == pid).order_by(ProductDailySnapshot.date)).all()
     stores = db.scalars(select(Store).where(Store.product_id == pid).order_by(Store.estimated_traffic.desc())).all()
-    exps = db.scalars(select(Experiment).where(Experiment.product_id == pid).order_by(Experiment.started_at.desc())).all()
-    orders = db.scalars(select(Order).where(Order.product_id == pid)).all()
     events = db.scalars(select(LifecycleEvent).where(LifecycleEvent.product_id == pid).order_by(LifecycleEvent.created_at.desc())).all()
     by_country = Counter(a.country for a in ads if a.is_active and not a.is_internal)
     hooks = Counter(a.hook for a in ads if a.is_active)
@@ -366,7 +366,6 @@ def product_360(pid: int, db: Session = Depends(get_db)):
     offers = Counter(o for a in ads if a.is_active and a.offer for o in a.offer.split(","))
     price_points = sorted([{"date": a.first_seen_at.date().isoformat(), "price": a.price, "country": a.country} for a in ads if a.price],
                           key=lambda x: x["date"])
-    st = Counter(o.status for o in orders)
     return {
         "product": {**product_card(p), "brand": p.brand, "cost": p.cost, "language": p.language,
                     "search_trend": p.search_trend, "keyword_competition": p.keyword_competition,
@@ -382,8 +381,6 @@ def product_360(pid: int, db: Session = Depends(get_db)):
                     "traffic_growth": s.traffic_growth} for s in stores],
         "pricing": {"points": price_points[-200:], "avg": f.get("avg_price"), "trend": f.get("price_trend")},
         "comments": comment_summary(db, [pid]),
-        "experiments": [experiment_dict(e) for e in exps],
-        "orders": {"total": len(orders), "status": dict(st), "refusal_reasons": f.get("refusal_reasons", {})},
         "timeseries": [{"date": s.date.isoformat(), "active_ads": s.active_ads, "new_ads": s.new_ads, "advertisers": s.advertisers,
                         "external_win": s.external_win_score, "saturation": s.saturation_score, "opportunity": s.opportunity_score,
                         "rarity": s.rarity_score, "negative_comments": s.negative_comments, "comments": s.comments} for s in snaps],
@@ -439,112 +436,25 @@ def merge(body: MergeIn, db: Session = Depends(get_db)):
     return {"ok": True, "target_id": t.id}
 
 
-# ============================================================ Test Lab (§12-13)
-def experiment_dict(e: Experiment) -> dict:
-    m = experiment_metrics(e)
-    return {
-        "id": e.id, "product_id": e.product_id, "name": e.name, "market": e.market, "platform": e.platform, "creative": e.creative,
-        "creative_type": e.creative_type, "angle": e.angle, "offer": e.offer, "funnel": e.funnel, "sell_price": e.sell_price,
-        "unit_cost": e.unit_cost, "started_at": e.started_at, "ended_at": e.ended_at, "running": e.ended_at is None,
-        "spend": e.spend, "impressions": e.impressions, "clicks": e.clicks, "landing_views": e.landing_views, "atc": e.atc,
-        "checkout": e.checkout, "purchase": e.purchase, "revenue": e.revenue, "confirmed_orders": e.confirmed_orders,
-        "shipped": e.shipped, "delivered": e.delivered, "refused": e.refused, "returned": e.returned,
-        "ads_submitted": e.ads_submitted, "ads_rejected": e.ads_rejected,
-        "status": e.status, "failure_types": e.failure_types or [], "diagnosis": e.diagnosis or [], "decision": e.decision,
-        "notes": e.notes, "metrics": {k: (round(v, 4) if v is not None else None) for k, v in m.items()},
-    }
+@app.post("/api/products/{pid}/scan")
+def scan_product(pid: int, db: Session = Depends(get_db)):
+    """On-demand competitor spy: prices from ad copy + landing pages, reviews from AliExpress / landing pages."""
+    from .services import spy
+
+    if not db.get(Product, pid):
+        raise HTTPException(404, "Product not found")
+    db.commit()  # the scan manages its own transactions (fetches run with no write lock held)
+    stats = spy.scan(db, pid, limit=30)
+    ads = db.scalars(select(Ad).where(Ad.product_id == pid)).all()
+    advs = {a.id: a for a in db.scalars(select(Advertiser).where(Advertiser.id.in_({a.advertiser_id for a in ads if a.advertiser_id})))}
+    return {"stats": stats, "mkt": mkt_summary(ads, advs), "comments": comment_summary(db, [pid])}
 
 
-@app.get("/api/experiments")
-def list_experiments(status: str | None = None, failure_type: str | None = None, db: Session = Depends(get_db)):
-    exps = db.scalars(select(Experiment).order_by(Experiment.started_at.desc())).all()
-    products = {p.id: p for p in db.scalars(select(Product)).all()}
-    rows = []
-    for e in exps:
-        if status and e.status != status:
-            continue
-        if failure_type and failure_type not in (e.failure_types or []):
-            continue
-        p = products.get(e.product_id)
-        rows.append({**experiment_dict(e), "product_name": p.canonical_name if p else None, "product_code": p.product_code if p else None})
-    summary = Counter(e.status for e in exps)
-    failures = Counter(f for e in exps for f in (e.failure_types or []))
-    return {"rows": rows, "summary": dict(summary), "failures": dict(failures.most_common()),
-            "running": sum(1 for e in exps if e.ended_at is None)}
-
-
-class ExperimentIn(BaseModel):
-    product_id: int
-    name: str | None = None
-    market: str | None = None
-    platform: str | None = "meta"
-    creative: str | None = None
-    creative_type: str | None = None
-    angle: str | None = None
-    offer: str | None = None
-    funnel: str | None = "COD"
-    sell_price: float | None = None
-    unit_cost: float | None = None
-    started_at: date | None = None
-    ended_at: date | None = None
-    spend: float | None = None
-    impressions: int | None = None
-    clicks: int | None = None
-    landing_views: int | None = None
-    atc: int | None = None
-    checkout: int | None = None
-    purchase: int | None = None
-    revenue: float | None = None
-    confirmed_orders: int | None = None
-    shipped: int | None = None
-    delivered: int | None = None
-    refused: int | None = None
-    returned: int | None = None
-    ads_submitted: int | None = None
-    ads_rejected: int | None = None
-    notes: str | None = None
-
-
-@app.post("/api/experiments")
-def create_experiment(body: ExperimentIn, db: Session = Depends(get_db)):
-    p = db.get(Product, body.product_id)
-    if not p:
-        raise HTTPException(404, "product not found")
-    data = {k: v for k, v in body.model_dump().items() if v is not None}
-    data.setdefault("name", f"EXP {p.canonical_name} · {body.market or p.country}")
-    data.setdefault("started_at", date.today())
-    e = Experiment(**data)
-    db.add(e)
-    db.flush()
-    score_all(db)
-    db.commit()
-    return experiment_dict(e)
-
-
-@app.patch("/api/experiments/{eid}")
-def update_experiment(eid: int, body: dict, db: Session = Depends(get_db)):
-    e = db.get(Experiment, eid)
-    if not e:
-        raise HTTPException(404)
-    allowed = set(ExperimentIn.model_fields) - {"product_id"}
-    for k, v in body.items():
-        if k in allowed:
-            if k in ("started_at", "ended_at") and v:
-                v = date.fromisoformat(str(v)[:10])
-            setattr(e, k, v if v != "" else None)
-    db.flush()
-    score_all(db)
-    db.commit()
-    return experiment_dict(e)
-
-
-# ============================================================ Comment Intelligence (§17)
-def comment_summary(db: Session, product_ids: list[int] | None = None, days: int | None = None) -> dict:
+# ============================================================ Competitor reviews (§17)
+def comment_summary(db: Session, product_ids: list[int] | None = None) -> dict:
     q = select(Comment).where(Comment.overall.is_not(None))
     if product_ids is not None:
         q = q.where(Comment.product_id.in_(product_ids))
-    if days:
-        q = q.where(Comment.created_at > datetime.utcnow() - timedelta(days=days))
     cs = db.scalars(q).all()
     n = len(cs)
     overall = Counter(c.overall for c in cs)
@@ -561,8 +471,16 @@ def comment_summary(db: Session, product_ids: list[int] | None = None, days: int
             key = f"{a}:{v}"
             if len(examples[key]) < 3 and c.text not in examples[key]:
                 examples[key].append(c.text)
+    rated = [c.rating for c in cs if c.rating]
+    neg_examples = [{"text": c.text, "rating": c.rating, "source": c.source, "country": c.country, "at": c.created_at}
+                    for c in sorted((c for c in cs if c.overall == "negative"), key=lambda c: c.created_at, reverse=True)[:5]]
+    pos_examples = [{"text": c.text, "rating": c.rating, "source": c.source, "country": c.country, "at": c.created_at}
+                    for c in sorted((c for c in cs if c.overall == "positive"), key=lambda c: c.created_at, reverse=True)[:3]]
     return {
         "analysed": n,
+        "sources": dict(Counter(c.source for c in cs)),  # review (AliExpress) / landing_review / ad_comment …
+        "rating_avg": round(sum(rated) / len(rated), 2) if rated else None,
+        "negative_examples": neg_examples, "positive_examples": pos_examples,
         "overall": {k: round(overall[k] / n, 3) if n else 0 for k in ("positive", "neutral", "negative")},
         "top_positive": [{"aspect": a, "share": round(c / tp, 3), "count": c} for a, c in pos_asp.most_common(6)],
         "top_complaints": [{"aspect": a, "share": round(c / tn, 3), "count": c} for a, c in neg_asp.most_common(8)],
@@ -572,46 +490,6 @@ def comment_summary(db: Session, product_ids: list[int] | None = None, days: int
         "examples": dict(examples),
         "engines": dict(Counter(c.analyzed_by for c in cs)),
     }
-
-
-@app.get("/api/comments/intelligence")
-def comments_intel(product_id: int | None = None, country: str | None = None, category: str | None = None,
-                   days: int | None = None, db: Session = Depends(get_db)):
-    ids = None
-    if product_id:
-        ids = [product_id]
-    elif country or category:
-        ids = [p.id for p in db.scalars(select(Product)).all()
-               if (not country or country in ((p.features or {}).get("markets") or [p.country])) and (not category or p.category == category)]
-    summary = comment_summary(db, ids, days)
-    # products with worst sentiment / rising negativity
-    worst = []
-    for p in db.scalars(select(Product)).all():
-        f = p.features or {}
-        if ids is not None and p.id not in ids:
-            continue
-        if f.get("comments", 0) >= 20:
-            worst.append({"id": p.id, "name": p.canonical_name, "product_code": p.product_code, "comments": f["comments"],
-                          "negative_rate": f.get("negative_comment_rate"), "negative_rate_7d": f.get("negative_rate_7d"),
-                          "negative_rate_prev": f.get("negative_rate_prev"), "complaint_rate": f.get("complaint_rate")})
-    worst.sort(key=lambda r: -(r["negative_rate"] or 0))
-    lq = select(Comment).order_by(Comment.created_at.desc()).limit(40)
-    if ids is not None:
-        lq = lq.where(Comment.product_id.in_(ids))
-    latest = db.scalars(lq).all()
-    return {**summary, "products": worst[:20],
-            "latest": [{"id": c.id, "product_id": c.product_id, "text": c.text, "overall": c.overall, "aspects": c.aspects,
-                        "purchase_intent": c.purchase_intent, "source": c.source, "created_at": c.created_at} for c in latest]}
-
-
-class AnalyzeIn(BaseModel):
-    texts: list[str]
-
-
-@app.post("/api/comments/analyze")
-def analyze(body: AnalyzeIn):
-    results, eng = analyze_comments(body.texts[:200])
-    return {"engine": eng, "results": [{"text": t, **r} for t, r in zip(body.texts, results)]}
 
 
 # ============================================================ Competitor Radar
@@ -686,64 +564,6 @@ def watch(aid: int, watched: bool = True, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-# ============================================================ Logistics / COD (§16) + Ad rejection (§15)
-@app.get("/api/logistics")
-def logistics(country: str | None = None, days: int = 60, db: Session = Depends(get_db)):
-    q = select(Order).where(Order.created_at > datetime.utcnow() - timedelta(days=days))
-    if country:
-        q = q.where(Order.country == country)
-    orders = db.scalars(q).all()
-    st = Counter(o.status for o in orders)
-    n = len(orders)
-    confirmed = n - st["pending"] - st["cancelled"]
-    shipped = st["shipped"] + st["delivered"] + st["refused"] + st["failed"] + st["returned"]
-    delivered = st["delivered"] + st["returned"]
-    attempts = delivered + st["refused"] + st["failed"]
-    reasons = Counter(o.refusal_reason for o in orders if o.refusal_reason)
-    products = {p.id: p for p in db.scalars(select(Product)).all()}
-    per = defaultdict(Counter)
-    for o in orders:
-        per[o.product_id][o.status] += 1
-    prod_rows = []
-    for pid, c in per.items():
-        att = c["delivered"] + c["returned"] + c["refused"] + c["failed"]
-        sh = att + c["shipped"]
-        p = products.get(pid)
-        prod_rows.append({"id": pid, "name": p.canonical_name if p else pid, "orders": sum(c.values()),
-                          "confirm_rate": round(1 - (c["pending"] + c["cancelled"]) / sum(c.values()), 3),
-                          "delivery_rate": round((c["delivered"] + c["returned"]) / sh, 3) if sh else None,
-                          "refusal_rate": round(c["refused"] / att, 3) if att else None,
-                          "return_rate": round(c["returned"] / (c["delivered"] + c["returned"]), 3) if c["delivered"] + c["returned"] else None,
-                          "customer_rejection_score": p.customer_rejection_score if p else None})
-    prod_rows.sort(key=lambda r: -(r["refusal_rate"] or 0))
-    weekly = defaultdict(Counter)
-    for o in orders:
-        weekly[(o.created_at.date() - timedelta(days=o.created_at.weekday())).isoformat()][o.status] += 1
-    wk = []
-    for w, c in sorted(weekly.items()):
-        att = c["delivered"] + c["returned"] + c["refused"] + c["failed"]
-        wk.append({"week": w, "orders": sum(c.values()), "refusal_rate": round(c["refused"] / att, 3) if att else None,
-                   "delivery_rate": round((c["delivered"] + c["returned"]) / (att + c["shipped"]), 3) if att + c["shipped"] else None})
-    exps = db.scalars(select(Experiment)).all()
-    sub, rej = sum(e.ads_submitted for e in exps), sum(e.ads_rejected for e in exps)
-    rejected_ads = db.scalars(select(Ad).where(Ad.rejected.is_(True))).all()
-    return {
-        "funnel": {"orders": n, "confirmed": confirmed, "shipped": shipped, "delivered": delivered, "refused": st["refused"],
-                   "other_failed": st["failed"], "returned": st["returned"], "cancelled": st["cancelled"], "pending": st["pending"],
-                   "refusal_rate": round(st["refused"] / attempts, 3) if attempts else None,
-                   "delivery_rate": round(delivered / shipped, 3) if shipped else None,
-                   "confirm_rate": round(confirmed / n, 3) if n else None},
-        "refusal_reasons": [{"reason": r, "count": c, "share": round(c / max(1, sum(reasons.values())), 3)} for r, c in reasons.most_common()],
-        "products": prod_rows, "weekly": wk,
-        "ad_rejection": {"submitted": sub, "rejected": rej, "rate": round(rej / sub, 3) if sub else None,
-                         "by_product": [{"product": products[e.product_id].canonical_name if e.product_id in products else e.product_id,
-                                         "experiment": e.name, "submitted": e.ads_submitted, "rejected": e.ads_rejected,
-                                         "rate": round(e.ads_rejected / e.ads_submitted, 3) if e.ads_submitted else None}
-                                        for e in sorted(exps, key=lambda e: -(e.ads_rejected / e.ads_submitted if e.ads_submitted else 0))[:10]],
-                         "reasons": dict(Counter(a.rejection_reason for a in rejected_ads if a.rejection_reason))},
-    }
-
-
 # ============================================================ Alerts
 def alert_dict(a: Alert, db: Session | None = None) -> dict:
     return {"id": a.id, "type": a.type, "severity": a.severity, "title": a.title, "message": a.message, "product_id": a.product_id,
@@ -778,12 +598,6 @@ def read_all(db: Session = Depends(get_db)):
         a.is_read = True
     db.commit()
     return {"ok": True}
-
-
-# ============================================================ Learning loop (§30)
-@app.get("/api/learning/profile")
-def learning(db: Session = Depends(get_db)):
-    return learning_profile(db)
 
 
 # ============================================================ Data import (§3): CSV templates / upload, manual URL

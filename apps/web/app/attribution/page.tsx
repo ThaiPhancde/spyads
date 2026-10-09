@@ -17,7 +17,7 @@ export default function Attribution() {
         <div className="flex rounded-lg border overflow-hidden" style={{ borderColor: "var(--border)" }}>
           {BY.map(([k, l]) => (
             <button key={k} onClick={() => setBy(k)} className="text-xs px-3 py-1.5"
-                    style={{ background: by === k ? "var(--series-1)" : "var(--surface-1)", color: by === k ? "#fff" : "var(--text-secondary)" }}>{l}</button>
+                    style={{ background: by === k ? "var(--series-1)" : "var(--card)", color: by === k ? "#fff" : "var(--ink2)" }}>{l}</button>
           ))}
         </div>
         <select className="input" value={days} onChange={(e) => setDays(Number(e.target.value))}>{[7, 14, 30, 60, 90].map((d) => <option key={d} value={d}>{d} ngày</option>)}</select>

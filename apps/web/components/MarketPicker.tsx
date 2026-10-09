@@ -1,5 +1,9 @@
 "use client";
 import { useState } from "react";
+import { Hint } from "@/components/platforms";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useApi } from "@/lib/api";
 
 export const REGION_CHIPS: [string, string][] = [["", "Tất cả thị trường mục tiêu"], ["PH", "Philippines ★"], ["ME", "Trung Đông"], ["US", "Mỹ"], ["EU", "Châu Âu + UK"], ["AU", "Úc / NZ"], ["VN", "Việt Nam"], ["WW", "Toàn cầu"]];
@@ -12,25 +16,26 @@ export function MarketPicker({ value, onChange, compact }: { value: string; onCh
   const [other, setOther] = useState("");
   const countries: string[] = meta.data?.countries || [];
   const isRegion = REGION_CHIPS.some(([k]) => k === value);
-  const chip = (k: string, l: string) => (
-    <button key={k || "all"} onClick={() => onChange(k)} className="text-xs rounded-full px-2.5 py-1 border whitespace-nowrap"
-            style={{ borderColor: value === k ? "var(--series-1)" : "var(--border)", background: value === k ? "var(--surface-2)" : undefined, fontWeight: value === k ? 600 : 400 }}>
-      {l}
-    </button>
-  );
+  const selectedCountry = !isRegion && countries.includes(value) ? value : "";
   return (
-    <div className="flex flex-wrap gap-1.5 items-center">
-      {!compact && <span className="text-xs text-muted mr-1">Thị trường:</span>}
-      {REGION_CHIPS.map(([k, l]) => chip(k, l))}
-      <select className="input text-xs py-1" value={!isRegion && countries.includes(value) ? value : ""} onChange={(e) => onChange(e.target.value)}>
-        <option value="">Nước…</option>
-        {countries.map((c) => <option key={c} value={c}>{c}</option>)}
-      </select>
-      <form onSubmit={(e) => { e.preventDefault(); if (other.trim()) onChange(other.trim().toUpperCase()); }} className="flex gap-1">
-        <input className="input text-xs py-1 w-24" placeholder="Nước khác" value={other} onChange={(e) => setOther(e.target.value.toUpperCase())}
-               title="Xem riêng một nước ngoài thị trường mục tiêu (vd TH, MY) — không lẫn vào số liệu tổng" />
+    <div className="flex flex-wrap items-center gap-1.5">
+      {!compact && <span className="mr-1 text-xs text-muted-foreground">Thị trường:</span>}
+      <ToggleGroup type="single" variant="outline" size="sm" spacing={1} value={isRegion ? value || "all" : ""} onValueChange={(v) => v && onChange(v === "all" ? "" : v)}
+                   className="flex-wrap justify-start gap-1.5">
+        {REGION_CHIPS.map(([k, l]) => (
+          <ToggleGroupItem key={k || "all"} value={k || "all"} className="h-7 rounded-full border px-2.5 text-xs data-[state=on]:border-primary data-[state=on]:font-semibold">{l}</ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      <Select value={selectedCountry} onValueChange={onChange}>
+        <SelectTrigger size="sm" className="h-7 text-xs"><SelectValue placeholder="Nước…" /></SelectTrigger>
+        <SelectContent>{countries.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+      </Select>
+      <form onSubmit={(e) => { e.preventDefault(); if (other.trim()) onChange(other.trim().toUpperCase()); }}>
+        <Hint tip="Xem riêng một nước ngoài thị trường mục tiêu (vd TH, MY) — không lẫn vào số liệu tổng">
+          <Input className="h-7 w-24 text-xs" placeholder="Nước khác" value={other} onChange={(e) => setOther(e.target.value.toUpperCase())} />
+        </Hint>
       </form>
-      {value && !isRegion && !countries.includes(value) && <span className="text-[11px] text-muted">đang xem {value} (ngoài thị trường mục tiêu)</span>}
+      {value && !isRegion && !countries.includes(value) && <span className="text-[11px] text-muted-foreground">đang xem {value} (ngoài thị trường mục tiêu)</span>}
     </div>
   );
 }

@@ -2,8 +2,8 @@
 
 Removes: their ads, provenance (ad_sources), creatives + stored files (local disk or R2), their connectors with
 tracked queries, raw batches, and products left with no ad at all. Also drops the two tables the code no longer
-has a model for (`markets`, `creative_daily_snapshots`: never read). Kept: products with votes / orders / tests /
-ad spend / extension saves (retention.protected_products) — they only lose the dropped rows.
+has a model for (`markets`, `creative_daily_snapshots`: never read). Kept: products with votes /
+extension saves (retention.protected_products) — they only lose the dropped rows.
 
     python -m app.purge_removed            # dry run: counts only, changes nothing
     python -m app.purge_removed --apply    # really delete (run once locally, once against the server's DATABASE_URL)
@@ -38,7 +38,7 @@ def plan(db) -> dict:
     still = {p for (p,) in db.execute(select(Ad.product_id).where(Ad.product_id.in_(touched), ~gone).group_by(Ad.product_id))}
     orphans = sorted(touched - still - protected_products(db))
     crs = [c for ch in _chunks(ad_ids) for c in db.scalars(select(Creative).where(Creative.ad_id.in_(ch)))]
-    keys = {k for c in crs for k in (c.storage_key, c.thumb_key, c.download_key) if k}
+    keys = {k for c in crs for k in (c.storage_key, c.thumb_key) if k}
     shared = {k for ch in _chunks(sorted(keys)) for (k,) in db.execute(
         select(Creative.storage_key).where(Creative.storage_key.in_(ch), Creative.ad_id.not_in(ad_ids or [-1])))}
     conns = db.scalars(select(Connector.id).where(Connector.adapter.in_(REMOVED_SOURCES))).all()
@@ -48,9 +48,9 @@ def plan(db) -> dict:
 
 def apply(db, p: dict) -> int:
     files = 0
-    for key in p["files"]:  # hls/<sha>/<rendition>/index.m4s → the whole hls/<sha>/ folder
+    for key in p["files"]:
         try:
-            files += store().delete_prefix("/".join(key.split("/")[:2]) + "/") if key.startswith("hls/") else store().delete(key)
+            files += store().delete(key)
         except Exception:
             pass  # already gone
     for ids in _chunks(p["ad_ids"]):

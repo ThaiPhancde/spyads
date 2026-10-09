@@ -20,6 +20,7 @@ class MediaItem:
     height: int | None = None
     duration_sec: float | None = None
     quality: str | None = None  # hd | sd
+    sd_url: str | None = None  # lighter (~360p) rendition when the source offers one — what the player streams
 
 
 @dataclass

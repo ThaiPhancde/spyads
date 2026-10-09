@@ -56,6 +56,21 @@ def worker_smoke():
     with SessionLocal() as db:
         assert db.get(Creative, 5).status == "expired"
     assert len(media._inflight) == 0
+    # thumbnail only: one GET, ≤480 px JPEG under thumbs/, row stays pending (no full download); 404 → expired
+    resp = {"code": 200}
+    media.httpx.get = lambda url, **kw: type("R", (), {"status_code": resp["code"], "content": b"img"})()
+    with SessionLocal() as db:
+        db.add_all([Creative(id=6, ad_id=2, type="image", network="taobao", source_url="https://img.alicdn.com/a.jpg"),
+                    Creative(id=7, ad_id=2, type="image", network="taobao", source_url="https://img.alicdn.com/b.jpg")])
+        db.commit()
+    tkey = media.grab_thumb(6)
+    assert tkey and tkey.startswith("thumbs/") and media.store().exists(tkey), tkey
+    assert media.grab_thumb(6) == tkey  # second view: no fetch, same key
+    resp["code"] = 404
+    assert media.grab_thumb(7) is None
+    with SessionLocal() as db:
+        assert db.get(Creative, 6).status == "pending" and db.get(Creative, 6).thumb_key == tkey
+        assert db.get(Creative, 7).status == "expired"
     print("worker smoke OK")
 
 
@@ -72,8 +87,18 @@ assert media.source_alive(f"https://video.fvii2-4.fna.fbcdn.net/o1/v/t2/f2/m366/
 assert media.source_alive(f"https://video.fvii2-4.fna.fbcdn.net/o1/v/t2/f2/m366/AQP.mp4?_nc_cat=1&oe={future}") is True
 assert media.source_alive(f"https://v16m.tiktokcdn.com/abc/?x-expires={int(time.time()) - 10}") is False
 assert media.source_alive(f"https://v16m.tiktokcdn.com/abc/?x-expires={int(time.time()) + 7200}") is True
+_sig = "678f66ed36e1039817667ee65ebf7b6e"  # tiktokcdn video: expiry is the hex path segment after the signature
+assert media.source_alive(f"https://v16m-default.tiktokcdn.com/{_sig}/{int(time.time()) - 10:x}/video/tos/a/?a=0") is False
+assert media.source_alive(f"https://v16m-default.tiktokcdn.com/{_sig}/{int(time.time()) + 7200:x}/video/tos/a/?a=0") is True
+assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) - 10}/video/aHR0") is False
+assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) + 7200}/video/aHR0") is True
 assert media.source_alive("https://ae01.alicdn.com/kf/S1.jpg") is True  # no expiry → playable
 assert media.source_alive(None) is False
+_sig = "678f66ed36e1039817667ee65ebf7b6e"  # TikTok expiry in the path: tiktokcdn hex, Ad Library decimal
+assert media.source_alive(f"https://v16m-default.tiktokcdn.com/{_sig}/{int(time.time()) - 10:x}/video/tos/alisg/x/?a=0") is False
+assert media.source_alive(f"https://v16m-default.tiktokcdn.com/{_sig}/{int(time.time()) + 7200:x}/video/tos/alisg/x/?a=0") is True
+assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) - 10}/video/aHR0cHM6Ly9") is False
+assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) + 7200}/video/aHR0cHM6Ly9") is True
 
 a = "https://scontent.xx.fbcdn.net/v/t42.1790-2/123_n.mp4?_nc_cat=1&oe=66AA"
 b = "https://scontent.xx.fbcdn.net/v/t42.1790-2/123_n.mp4?_nc_cat=2&oe=66BB"
@@ -100,5 +125,5 @@ print(f"usage(): {dt:.2f}s first call, {dt2:.2f}s second (cached files) · video
       f"pending {u['pending']} archived {u['archived']} pinned {u['pinned']} · today {u['today']['videos']}")
 tmp = tempfile.mkdtemp(prefix="media_test_")
 subprocess.run([sys.executable, __file__, "--worker"], check=True, cwd=os.path.dirname(os.path.abspath(__file__)),
-               env={**os.environ, "DATABASE_URL": f"sqlite:///{tmp}/t.db", "DATA_DIR": f"{tmp}/data", "VOD": "0"})
+               env={**os.environ, "DATABASE_URL": f"sqlite:///{tmp}/t.db", "DATA_DIR": f"{tmp}/data"})
 print("OK")

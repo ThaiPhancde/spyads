@@ -1,4 +1,4 @@
-"""Scoring Engine (blueprint §8-11, §16, §19).
+"""Scoring Engine (blueprint §8, §10-11, §19).
 
 All scores are deterministic formulas over the feature store — AI never sets a
 score (§20). Every score returns its component breakdown so the UI / AI agent can
@@ -95,35 +95,6 @@ def cross_platform_signal(f: dict) -> float | None:
     return 0.5 * demand + 0.25 * viral + 0.25 * spread
 
 
-# ------------------------------------------------------------ Internal Win (§9)
-def internal_win_score(f: dict, price_usd: float | None = None) -> tuple[float | None, dict]:
-    if not f.get("has_internal") or not f.get("orders"):
-        return None, {}
-    aov, cpa = f.get("aov") or 0, f.get("cpa") or 0
-    parts = {
-        "contribution_margin": (0.20, lin(f["contribution_margin"], -0.1, 0.3)),
-        "roas_mer": (0.15, 0.5 * lin(f.get("roas"), 1, 4) + 0.5 * lin(f.get("mer"), 0.8, 3)),
-        "cpa": (0.10, 100 - lin(cpa / aov if aov else 1, 0.15, 0.6)),
-        "cvr": (0.10, lin(f.get("cvr"), 0.005, 0.04)),
-        # order amounts are booked in USD; compare against the market price converted to USD
-        "aov": (0.10, lin(aov / price_usd, 0.9, 1.5) if price_usd else 50.0),
-        "delivery_rate": (0.15, lin(f.get("delivery_rate"), 0.5, 0.9)),
-        "return_refund": (0.10, 100 - lin(f.get("return_rate"), 0.02, 0.2)),
-        "customer_sentiment": (0.05, lin(f["positive_comment_rate"] - f["negative_comment_rate"], -0.5, 0.7) if f["comments"] else 50),
-        "repeat_order": (0.05, lin(f.get("repeat_rate"), 0, 0.15)),
-    }
-    return round(_weighted(parts), 1), _breakdown(parts)
-
-
-def blend_win(external: float, internal: float | None, f: dict) -> tuple[float, dict]:
-    """§9.1 — the more internal data, the less we rely on spy tools."""
-    if internal is None:
-        return external, {"external": 1.0, "internal": 0.0, "stage": "untested"}
-    enough = f.get("orders", 0) >= 50 and f.get("internal_spend", 0) >= 500
-    we, wi = (0.3, 0.7) if enough else (0.6, 0.4)
-    return round(we * external + wi * internal, 1), {"external": we, "internal": wi, "stage": "enough_data" if enough else "little_data"}
-
-
 # ------------------------------------------------------------ Rarity & Rare Winner (§10)
 def rarity_score(f: dict) -> tuple[float, dict]:
     # same DB percentiles as saturation_score: p99 advertiser_count 3 · active_ads 12 · store_count 2
@@ -142,8 +113,6 @@ def growth_velocity(f: dict) -> float:
 
 
 def margin_potential(product, f: dict) -> float:
-    if f.get("gross_margin") is not None:
-        return lin(f["gross_margin"], 0.2, 0.75)
     if product.price and product.cost:
         return lin(1 - product.cost / product.price, 0.2, 0.75)
     sell = f.get("avg_price") or to_usd(product.price, product.currency)  # features.avg_price is already USD
@@ -173,10 +142,7 @@ def confidence_score(f: dict) -> tuple[float, dict]:
         "markets": (0.10, lin(f["market_count"], 1, 4)),
         "sources": (0.10, lin(f["source_count"], 1, 3)),
     }
-    s = _weighted(parts)
-    if f.get("has_internal") and f.get("orders", 0) >= 30:
-        s = min(100.0, s + 10)
-    return round(s, 1), _breakdown(parts)
+    return round(_weighted(parts), 1), _breakdown(parts)
 
 
 def confidence_label(c: float) -> str:
@@ -199,22 +165,6 @@ def opportunity_score(win: float, saturation: float, growth: float, margin: floa
     raw = 0.5 * win + 0.2 * (100 - saturation) + 0.15 * growth + 0.15 * margin
     adjustment = 0.4 + 0.6 * confidence / 100
     return round(raw, 1), round(raw * adjustment, 1)
-
-
-# ------------------------------------------------------------ Customer rejection (§16)
-def customer_rejection_score(f: dict) -> float | None:
-    if not f.get("has_internal") or not f.get("orders"):
-        return None
-    reasons = f.get("refusal_reasons") or {}
-    total_r = sum(reasons.values())
-    trust_share = (reasons.get("fake_order", 0) + reasons.get("trust_issue", 0) + reasons.get("expectation_mismatch", 0)) / total_r if total_r else 0
-    parts = {
-        "refusal": (0.5, lin(f.get("refusal_rate"), 0.05, 0.35)),
-        "unconfirmed": (0.2, lin(1 - (f.get("confirm_rate") or 1), 0.1, 0.45)),
-        "returns": (0.2, lin(f.get("return_rate"), 0.02, 0.2)),
-        "trust_mismatch_share": (0.1, lin(trust_share, 0, 0.6)),
-    }
-    return round(_weighted(parts), 1)
 
 
 def sentiment_score(f: dict) -> float | None:

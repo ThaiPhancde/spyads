@@ -5,7 +5,7 @@ App nội bộ cho MKT Mess và MKT Ladi: **spy quảng cáo social (Meta, TikTo
 1. **Tìm sản phẩm.** Tìm theo từ khoá, thị trường và funnel (Mess/Ladi) trong kho dữ liệu, hoặc **tìm trực tiếp trên Meta Ad Library và các nguồn đã kết nối**. Mỗi sản phẩm có video và ảnh quảng cáo thật, **xem và tải về được**.
 2. **Xếp hạng và ra quyết định.** Product Potential Vector (novelty, wave, creative, market fit theo từng thị trường, MKT appeal, compliance…) kết hợp dữ liệu nội bộ (ads, đơn, giao hàng, hoàn, lợi nhuận) để ra các quyết định **TEST NOW / TEST / WATCH / REVIEW / SKIP** (trước khi test, theo tín hiệu thị trường) và **SCALE / HOLD / ITERATE / STOP** (sau khi test, theo dữ liệu nội bộ), cập nhật **realtime**.
 
-Thiết kế theo (tài liệu gốc, thắng khi mâu thuẫn): [docs/spy_ads_product_sourcing_architecture.md](docs/spy_ads_product_sourcing_architecture.md). Chi tiết: [product_discovery_intelligence_summary.md](docs/product_discovery_intelligence_summary.md), [spy_app_chat_summary.md](docs/spy_app_chat_summary.md) (connector contract), [competitive_ads_analysis_module.md](docs/competitive_ads_analysis_module.md) (Ad Detail), [market_intelligence_app_blueprint.md](docs/market_intelligence_app_blueprint.md) và [realtime_product_fit_summary.md](docs/realtime_product_fit_summary.md) (Company Fit).
+Thiết kế theo (tài liệu gốc, thắng khi mâu thuẫn): [docs/spy_ads_product_sourcing_architecture.md](docs/spy_ads_product_sourcing_architecture.md). Chi tiết: [product_discovery_intelligence_summary.md](docs/product_discovery_intelligence_summary.md), [spy_app_chat_summary.md](docs/spy_app_chat_summary.md) (connector contract), [competitive_ads_analysis_module.md](docs/competitive_ads_analysis_module.md) (Ad Detail), [market_intelligence_app_blueprint.md](docs/market_intelligence_app_blueprint.md).
 
 **Muốn chạy bằng dữ liệu thật, cần API nào và triển khai thế nào: xem [docs/DATA_SOURCES_AND_DEPLOY.md](docs/DATA_SOURCES_AND_DEPLOY.md).**
 
@@ -25,7 +25,7 @@ Meta Ad Library · TikTok Ad Library / API · Snapchat · Apify · Pipiads/Minea
                                 + nguồn hàng TQ (AliExpress) · store Shopify đối thủ
         │ connectors (apps/api/app/collector) — chỉ authenticate · fetch · extract · map
         ▼
- Common Data Contract (collector/contract.py) → POST /api/ingest/* · /api/webhooks/*
+ Common Data Contract (collector/contract.py) → POST /api/ingest/*
         ▼
  raw storage (raw/<source>/<ngày>) → normalize → dedup + provenance (ad_sources) → product cluster
         ▼                                           ▼
@@ -44,15 +44,14 @@ Meta Ad Library · TikTok Ad Library / API · Snapchat · Apify · Pipiads/Minea
 | Ingest: raw, dedup giữa các nguồn, provenance, đặt tên sản phẩm, funnel Mess/Ladi | [ingest.py](apps/api/app/ingest.py) |
 | Creative Vault | [media.py](apps/api/app/media.py), [storage.py](apps/api/app/storage.py) (local / Cloudflare R2) |
 | Realtime: scheduler theo tier, live search, webhook, chuẩn hoá trạng thái hãng vận chuyển, alert incremental | [realtime.py](apps/api/app/realtime.py), [events.py](apps/api/app/events.py) |
-| Product Potential Vector, Taste Model, Market DNA, compliance, Company Fit | [services/discovery.py](apps/api/app/services/discovery.py) |
+| Product Potential Vector, Taste Model, Market DNA, compliance | [services/discovery.py](apps/api/app/services/discovery.py) |
 | API: tìm kiếm, vault, vote, discovery, attribution, collector admin, SSE | [routers/intel.py](apps/api/app/routers/intel.py) |
-| Market Win/Saturation/Rarity, Test Lab, learning loop (từ blueprint đầu) | `services/scoring.py`, `decision.py`, `engine.py` |
+| Market Win/Saturation/Rarity, lifecycle (từ blueprint đầu) | `services/scoring.py`, `decision.py`, `engine.py` |
 
 ## Màn hình
 
 - **Tìm & khám phá:** Tìm sản phẩm · Product Radar (bảng theo thị trường + khung thời gian: xu hướng, ads, sellers, tuổi, điểm, ad mạnh nhất, biến thể scale) (tải thêm từ nguồn, cuộn vô hạn) · Thư viện quảng cáo (từng quảng cáo kiểu Meta Ad Library: carousel, CTA, tải video) · Product Discovery (Opportunity Radar + 13 tab: Breakout, Experimental, High Wave, Creative Goldmine, MKT Favorites, Hợp MKT Mess/Ladi…) · Creative Vault · Hidden Winners
 - **Thị trường:** Daily Pulse · Market Radar · Xếp hạng sản phẩm · Competitor Radar
-- **Nội bộ (Company Fit):** Test Lab · COD & Vận đơn · Attribution · Comment Intelligence · Learning Loop
 - **Hệ thống:** Alerts · AI Agent · Data & Connectors (health, cấu hình, tracked queries, upload export, hướng dẫn ingest)
 
 Nguyên tắc: điểm số luôn do công thức tính từ database. AI (Claude, tuỳ chọn) chỉ trích xuất dữ liệu và giải thích.
@@ -78,7 +77,7 @@ Mỗi video quảng cáo được chuyển thành **HLS nhiều độ phân gi�
 - Trình duyệt chỉ tải khi bấm Play, rồi tải dần từng đoạn để xem (giữ khoảng 12 giây phía trước). Mạng nhanh thì đoạn sau dùng 540p, mạng yếu tự hạ xuống 360p (hls.js; Safari dùng HLS gốc).
 - "Tải video" trả về file 540p (MP4 xem được bình thường).
 - **Video theo lứa mỗi ngày:** mỗi ngày lưu tối đa `VIDEO_DAILY_QUOTA` (3000) video, chỉ quảng cáo **đang chạy ở thị trường mục tiêu**, quảng cáo mạnh nhất (chạy lâu, nhiều biến thể, nhiều vị trí) được tải trước. Hết hạn mức thì video còn lại chờ sang ngày sau (chờ quá 2 ngày thì bỏ, vì link gốc đã hết hạn).
-- **0h mỗi ngày** (giờ UTC+`DAY_TZ_OFFSET`, mặc định giờ VN) xoá video cũ hơn `VIDEO_KEEP_DAYS` (1 = chỉ giữ lứa hôm nay) khỏi R2, giữ ảnh bìa + thông tin, rồi bắt đầu tải lứa mới. **Không xoá:** video đã ghim 📌, sản phẩm đã vote LOVE/TEST/WATCH, sản phẩm có đơn / experiment / chi tiêu, quảng cáo lưu bằng extension.
+- **0h mỗi ngày** (giờ UTC+`DAY_TZ_OFFSET`, mặc định giờ VN) xoá video cũ hơn `VIDEO_KEEP_DAYS` (1 = chỉ giữ lứa hôm nay) khỏi R2, giữ ảnh bìa + thông tin, rồi bắt đầu tải lứa mới. **Không xoá:** video đã ghim 📌, sản phẩm đã vote LOVE/TEST/WATCH, quảng cáo lưu bằng extension.
 - `R2_MAX_GB` (mặc định **20**) là trần cứng: chạm trần thì ngừng nhận media mới (≈ 2500 video/ngày). Cloudflare tính tiền theo trung bình dung lượng đỉnh mỗi ngày, 10 GB đầu miễn phí → chạy R2 ở trần 20 GB tốn ≈ 0,15 USD/tháng; để demo thì dùng `STORAGE_BACKEND=local` (0 đồng).
 - Phân phối: `R2_PUBLIC_URL` = link r2.dev (bị giới hạn tốc độ, dùng để thử). Production: gắn **custom domain** vào bucket trong Cloudflare → file được cache ở CDN gần người xem; đổi `R2_PUBLIC_URL` sang domain đó.
 - Chuyển kho cũ: `python -m app.vod_migrate --plan`, `--transcode`, `--upload`.

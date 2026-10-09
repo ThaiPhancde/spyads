@@ -43,7 +43,6 @@ class Product(Base):
     # Denormalized features & scores (written by scoring engine)
     features: Mapped[dict] = mapped_column(JSON, default=dict)
     external_win_score: Mapped[float] = mapped_column(Float, default=0)
-    internal_win_score: Mapped[float | None] = mapped_column(Float)
     win_score: Mapped[float] = mapped_column(Float, default=0)
     rarity_score: Mapped[float] = mapped_column(Float, default=0)
     rare_winner_score: Mapped[float] = mapped_column(Float, default=0)
@@ -51,13 +50,11 @@ class Product(Base):
     saturation_state: Mapped[str | None] = mapped_column(String(32))
     opportunity_score: Mapped[float] = mapped_column(Float, default=0)
     confidence_score: Mapped[float] = mapped_column(Float, default=0)
-    customer_rejection_score: Mapped[float | None] = mapped_column(Float)
-    ad_rejection_rate: Mapped[float | None] = mapped_column(Float)
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     recommendation: Mapped[str | None] = mapped_column(String(16))
     recommendation_reasons: Mapped[list] = mapped_column(JSON, default=list)
     tags: Mapped[list] = mapped_column(JSON, default=list)
-    # Product Potential Vector (discovery §7) + company fit (realtime §19)
+    # Product Potential Vector (discovery §7)
     potential: Mapped[dict] = mapped_column(JSON, default=dict)
     market_scores: Mapped[dict] = mapped_column(JSON, default=dict)  # per-market vector + decision
     classification: Mapped[str | None] = mapped_column(String(32))  # BREAKOUT / EXPERIMENTAL / STABLE / SKIP
@@ -66,7 +63,6 @@ class Product(Base):
     creative_potential: Mapped[float | None] = mapped_column(Float)
     mkt_appeal: Mapped[float | None] = mapped_column(Float)
     compliance_risk: Mapped[float | None] = mapped_column(Float)
-    company_fit_score: Mapped[float | None] = mapped_column(Float)
     funnel_mix: Mapped[dict] = mapped_column(JSON, default=dict)  # {"mess": n, "ladi": n, ...}
     cover_creative_id: Mapped[int | None] = mapped_column(Integer)
     in_target: Mapped[bool | None] = mapped_column(Boolean, index=True)
@@ -246,6 +242,7 @@ class Creative(Base):
     source_ad_id: Mapped[str | None] = mapped_column(String(128))
     source_url: Mapped[str] = mapped_column(Text)  # original CDN url (expires)
     preview_source_url: Mapped[str | None] = mapped_column(Text)
+    sd_source_url: Mapped[str | None] = mapped_column(Text)  # source's light (~360p) rendition, streamed on Play
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending/stored/failed/expired
     error: Mapped[str | None] = mapped_column(String(255))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -265,10 +262,6 @@ class Creative(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     stored_at: Mapped[datetime | None] = mapped_column(DateTime)
     pinned: Mapped[bool | None] = mapped_column(Boolean, default=False)  # never auto-archive
-    # Video on Demand (HLS adaptive ladder) — see app/hls.py
-    hls_key: Mapped[str | None] = mapped_column(String(255))  # hls/<sha>/master.m3u8
-    download_key: Mapped[str | None] = mapped_column(String(255))  # top rendition (playable fMP4) for "download"
-    renditions: Mapped[list | None] = mapped_column(JSON)  # ["360p", "540p"]
     stored_bytes: Mapped[int | None] = mapped_column(Integer)  # bytes this asset occupies in storage
     archived_at: Mapped[datetime | None] = mapped_column(DateTime)
 
@@ -358,87 +351,6 @@ class Comment(Base):
     analyzed_by: Mapped[str | None] = mapped_column(String(16))
 
 
-# ---------------------------------------------------------------- Internal (§12, §16)
-class Experiment(Base):
-    __tablename__ = "experiments"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
-    name: Mapped[str] = mapped_column(String(255))
-    market: Mapped[str | None] = mapped_column(String(64))
-    platform: Mapped[str | None] = mapped_column(String(32))
-    creative: Mapped[str | None] = mapped_column(String(255))
-    creative_type: Mapped[str | None] = mapped_column(String(64))  # UGC / Studio / Static
-    angle: Mapped[str | None] = mapped_column(String(128))
-    offer: Mapped[str | None] = mapped_column(String(128))
-    funnel: Mapped[str | None] = mapped_column(String(32))
-    sell_price: Mapped[float | None] = mapped_column(Float)
-    unit_cost: Mapped[float | None] = mapped_column(Float)
-    started_at: Mapped[date] = mapped_column(Date, default=date.today)
-    ended_at: Mapped[date | None] = mapped_column(Date)
-
-    spend: Mapped[float] = mapped_column(Float, default=0)
-    impressions: Mapped[int] = mapped_column(Integer, default=0)
-    clicks: Mapped[int] = mapped_column(Integer, default=0)
-    landing_views: Mapped[int] = mapped_column(Integer, default=0)
-    atc: Mapped[int] = mapped_column(Integer, default=0)
-    checkout: Mapped[int] = mapped_column(Integer, default=0)
-    purchase: Mapped[int] = mapped_column(Integer, default=0)
-    revenue: Mapped[float] = mapped_column(Float, default=0)
-    confirmed_orders: Mapped[int] = mapped_column(Integer, default=0)
-    shipped: Mapped[int] = mapped_column(Integer, default=0)
-    delivered: Mapped[int] = mapped_column(Integer, default=0)
-    refused: Mapped[int] = mapped_column(Integer, default=0)
-    returned: Mapped[int] = mapped_column(Integer, default=0)
-    ads_submitted: Mapped[int] = mapped_column(Integer, default=0)
-    ads_rejected: Mapped[int] = mapped_column(Integer, default=0)
-
-    status: Mapped[str] = mapped_column(String(16), default="RUNNING")  # RUNNING/WIN/PROMISING/FAILED/WAITING
-    failure_types: Mapped[list] = mapped_column(JSON, default=list)
-    diagnosis: Mapped[list] = mapped_column(JSON, default=list)
-    decision: Mapped[str | None] = mapped_column(String(32))
-    notes: Mapped[str | None] = mapped_column(Text)
-
-
-class Order(Base):
-    __tablename__ = "orders"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    external_id: Mapped[str | None] = mapped_column(String(128), index=True)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
-    experiment_id: Mapped[int | None] = mapped_column(ForeignKey("experiments.id"))
-    country: Mapped[str | None] = mapped_column(String(64))
-    source: Mapped[str] = mapped_column(String(32), default="crm")  # crm/pancake/shopify
-    amount: Mapped[float] = mapped_column(Float, default=0)
-    cogs: Mapped[float] = mapped_column(Float, default=0)
-    shipping_cost: Mapped[float] = mapped_column(Float, default=0)
-    customer_phone_hash: Mapped[str | None] = mapped_column(String(64))
-    # pending → confirmed/cancelled → shipped → delivered/refused/failed → returned
-    status: Mapped[str] = mapped_column(String(16), default="pending")
-    refusal_reason_raw: Mapped[str | None] = mapped_column(Text)  # call-center note
-    refusal_reason: Mapped[str | None] = mapped_column(String(64))  # classified (§16.1)
-    refunded: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
-    # Full lifecycle (realtime §11-14): NEW CONTACTING CONFIRMED PACKED SHIPPED IN_TRANSIT OUT_FOR_DELIVERY
-    # DELIVERED FAILED REFUSED RETURNED + CANCELLED DUPLICATE FAKE_ORDER UNREACHABLE REFUNDED
-    stage: Mapped[str | None] = mapped_column(String(24))
-    failure_reason: Mapped[str | None] = mapped_column(String(32))
-    carrier: Mapped[str | None] = mapped_column(String(48))
-    carrier_status_raw: Mapped[str | None] = mapped_column(String(128))
-    tracking_code: Mapped[str | None] = mapped_column(String(64), index=True)
-    cod_fee: Mapped[float] = mapped_column(Float, default=0)
-    sales_commission: Mapped[float] = mapped_column(Float, default=0)
-    return_cost: Mapped[float] = mapped_column(Float, default=0)
-    payment_fee: Mapped[float] = mapped_column(Float, default=0)
-    # Attribution chain (realtime §17)
-    campaign_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    adset_id: Mapped[str | None] = mapped_column(String(64))
-    ad_external_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    creative_ref: Mapped[str | None] = mapped_column(String(128))
-    lead_id: Mapped[str | None] = mapped_column(String(64))
-    conversation_id: Mapped[str | None] = mapped_column(String(64))
-    sales_agent: Mapped[str | None] = mapped_column(String(64))
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime)
-
-
 # ---------------------------------------------------------------- Snapshots (§18)
 class ProductDailySnapshot(Base):
     __tablename__ = "product_daily_snapshots"
@@ -459,11 +371,9 @@ class ProductDailySnapshot(Base):
     traffic: Mapped[float] = mapped_column(Float, default=0)
     avg_price: Mapped[float | None] = mapped_column(Float)
     external_win_score: Mapped[float] = mapped_column(Float, default=0)
-    internal_win_score: Mapped[float | None] = mapped_column(Float)
     rarity_score: Mapped[float] = mapped_column(Float, default=0)
     saturation_score: Mapped[float] = mapped_column(Float, default=0)
     opportunity_score: Mapped[float] = mapped_column(Float, default=0)
-    refusal_rate: Mapped[float | None] = mapped_column(Float)
 
 
 class MarketDailySnapshot(Base):
@@ -515,7 +425,7 @@ class Connector(Base):
     name: Mapped[str] = mapped_column(String(128))
     provider: Mapped[str] = mapped_column(String(64))  # minea, meta_ad_library, csv ...
     kind: Mapped[str] = mapped_column(String(32))  # official_api/paid_provider_api/first_party_account/webhook/csv_import/manual_url
-    group: Mapped[str] = mapped_column(String(32))  # ad_intel/transparency/web_intel/internal_ads/business/feedback
+    group: Mapped[str] = mapped_column(String(32))  # ad_intel/transparency/web_intel
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(32), default="not_configured")
@@ -534,7 +444,7 @@ class RawRecord(Base):
     __tablename__ = "raw_records"
     id: Mapped[int] = mapped_column(primary_key=True)
     connector_id: Mapped[int | None] = mapped_column(ForeignKey("connectors.id"))
-    entity_type: Mapped[str] = mapped_column(String(32))  # ad/order/comment/store/experiment
+    entity_type: Mapped[str] = mapped_column(String(32))  # ad/store/product_signal
     payload: Mapped[dict] = mapped_column(JSON)
     dedupe_key: Mapped[str | None] = mapped_column(String(160), index=True)
     ingested_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -549,25 +459,3 @@ class PipelineRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     steps: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(16), default="running")
-
-
-class AdMetric(Base):
-    """Own ad-account performance per ad per day (Tier 1: Meta / TikTok ad-account APIs)."""
-    __tablename__ = "ad_metrics"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    date: Mapped[date] = mapped_column(Date, index=True)
-    platform: Mapped[str] = mapped_column(String(16), default="meta")
-    account_id: Mapped[str | None] = mapped_column(String(64))
-    campaign_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    campaign_name: Mapped[str | None] = mapped_column(String(255))
-    adset_id: Mapped[str | None] = mapped_column(String(64))
-    ad_id: Mapped[str] = mapped_column(String(64), index=True)
-    ad_name: Mapped[str | None] = mapped_column(String(255))
-    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), index=True)
-    spend: Mapped[float] = mapped_column(Float, default=0)
-    impressions: Mapped[int] = mapped_column(Integer, default=0)
-    clicks: Mapped[int] = mapped_column(Integer, default=0)
-    leads: Mapped[int] = mapped_column(Integer, default=0)  # messaging conversations / leads
-    purchases: Mapped[int] = mapped_column(Integer, default=0)
-    currency: Mapped[str | None] = mapped_column(String(8))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)

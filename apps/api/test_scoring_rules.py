@@ -22,7 +22,7 @@ assert "medical_claim" in compliance_risk(["this cures diabetes"])[1]
 assert "medical_claim" in compliance_risk(["cured my back pain"])[1]
 
 # ---- market fit: unclassified product is neutral
-dna = {"PH": {"active_ads": 500, "top_categories": [(None, 0.6), ("beauty", 0.2)], "top_angles": [], "loved_categories": {}, "won_categories": {}}}
+dna = {"PH": {"active_ads": 500, "top_categories": [(None, 0.6), ("beauty", 0.2)], "top_angles": [], "loved_categories": {}}}
 assert market_fit_score(dna, "PH", None, None) == 50.0
 assert market_fit_score(dna, "PH", "beauty", None) > 50.0
 

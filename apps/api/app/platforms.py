@@ -34,10 +34,10 @@ _ORGANIC_SOURCES = {"tiktok_trending"}
 
 
 # which network a connector feeds (http / export / apify_actor: decided by their configured `source`)
-ADAPTER_NETWORK = {"meta_library": "meta", "meta_graph": "meta", "apify_meta": "meta", "meta_ads": "meta",
+ADAPTER_NETWORK = {"meta_library": "meta", "meta_graph": "meta", "apify_meta": "meta",
                    "tiktok_commercial": "tiktok", "tiktok_ad_library": "tiktok", "tiktok_top_ads": "tiktok",
-                   "tiktok_trending": "tiktok_organic", "snapchat_ads_library": "snapchat", "aliexpress_search": "aliexpress",
-                   "apify_1688": "1688", "apify_taobao": "taobao", "apify_tiktok_top_ads": "tiktok", "apify_tiktok_ads": "tiktok"}
+                   "tiktok_top_ads_headless": "tiktok", "tiktok_trending": "tiktok_organic", "snapchat_ads_library": "snapchat", "aliexpress_search": "aliexpress",
+                   "ali1688": "1688", "apify_1688": "1688", "apify_taobao": "taobao", "apify_tiktok_top_ads": "tiktok", "apify_tiktok_ads": "tiktok"}
 
 # sources / networks dropped from the product (2026-10-07): hidden from lists and product evidence; old rows stay in the DB
 # TikTok viral videos too (2026-10-07): the team spies TikTok *ads* (Creative Center Top Ads, Ad Library), not organic posts

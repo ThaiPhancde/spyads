@@ -30,6 +30,8 @@ from .services.entity_resolution import resolve_product
 from .storage import write_raw_batch
 
 COMMERCE_FIELDS = ("rating", "review_count", "sold_count", "rank", "original_price", "currency")
+# platforms whose source_ad_id is the marketplace's own item id (1688 offerId…): one listing whichever provider found it
+MARKETPLACE_ITEM_IDS = ("1688", "taobao", "aliexpress")
 
 # ------------------------------------------------------------ funnel: MKT Mess vs MKT Ladi
 MESS_CTA = {"MESSAGE_PAGE", "SEND_MESSAGE", "WHATSAPP_MESSAGE", "MESSENGER", "INSTAGRAM_MESSAGE", "CONTACT_US_MESSENGER",
@@ -118,12 +120,13 @@ def guess_product_name(rec: AdRecord) -> str:
 _SYM = {"₱": "PHP", "P": "PHP", "PHP": "PHP", "SAR": "SAR", "ر.س": "SAR", "ريال": "SAR", "AED": "AED", "د.إ": "AED", "درهم": "AED",
         "QAR": "QAR", "KWD": "KWD", "OMR": "OMR", "BHD": "BHD", "$": "USD", "US$": "USD", "USD": "USD", "€": "EUR", "EUR": "EUR",
         "£": "GBP", "GBP": "GBP", "A$": "AUD", "AU$": "AUD", "AUD": "AUD", "NZ$": "NZD", "NZD": "NZD", "RM": "MYR", "RP": "IDR",
-        "đ": "VND", "₫": "VND", "VND": "VND", "VNĐ": "VND", "TR": "VND", "TRIỆU": "VND"}
+        "đ": "VND", "Đ": "VND", "₫": "VND", "VND": "VND", "VNĐ": "VND", "TR": "VND", "TRIỆU": "VND"}
 _NUM = r"(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d+(?:[.,]\d{1,2})?)"
 _PRICE_RE = re.compile(r"(?<![\w.])(₱|PHP|P|SAR|AED|QAR|KWD|OMR|BHD|US\$|USD|\$|€|EUR|£|GBP|AU?\$|AUD|NZ\$|NZD|RM|Rp|ر\.س|د\.إ) ?" + _NUM + r"(?![\w%])"
                        r"|(?<![\w.])" + _NUM + r" ?(SAR|AED|QAR|KWD|OMR|BHD|PHP|VND|VNĐ|USD|EUR|GBP|AUD|NZD|ر\.س|د\.إ|ريال|درهم|đ|₫|[kK]|tr|triệu)(?![\w%])",
                        re.I)
 _VI = re.compile(r"[ăâđêôơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]")
+_COUNT_WORD = re.compile(r"^\s*(lượt|khách|người|đơn|follow|view|sold|hạt|chai|hộp|sản phẩm|sp\b|đã bán|members?|customers?|units?|pcs)", re.I)
 
 
 def parse_price(text: str | None, country: str | None = None) -> tuple[float, str | None] | None:
@@ -136,12 +139,21 @@ def parse_price(text: str | None, country: str | None = None) -> tuple[float, st
     parts = re.split(r"[.,]", num)
     dec = parts.pop() if len(parts) > 1 and len(parts[-1]) != 3 else None  # "19.99" decimals; "199.000" thousands
     v = float("".join(parts) + (f".{dec}" if dec else ""))
+    if v == 0:  # "Freeship 0Đ"
+        return None
     s = sym.upper()
-    if s == "K":
-        if v < 10:  # "4K video", "5K followers" — not a price
+    ctx = text[max(0, m.start() - 14):m.end() + 10].lower()
+    if s in ("K", "TR", "TRIỆU"):
+        if _COUNT_WORD.search(text[m.end():m.end() + 14]):  # "2,4 triệu hạt", "15 triệu chai đã bán", "50k lượt mua"
             return None
-        return (v * 1000, "VND" if country == "VN" or _VI.search(text) else None)
-    if s in ("TR", "TRIỆU"):
+        if s == "K":
+            if v < 10:  # "4K video", "5K followers" — not a price
+                return None
+            if not (country == "VN" or _VI.search(text)):
+                return None  # "99k" outside a Vietnamese ad: thousands of what? — no currency to convert, so no price
+            return (v * 1000, "VND")
+        if not re.search(r"giá|chỉ|còn|từ|trả|đồng|vnđ|₫", ctx):  # million-đồng amounts need price context ("chỉ hơn 9 triệu đồng")
+            return None
         return (v * 1_000_000, "VND")
     if s == "P" and sym != "₱" and not (country in (None, "PH", "ALL") or "PH" in str(country)):
         return None  # bare "P499" is pesos only in a Philippine ad
@@ -181,6 +193,8 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
             ids = [r.source_ad_id for r in records if r.source == src]
             known |= {(src, i) for i in db.scalars(select(AdSource.source_ad_id).where(AdSource.source == src, AdSource.source_ad_id.in_(ids)))}
             known |= {(src, i) for i in db.scalars(select(Ad.external_id).where(Ad.source == src, Ad.external_id.in_(ids)))}
+            for plat in {r.platform for r in records if r.source == src and r.platform in MARKETPLACE_ITEM_IDS}:
+                known |= {(src, i) for i in db.scalars(select(Ad.external_id).where(Ad.platform == plat, Ad.external_id.in_(ids)))}
     db.commit()
     hints: dict[int, dict] = {}
     weak = [i for i, r in enumerate(records) if (r.source, r.source_ad_id) not in known
@@ -250,6 +264,8 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
         prov = ad = None
     if ad is None:
         ad = db.scalar(select(Ad).where(Ad.source == rec.source, Ad.external_id == rec.source_ad_id))
+    if ad is None and rec.platform in MARKETPLACE_ITEM_IDS:  # marketplace item id is global: the same offer from another
+        ad = db.scalar(select(Ad).where(Ad.platform == rec.platform, Ad.external_id == rec.source_ad_id).limit(1))  # provider
     xkey = cross_source_key(rec)
     if ad is None and xkey:  # same source + different ad id = a different ad (other video / audience), never merge
         ad = db.scalar(select(Ad).where(Ad.creative_fingerprint == xkey, Ad.source != rec.source,  # same network only:
@@ -295,6 +311,9 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
         if rec.price and (ad.channel == "commerce" or ad.price is None):  # listings: latest price; ads: first price we ever see
             ad.price, ad.price_source = rec.price, price_source
             ad.currency = rec.currency or ad.currency
+        if rec.advertiser and not ad.advertiser_id:  # listing merged from a provider without the supplier (1688 AK)
+            if adv := _advertiser(db, rec.advertiser, rec.platform, ad.country, rec.advertiser_url):
+                ad.advertiser_id = adv.id
         if prov:
             prov.last_collected_at = now
         else:
@@ -361,10 +380,11 @@ def _attach_creatives(db: Session, ad: Ad, rec: AdRecord) -> list[int]:
         if c is not None:
             if c.status != "stored" and c.source_url != m.url:
                 c.source_url, c.preview_source_url = m.url, m.preview_url or c.preview_source_url  # fresh signature for a download still pending
+                c.sd_source_url = m.sd_url or c.sd_source_url
             continue
         c = Creative(ad_id=ad.id, product_id=ad.product_id, type=m.type, position=i, source=rec.source,
                      source_platform=rec.platform, network=ad.network, source_ad_id=rec.source_ad_id, source_url=m.url,
-                     preview_source_url=m.preview_url, width=m.width, height=m.height, duration_sec=m.duration_sec,
+                     preview_source_url=m.preview_url, sd_source_url=m.sd_url, width=m.width, height=m.height, duration_sec=m.duration_sec,
                      first_seen_at=ad.first_seen_at)
         db.add(c)
         db.flush()

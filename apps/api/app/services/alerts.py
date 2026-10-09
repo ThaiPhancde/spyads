@@ -1,16 +1,23 @@
 """Alert Engine (blueprint §29). Compares today's state with snapshots from ~7 days ago."""
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import ADS_ONLY, Ad, Advertiser, Alert, Experiment, Order, Product, ProductDailySnapshot, Vote
+from ..models import ADS_ONLY, Ad, Advertiser, Alert, Product, ProductDailySnapshot, Vote
 from .engine import is_hidden_winner
 from .hidden import MIN_SCORE
 
 
+# 1.062 of 1.227 alerts were hidden_winner and 140 milestone: daily noise that buried the rare real signals.
+# The products already show in Hidden Winners / the product page; re-enable here if you want the push back.
+MUTED = {"hidden_winner", "milestone"}
+
+
 def _emit(db: Session, type_: str, severity: str, title: str, message: str, product_id=None, advertiser_id=None,
           data=None, period: str | None = None) -> bool:
+    if type_ in MUTED:
+        return False
     key = f"{type_}:{product_id or ''}:{advertiser_id or ''}:{period or datetime.utcnow().date().isoformat()}"
     if db.scalar(select(Alert.id).where(Alert.dedupe_key == key)):
         return False
@@ -30,7 +37,7 @@ def run_alerts(db: Session) -> int:
     week_ago = today - timedelta(days=7)
     old = {s.product_id: s for s in db.scalars(select(ProductDailySnapshot).where(ProductDailySnapshot.date == week_ago))}
     yday = {s.product_id: s for s in db.scalars(select(ProductDailySnapshot).where(ProductDailySnapshot.date == today - timedelta(days=1)))}
-    watched = set(db.scalars(select(Vote.product_id).distinct())) | set(db.scalars(select(Experiment.product_id).distinct()))
+    watched = set(db.scalars(select(Vote.product_id).distinct()))
     # an ad crossing 14 / 30 days running today (what marketers trust most) — one query, grouped per product
     marks = {str(today - timedelta(days=d)): d for d in (14, 30)}
     milestones: dict[int, set[int]] = {}
@@ -92,51 +99,8 @@ def run_alerts(db: Session) -> int:
             n += _emit(db, "saturation_increasing", "warn", f"📉 Saturation tăng: {name}",
                        f"Saturation {prev.saturation_score:.0f} → {p.saturation_score:.0f} ({p.saturation_state}).", p.id, period=_week())
 
-        if (p.ad_rejection_rate or 0) >= 0.3:
-            n += _emit(db, "ad_rejection_increasing", "warn", f"🚫 Ad rejection cao: {name}",
-                       f"{p.ad_rejection_rate:.0%} creative bị từ chối.", p.id, period=_week())
-
-    n += _order_alerts(db)
-    n += _experiment_alerts(db)
     n += _competitor_alerts(db)
     db.flush()
-    return n
-
-
-def _rate_window(orders: list[Order], start: datetime, end: datetime, num: set, den: set) -> tuple[float | None, int]:
-    win = [o for o in orders if start < o.created_at <= end]
-    d = sum(1 for o in win if o.status in den)
-    return (sum(1 for o in win if o.status in num) / d if d else None), d
-
-
-def _order_alerts(db: Session) -> int:
-    n = 0
-    now = datetime.utcnow()
-    pids = db.scalars(select(Order.product_id).distinct()).all()
-    for pid in pids:
-        orders = db.scalars(select(Order).where(Order.product_id == pid, Order.created_at > now - timedelta(days=35))).all()
-        p = db.get(Product, pid)
-        attempts = {"delivered", "refused", "failed", "returned"}
-        r_now, dn = _rate_window(orders, now - timedelta(days=14), now, {"refused"}, attempts)
-        r_old, do = _rate_window(orders, now - timedelta(days=35), now - timedelta(days=14), {"refused"}, attempts)
-        if r_now is not None and r_old is not None and dn >= 20 and do >= 20 and r_now - r_old >= 0.05:
-            n += _emit(db, "cod_refusal_increasing", "critical", f"📦 COD refusal tăng: {p.canonical_name}",
-                       f"Refusal {r_old:.0%} → {r_now:.0%} (14 ngày gần nhất).", pid, period=_week())
-        shipped = attempts | {"shipped"}
-        d_now, dn = _rate_window(orders, now - timedelta(days=14), now, {"delivered", "returned"}, shipped)
-        d_old, do = _rate_window(orders, now - timedelta(days=35), now - timedelta(days=14), {"delivered", "returned"}, shipped)
-        if d_now is not None and d_old is not None and dn >= 20 and do >= 20 and d_old - d_now >= 0.07:
-            n += _emit(db, "delivery_rate_dropping", "critical", f"🚚 Delivery rate giảm: {p.canonical_name}",
-                       f"Delivery {d_old:.0%} → {d_now:.0%}.", pid, period=_week())
-    return n
-
-
-def _experiment_alerts(db: Session) -> int:
-    n = 0
-    for e in db.scalars(select(Experiment).where(Experiment.ended_at.is_(None))).all():
-        if e.spend >= 300 and e.revenue / max(e.spend, 1) < 1.2 and e.status == "FAILED":
-            n += _emit(db, "roas_dropping", "warn", f"📉 ROAS thấp: {e.name}",
-                       f"ROAS {e.revenue / e.spend:.2f} sau {e.spend:.0f} spend — {e.decision}.", e.product_id, period=_week())
     return n
 
 

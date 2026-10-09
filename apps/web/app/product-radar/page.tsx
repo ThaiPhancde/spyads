@@ -5,11 +5,15 @@ import { Suspense, useState } from "react";
 import { MarketPicker } from "@/components/MarketPicker";
 import { LoadMore } from "@/components/paging";
 import { Card, Empty, Loading, PageHeader, RecBadge } from "@/components/ui";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fmt, qs, usePaged } from "@/lib/api";
 import { useEvents, useTeam } from "@/lib/realtime";
+import { cn } from "@/lib/utils";
 
 const TIER: Record<string, [string, string]> = {
-  legendary: ["var(--good)", "Huyền thoại"], strong: ["var(--series-1)", "Mạnh"], regular: ["var(--muted)", "Thường"], testing: ["var(--axis)", "Đang test"],
+  legendary: ["bg-good", "Huyền thoại"], strong: ["bg-series-1", "Mạnh"], regular: ["bg-muted-foreground", "Thường"], testing: ["bg-border", "Đang test"],
 };
 const SORTS: [string, string][] = [["score", "Điểm"], ["trend", "Xu hướng"], ["new", "Ads mới"], ["ads", "Số ads"], ["sellers", "Sellers"], ["force", "Ads mạnh nhất"], ["age", "Mới xuất hiện"]];
 
@@ -24,63 +28,69 @@ function Radar() {
   useEvents((e) => { if (["CONNECTOR_SYNCED", "LIVENESS_CHECKED", "SEARCH_DONE"].includes(e.type)) reload(); });
 
   return (
-    <div>
+    <div className="space-y-4">
       <PageHeader title="Product Radar" subtitle="Sản phẩm đang chạy theo thị trường + khung thời gian — xu hướng tính trực tiếp từ ngày bắt đầu chạy của quảng cáo trên mọi nền tảng (Meta, TikTok, Snapchat)">
-        <div className="flex rounded-lg border overflow-hidden" style={{ borderColor: "var(--border)" }}>
-          {[7, 14, 30].map((w) => (
-            <button key={w} onClick={() => setWindow(w)} className="text-xs px-3 py-1.5"
-                    style={{ background: window === w ? "var(--series-1)" : "var(--surface-1)", color: window === w ? "#fff" : "var(--text-secondary)" }}>{w} ngày</button>
-          ))}
-        </div>
-        <select className="input" value={sort} onChange={(e) => setSort(e.target.value)}>{SORTS.map(([k, l]) => <option key={k} value={k}>Sắp xếp: {l}</option>)}</select>
+        <ToggleGroup type="single" variant="outline" size="sm" value={String(window)} onValueChange={(v) => v && setWindow(Number(v))}>
+          {[7, 14, 30].map((w) => <ToggleGroupItem key={w} value={String(w)} className="text-xs">{w} ngày</ToggleGroupItem>)}
+        </ToggleGroup>
+        <Select value={sort} onValueChange={setSort}>
+          <SelectTrigger size="sm" className="w-44"><SelectValue /></SelectTrigger>
+          <SelectContent>{SORTS.map(([k, l]) => <SelectItem key={k} value={k}>Sắp xếp: {l}</SelectItem>)}</SelectContent>
+        </Select>
       </PageHeader>
-      <div className="mb-4"><MarketPicker value={market} onChange={setMarket} /></div>
+      <MarketPicker value={market} onChange={setMarket} />
       {error ? <Loading error={error} /> : rows.length === 0 && loading ? <Loading /> : rows.length === 0 ? <Card><Empty>Chưa có sản phẩm đang chạy ở thị trường này.</Empty></Card> : (
         <Card pad={false} title={`${total} sản phẩm đang chạy${team ? ` · funnel ${team}` : ""}`}>
           <div className="overflow-x-auto">
-            <table className="data">
-              <thead><tr><th></th><th>Sản phẩm</th><th>Xu hướng ({window}d)</th><th>Ads</th><th>Sellers</th><th>Tuổi</th><th>Điểm</th>
-                <th>Ad mạnh nhất</th><th>Biến thể scale</th><th>Mess / Ladi</th><th>Thị trường</th><th>Hành động</th></tr></thead>
-              <tbody>
+            <Table>
+              <TableHeader className="sticky top-0 z-10 bg-card">
+                <TableRow>
+                  <TableHead />
+                  <TableHead>Sản phẩm</TableHead><TableHead>Xu hướng ({window}d)</TableHead><TableHead className="text-right">Ads</TableHead>
+                  <TableHead className="text-right">Sellers</TableHead><TableHead className="text-right">Tuổi</TableHead><TableHead className="text-right">Điểm</TableHead>
+                  <TableHead>Ad mạnh nhất</TableHead><TableHead>Biến thể scale</TableHead><TableHead>Mess / Ladi</TableHead><TableHead>Thị trường</TableHead><TableHead>Hành động</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {rows.map((r: any) => {
                   const [tc, tl] = TIER[r.top_tier] || TIER.testing;
                   const up = r.trend.startsWith("↑") || r.trend === "NEW";
                   return (
-                    <tr key={r.id}>
-                      <td className="w-14">
-                        {r.thumb ? /* eslint-disable-next-line @next/next/no-img-element */ <img src={r.thumb} alt="" className="w-12 h-12 object-cover rounded" loading="lazy" />
-                          : <div className="w-12 h-12 rounded" style={{ background: "var(--surface-2)" }} />}
-                      </td>
-                      <td className="min-w-[220px]">
-                        <Link href={`/products/${r.id}`} className="font-medium hover:underline leading-snug">{r.name}</Link>
-                        <div className="text-[11px] text-muted">{r.code} · {r.category || "—"}</div>
-                      </td>
-                      <td className="tnum whitespace-nowrap" style={{ color: up ? "var(--good-text)" : r.trend.startsWith("↓") ? "var(--critical)" : undefined }}>
+                    <TableRow key={r.id}>
+                      <TableCell className="w-14">
+                        {r.thumb ? /* eslint-disable-next-line @next/next/no-img-element */ <img src={r.thumb} alt="" className="size-12 rounded object-cover" loading="lazy" />
+                          : <div className="size-12 rounded bg-muted" />}
+                      </TableCell>
+                      <TableCell className="min-w-[220px] whitespace-normal">
+                        <Link href={`/products/${r.id}`} className="leading-snug font-medium hover:underline">{r.name}</Link>
+                        <div className="text-[11px] text-muted-foreground">{r.code} · {r.category || "—"}</div>
+                      </TableCell>
+                      <TableCell className={cn("tnum whitespace-nowrap", up && "text-good-text", r.trend.startsWith("↓") && "text-critical")}>
                         {r.trend} <span className="text-xs">{r.growth !== null ? fmt.signedPct(r.growth) : ""}</span>
-                        <div className="text-[11px] text-muted">+{r.new_ads} mới / {r.prev_new_ads} trước</div>
-                      </td>
-                      <td className="tnum">{r.ads}</td>
-                      <td className="tnum">{r.sellers}</td>
-                      <td className="tnum whitespace-nowrap">{r.age_days} ngày</td>
-                      <td className="tnum font-semibold">{fmt.n(r.score)}</td>
-                      <td className="whitespace-nowrap text-xs">
-                        <span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: tc }} />{tl} <span className="tnum text-muted">{fmt.n(r.force_max)}</span>
-                        {r.strong_ads > 1 && <div className="text-[11px] text-muted">{r.strong_ads} ads mạnh</div>}
-                      </td>
-                      <td className="tnum">{r.max_variation > 1 ? <span title="Cùng page + cùng nội dung chạy song song = đang scale">×{r.max_variation}</span> : "—"}</td>
-                      <td className="tnum text-xs">{r.mess} / {r.ladi}</td>
-                      <td className="text-xs">{r.markets.map((m: string) => (m === "ALL" ? "🌍" : m)).join(", ")}</td>
-                      <td><RecBadge rec={r.decision} /></td>
-                    </tr>
+                        <div className="text-[11px] text-muted-foreground">+{r.new_ads} mới / {r.prev_new_ads} trước</div>
+                      </TableCell>
+                      <TableCell className="tnum text-right">{r.ads}</TableCell>
+                      <TableCell className="tnum text-right">{r.sellers}</TableCell>
+                      <TableCell className="tnum text-right whitespace-nowrap">{r.age_days} ngày</TableCell>
+                      <TableCell className="tnum text-right font-semibold">{fmt.n(r.score)}</TableCell>
+                      <TableCell className="text-xs whitespace-nowrap">
+                        <span className={cn("mr-1 inline-block size-2 rounded-full", tc)} />{tl} <span className="tnum text-muted-foreground">{fmt.n(r.force_max)}</span>
+                        {r.strong_ads > 1 && <div className="text-[11px] text-muted-foreground">{r.strong_ads} ads mạnh</div>}
+                      </TableCell>
+                      <TableCell className="tnum">{r.max_variation > 1 ? <span title="Cùng page + cùng nội dung chạy song song = đang scale">×{r.max_variation}</span> : "—"}</TableCell>
+                      <TableCell className="tnum text-xs">{r.mess} / {r.ladi}</TableCell>
+                      <TableCell className="text-xs">{r.markets.map((m: string) => (m === "ALL" ? "🌍" : m)).join(", ")}</TableCell>
+                      <TableCell><RecBadge rec={r.decision} /></TableCell>
+                    </TableRow>
                   );
                 })}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
           <LoadMore hasMore={hasMore} loading={loading} onMore={loadMore} shown={rows.length} total={total} />
         </Card>
       )}
-      <p className="text-xs text-muted mt-3">
+      <p className="text-xs text-muted-foreground">
         Độ mạnh của quảng cáo = ngày chạy (tối đa 180, 60đ) + số phiên bản (tối đa 10, 25đ) + số nền tảng (tối đa 4, 15đ), ×0,7 nếu đã dừng — theo sonda-imperial.
         Huyền thoại ≥70 · Mạnh ≥45 · Thường ≥20. “Biến thể scale” = số quảng cáo cùng page, cùng nội dung đang chạy song song.
       </p>
