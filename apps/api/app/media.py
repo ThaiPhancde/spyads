@@ -10,6 +10,7 @@ perceptual hash (dHash) → creative family (near-duplicate grouping).
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import itertools
@@ -175,13 +176,23 @@ def _frame(path: Path) -> bytes | None:
 
 def source_alive(url: str | None, margin_s: int = 600) -> bool:
     """Signed CDN links carry their expiry (fbcdn `oe=<hex unix time>`, TikTok `x-expires=<unix>`, tiktokcdn video
-    `/<sig>/<hex unix time>/video/`, TikTok Ad Library `/api/v1/cdn/<unix>/`); true while the original is still
-    playable. Links without an expiry (AliExpress / 1688 images) stay playable."""
+    `/<sig>/<hex unix time>/video/`); true while the original is still playable. TikTok Ad Library
+    `/api/v1/cdn/<issued unix>/video/<base64 tiktokcdn url>` proxies a signed link: its expiry is the inner one's.
+    Links without an expiry (AliExpress / 1688 images) stay playable."""
     if not url:
         return False
+    if m := re.search(r"tiktok\.com/api/v1/cdn/(\d{10})/\w+/([\w-]+)", url):
+        seg = m.group(2)
+        try:
+            inner = base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)).decode()
+        except ValueError:
+            inner = ""
+        if re.search(r"tiktokcdn[\w.-]*/[0-9a-f]{32}/[0-9a-f]{8}/|[?&]x-expires=\d", inner):
+            return source_alive(inner, margin_s)
+        return int(m.group(1)) + 6 * 3600 - margin_s > time.time()  # no inner expiry: library links live ~6 h
     if m := (re.search(r"[?&]oe=([0-9A-Fa-f]+)", url) or re.search(r"tiktokcdn[\w.-]*/[0-9a-f]{32}/([0-9a-f]{8})/", url)):
         return int(m.group(1), 16) - margin_s > time.time()
-    if m := (re.search(r"[?&]x-expires=(\d+)", url) or re.search(r"tiktok\.com/api/v1/cdn/(\d{10})/", url)):
+    if m := re.search(r"[?&]x-expires=(\d+)", url):
         return int(m.group(1)) - margin_s > time.time()
     return True
 
@@ -399,6 +410,32 @@ def grab_thumb(cid: int) -> str | None:
     except Exception as e:  # network blip / not an image: the next enqueue_pending tick tries again
         log.warning("thumb grab failed for creative %s: %s", cid, e)
         return None
+
+
+def refresh_source(c: Creative) -> bool:
+    """Signed TikTok links die within hours: ask the source for this ad again by its id (public pages, no cookie / login)
+    and swap in the fresh link. False when the source cannot be re-asked by id or no longer has the video."""
+    from .collector.adapters.ad_libraries import TikTokAdLibraryConnector, TikTokTopAdsHeadlessConnector
+
+    if c.type != "video" or not c.source_ad_id:
+        return False
+    if c.source in ("tiktok_top_ads", "apify_tiktok_top_ads"):  # both carry the Creative Center material id
+        v = TikTokTopAdsHeadlessConnector().video(c.source_ad_id)
+        urls = v.get("video_url") or {}
+        hd = urls.get("720p") or urls.get("1080p") or urls.get("540p") or urls.get("480p") or next(iter(urls.values()), None)
+        sd, cover = urls.get("360p"), v.get("cover")
+    elif c.source == "tiktok_ad_library":
+        d = TikTokAdLibraryConnector()._call("GET", f"/api/v1/items/{c.source_ad_id}/details", params={"lang": "en"})
+        vids = [v for v in ((d.get("data") or {}).get("ad") or {}).get("videos") or [] if v.get("video_url")]
+        v = vids[min(c.position or 0, len(vids) - 1)] if vids else {}
+        hd, sd, cover = v.get("video_url"), None, v.get("cover_img")
+    else:
+        return False
+    if not hd:
+        return False
+    c.source_url, c.sd_source_url = hd, sd
+    c.preview_source_url = cover or c.preview_source_url
+    return True
 
 
 def enqueue(ids: list[int], force: bool = False):

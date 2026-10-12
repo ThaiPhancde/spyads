@@ -13,7 +13,7 @@ import { api, fmt, useApi } from "@/lib/api";
 import { getUser, useEvents } from "@/lib/realtime";
 
 const VEC: [string, string, boolean?][] = [
-  ["market_demand", "Market demand"], ["novelty", "Novelty"], ["wave_potential", "Wave potential"],
+  ["market_demand", "Market demand"], ["momentum", "Momentum (7 ngày)"], ["novelty", "Novelty"], ["wave_potential", "Wave potential"],
   ["creative_potential", "Creative potential"], ["market_fit", "Market fit"], ["mkt_appeal", "MKT appeal"],
   ["competition", "Competition", true], ["economics", "Economics"],
   ["compliance_risk", "Compliance risk", true], ["confidence", "Confidence"],

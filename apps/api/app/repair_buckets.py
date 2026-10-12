@@ -11,7 +11,7 @@ import re
 import sys
 from collections import defaultdict
 
-from sqlalchemy import select, text
+from sqlalchemy import inspect, select, text
 
 from .db import SessionLocal
 from .models import Ad, Advertiser, Creative, Product, Store
@@ -53,11 +53,12 @@ def run(apply: bool) -> None:
             db.flush()
             if not db.scalars(select(Ad.id).where(Ad.product_id == p.id).limit(1)).first():
                 # snapshots, aliases, alerts, stores… of the junk bucket — by the live schema, not the models
-                # (creative_daily_snapshots has no model any more). ponytail: SQLite only, this is a one-off repair
-                for (t,) in db.execute(text("select name from sqlite_master where type='table'")).all():
-                    for fk in db.execute(text(f"pragma foreign_key_list('{t}')")).all():
-                        if fk[2] == "products":
-                            db.execute(text(f'delete from "{t}" where "{fk[3]}" = :pid'), {"pid": p.id})
+                # (creative_daily_snapshots has no model any more)
+                insp = inspect(db.connection())
+                for t in insp.get_table_names():
+                    for fk in insp.get_foreign_keys(t):
+                        if fk["referred_table"] == "products":
+                            db.execute(text(f'delete from "{t}" where "{fk["constrained_columns"][0]}" = :pid'), {"pid": p.id})
                 db.delete(p)
                 print(f"   deleted empty bucket {p.product_code}")
             rescore_products(db, touched)

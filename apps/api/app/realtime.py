@@ -21,15 +21,12 @@ from sqlalchemy.orm import Session
 
 from .collector.base import AuthExpired, ConnectorError, FetchParams, NotConfigured
 from .collector.factory import ConnectorFactory
-from .db import SessionLocal
+from .db import SessionLocal, ingest_lock
 from .events import publish
 from .ingest import ingest_ads
 from .models import Connector, SearchJob, TrackedQuery
 
 log = logging.getLogger(__name__)
-# ponytail: global ingest lock, per-source locks if throughput matters — two live searches (or one + the scheduler)
-# writing at once cost one of them its whole Meta batch ("database is locked") while the job still said "done"
-_ingest_lock = threading.Lock()
 
 
 def _redact(s: str | None) -> str | None:
@@ -76,7 +73,7 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                 for r in connector.fetch_ads(p):
                     r.matched_query = p.query
                     recs.append(r)
-            with _ingest_lock:
+            with ingest_lock():
                 stats = ingest_ads(db, recs)
                 rescore_products(db, stats["product_ids"])
                 c = db.get(Connector, cid)
@@ -141,6 +138,13 @@ def _connector_param_list(c: Connector) -> list[FetchParams]:
 LIVE_JOBS: set[int] = set()  # jobs with a running thread in THIS process — a "running" row not in here died with a restart
 
 
+def start_search(job_id: int, more: int = 0):
+    """Own thread, not FastAPI BackgroundTasks: a search runs for minutes and would hold one of the ~40 threads that
+    serve every sync HTTP request — a handful of users searching at once used to stall the whole UI."""
+    LIVE_JOBS.add(job_id)
+    threading.Thread(target=run_search, args=(job_id, more), daemon=True, name=f"search-{job_id}").start()
+
+
 def run_search(job_id: int, more: int = 0):
     LIVE_JOBS.add(job_id)
     try:
@@ -193,7 +197,7 @@ def _run_search(job_id: int, more: int = 0):
         q: queue.Queue = queue.Queue()
 
         def worker(cid: int, name: str, adapter: str, cfg: dict):
-            _slots.acquire()  # ponytail: one semaphore shared with the scheduler — MAX_PARALLEL_JOBS sources at once in total
+            _search_slots.acquire()  # own pool: a user's search never waits behind scheduled jobs
             try:
                 connector = ConnectorFactory.get(adapter, cfg)
                 for kw, params in plist:
@@ -223,7 +227,7 @@ def _run_search(job_id: int, more: int = 0):
             except Exception as e:
                 q.put(("end", cid, name, f"{type(e).__name__}: {e}"))
             finally:
-                _slots.release()
+                _search_slots.release()
 
         def mark(cid: int, n: int, err: str | None):
             """A live search is a real run of the source: keep its health on the Data & Connectors screen honest."""
@@ -269,7 +273,7 @@ def _run_search(job_id: int, more: int = 0):
             recs, key, st, kw = rest
             if key:
                 state[key] = st
-            with _ingest_lock:
+            with ingest_lock():
                 try:
                     for r in recs:
                         r.matched_query = kw
@@ -306,7 +310,7 @@ def _run_search(job_id: int, more: int = 0):
             if recs:
                 publish("SEARCH_PROGRESS", {"job_id": job_id, "connector": name, "found": job.found, "new_ads": job.new_ads,
                                             "products": len(pids)}, persist=False)
-        with _ingest_lock:
+        with ingest_lock():
             job = db.get(SearchJob, job_id)
             rescore_products(db, pids)
             job.state = state
@@ -328,18 +332,28 @@ REFRESH_HOURS = 6  # Tier 3: full re-score + market snapshots
 _last_alerts = datetime.min
 _last_media = datetime.min
 _last_spy = datetime.min
+_last_eu = datetime.min
+_last_visual = datetime.min
+_last_price = datetime.min
 import os as _os
 
+EU_SYNC_EVERY_MIN = int(_os.getenv("EU_SYNC_EVERY_MIN", "360"))  # EU Market: watchlist sync + price snapshots
+IMAGE_INDEX_EVERY_MIN = float(_os.getenv("IMAGE_INDEX_EVERY_MIN", "1"))  # 0 = never index images in this worker
 SPY_EVERY_MIN = int(_os.getenv("SPY_EVERY_MIN", "10"))      # landing-price / review scan cadence
 SPY_URLS_PER_RUN = int(_os.getenv("SPY_URLS_PER_RUN", "40"))  # ≈ 40 store fetches / 10 min ≈ 5.7k / day — the whole backlog in a day
+PRICE_EVERY_S = int(_os.getenv("PRICE_EVERY_S", "30"))  # price enrichment queue (pricing/jobs.py); 0 = off in this worker
 
 _running: set[str] = set()
 MAX_PARALLEL_JOBS = int(_os.getenv("MAX_PARALLEL_JOBS", "2"))
-_slots = threading.BoundedSemaphore(MAX_PARALLEL_JOBS)  # scheduled jobs + live-search worker threads, in total
+_slots = threading.BoundedSemaphore(MAX_PARALLEL_JOBS)  # scheduled jobs (worker process)
+# live searches (API process): source fetches running at once across all users' searches.
+# ponytail: one global cap, per-source caps if Meta starts rate-limiting the server IP
+LIVE_SEARCH_SLOTS = int(_os.getenv("LIVE_SEARCH_SLOTS", "12"))
+_search_slots = threading.BoundedSemaphore(LIVE_SEARCH_SLOTS)
 
 
 async def scheduler_loop():
-    global _last_daily, _last_alerts, _last_media, _last_cleanup, _last_liveness, _last_spy
+    global _last_daily, _last_alerts, _last_media, _last_cleanup, _last_liveness, _last_spy, _last_eu, _last_visual, _last_price
     await asyncio.sleep(5)
     while True:
         try:
@@ -374,13 +388,28 @@ async def scheduler_loop():
 
                 await asyncio.to_thread(enqueue_pending)
                 _last_media = now
+            if IMAGE_INDEX_EVERY_MIN and now - _last_visual >= timedelta(minutes=IMAGE_INDEX_EVERY_MIN) and "visual" not in _running:
+                _last_visual = now  # image index: hash new thumbnails (+ embeddings when embed.py is on), one batch per tick
+                _running.add("visual")
+                asyncio.get_running_loop().run_in_executor(None, _visual_wrapper)
             if now - _last_alerts > timedelta(minutes=15):
                 await asyncio.to_thread(_alerts_job)
                 _last_alerts = now
+            if PRICE_EVERY_S and now - _last_price >= timedelta(seconds=PRICE_EVERY_S) and "price" not in _running:
+                _last_price = now  # price enrichment: a few queued subjects per tick, providers' budgets enforced inside
+                _running.add("price")
+                asyncio.get_running_loop().run_in_executor(None, _price_wrapper)
             if now - _last_spy >= timedelta(minutes=SPY_EVERY_MIN) and "spy" not in _running:
                 _last_spy = now
                 _running.add("spy")
                 asyncio.get_running_loop().run_in_executor(None, _spy_wrapper)
+            if now - _last_eu >= timedelta(minutes=EU_SYNC_EVERY_MIN) and "eu" not in _running:
+                _last_eu = now
+                from .eu_market import jobs as eu_jobs
+
+                if eu_jobs.enabled() and eu_jobs.any_configured():  # no EU credentials → nothing to call
+                    _running.add("eu")
+                    asyncio.get_running_loop().run_in_executor(None, _eu_wrapper)
             if now - _last_liveness >= timedelta(minutes=20) and len(_running) < MAX_PARALLEL_JOBS:
                 _last_liveness = now
                 _running.add("liveness")
@@ -440,6 +469,42 @@ def _liveness_wrapper():
         _running.discard("liveness")
 
 
+def _eu_wrapper():
+    from .eu_market import jobs as eu_jobs
+
+    try:
+        log.info("eu_market: %s", str(eu_jobs.run_all())[:500])
+    except Exception:
+        log.exception("eu_market jobs failed")
+    finally:
+        _running.discard("eu")
+
+
+def _visual_wrapper():
+    from .visual import service as visual
+
+    try:
+        with _slots:
+            r = visual.index_pending()
+            try:
+                from .visual import embed
+
+                if embed.enabled():
+                    r["embedded"] = embed.embed_pending()
+            except Exception as e:  # noqa: BLE001 — embedding is optional; hashing already landed
+                r["embed_error"] = str(e)[:200]
+            if any(v for v in r.values() if isinstance(v, int)):
+                log.info("image index: %s", r)
+            with SessionLocal() as db:  # watched pictures: alert on new matching ads / listings
+                w = visual.evaluate_image_watchlists(db)
+                if w["alerts"]:
+                    log.info("image watchlists: %s", w)
+    except Exception:
+        log.exception("image index failed")
+    finally:
+        _running.discard("visual")
+
+
 def _spy_wrapper():
     """Competitor prices (landing pages) + marketplace reviews, a slice per tick — services/spy.py."""
     from .services import spy
@@ -453,6 +518,20 @@ def _spy_wrapper():
         log.exception("spy scan failed")
     finally:
         _running.discard("spy")
+
+
+def _price_wrapper():
+    """Background price discovery for subjects the cards asked for — pricing/jobs.py."""
+    from .pricing import jobs as price_jobs
+
+    try:
+        r = price_jobs.run_pending()
+        if r.get("ran"):
+            log.info("prices: %s", r)
+    except Exception:
+        log.exception("price enrichment failed")
+    finally:
+        _running.discard("price")
 
 
 def _alerts_job():
@@ -537,7 +616,7 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
         if touched:
             from .services import adsignals
 
-            with _ingest_lock:
+            with ingest_lock():
                 adsignals.refresh(db, [a.id for a in db.scalars(select(Ad).where(Ad.product_id.in_(touched)))])
                 db.commit()
                 rescore_products(db, touched)
@@ -548,7 +627,7 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
 def _reconcile_page(db, pid, recs_all, seen, complete, now, out, touched):
     from .models import Ad, AdSource
 
-    with _ingest_lock:
+    with ingest_lock():
         if recs_all:
             # refresh only ads we already track: the scan is worldwide ("ALL"), so a new ad from it would have no country
             # and still count as in-target (audit H4) — new ads come from country searches

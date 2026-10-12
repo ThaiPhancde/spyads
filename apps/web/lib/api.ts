@@ -11,7 +11,8 @@ export async function api<T = any>(path: string, init?: RequestInit): Promise<T>
     let msg = `${res.status}`;
     try {
       const j = await res.json();
-      msg = j.detail || JSON.stringify(j);
+      const d = j.detail;  // FastAPI: string, or our {code, message} objects, or a validation list
+      msg = typeof d === "string" ? d : d?.message ? `${d.message}${d.code ? ` (${d.code})` : ""}` : Array.isArray(d) ? d.map((x: any) => x.msg).join("; ") : JSON.stringify(j);
     } catch {}
     throw new Error(msg);
   }

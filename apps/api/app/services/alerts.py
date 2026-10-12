@@ -1,7 +1,7 @@
 """Alert Engine (blueprint §29). Compares today's state with snapshots from ~7 days ago."""
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import Date, func, select
 from sqlalchemy.orm import Session
 
 from ..models import ADS_ONLY, Ad, Advertiser, Alert, Product, ProductDailySnapshot, Vote
@@ -39,10 +39,11 @@ def run_alerts(db: Session) -> int:
     yday = {s.product_id: s for s in db.scalars(select(ProductDailySnapshot).where(ProductDailySnapshot.date == today - timedelta(days=1)))}
     watched = set(db.scalars(select(Vote.product_id).distinct()))
     # an ad crossing 14 / 30 days running today (what marketers trust most) — one query, grouped per product
-    marks = {str(today - timedelta(days=d)): d for d in (14, 30)}
+    marks = {today - timedelta(days=d): d for d in (14, 30)}
     milestones: dict[int, set[int]] = {}
-    for pid, fs in db.execute(select(Ad.product_id, func.date(Ad.first_seen_at)).where(
-            Ad.is_active.is_(True), Ad.is_internal.is_(False), ADS_ONLY, Ad.product_id.is_not(None), func.date(Ad.first_seen_at).in_(list(marks)))):
+    day = func.date(Ad.first_seen_at, type_=Date)  # typed: Postgres won't compare date = varchar; SQLite parses back to date
+    for pid, fs in db.execute(select(Ad.product_id, day).where(
+            Ad.is_active.is_(True), Ad.is_internal.is_(False), ADS_ONLY, Ad.product_id.is_not(None), day.in_(list(marks)))):
         milestones.setdefault(pid, set()).add(marks[fs])
 
     for p in db.scalars(select(Product)).all():

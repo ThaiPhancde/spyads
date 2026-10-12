@@ -1,10 +1,10 @@
 "use client";
 import Link from "next/link";
 import { Fragment, ReactNode, useState } from "react";
-import { ArrowRight, MessageCircle, RefreshCw, Share2, Sparkles, ThumbsDown, ThumbsUp, Play } from "lucide-react";
+import { ArrowRight, BadgeEuro, Camera, MessageCircle, RefreshCw, Share2, Sparkles, ThumbsDown, ThumbsUp, Play, Truck } from "lucide-react";
+import { visualHref } from "@/components/visual/global-image-search";
 import { toast } from "sonner";
 import { BarList, Breakdown, Funnel, TrendChart } from "@/components/charts";
-import { ExperimentCard } from "@/components/ExperimentCard";
 import { Card, Empty, LIFECYCLE_TONE, Loading, PageHeader, Pill, RecBadge, Stat } from "@/components/ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -156,7 +156,7 @@ function MktCard({ m, c, productId, onChange }: { m: any; c: any; productId: num
   );
 }
 
-const TABS = ["Video & Discovery", "Overview", "Market & Ads", "Creative Library", "Comments", "Internal & Profit"];
+const TABS = ["Video & Discovery", "Overview", "Market & Ads", "Creative Library", "Comments"];
 
 export default function Product360({ params }: { params: { id: string } }) {
   const { data, error, reload } = useApi(`/products/${params.id}`);
@@ -182,6 +182,11 @@ export default function Product360({ params }: { params: { id: string } }) {
       <PageHeader title={p.name} subtitle={`${p.product_code} · ${p.category || "—"} · Markets: ${p.markets.join(", ") || p.country} · Giá TB ${fmt.n(p.price, 2)} ${p.currency || ""}`}>
         <span className="text-xs text-muted-foreground">Lifecycle</span><Pill tone={LIFECYCLE_TONE[p.lifecycle]}>{p.lifecycle}</Pill>
         <span className="ml-2 text-xs text-muted-foreground">Action</span><RecBadge rec={p.recommendation} />
+        <span className="ml-2 flex flex-wrap gap-1">
+          <Button variant="outline" size="xs" asChild><Link href={visualHref({ product_id: p.id })}><Camera /> Tìm bằng ảnh</Link></Button>
+          <Button variant="outline" size="xs" asChild><Link href={visualHref({ product_id: p.id, mode: "compare_prices" })}><BadgeEuro /> So sánh giá</Link></Button>
+          <Button variant="outline" size="xs" asChild><Link href={visualHref({ product_id: p.id, mode: "find_suppliers" })}><Truck /> Tìm nguồn hàng</Link></Button>
+        </span>
       </PageHeader>
 
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
@@ -325,43 +330,6 @@ export default function Product360({ params }: { params: { id: string } }) {
         </TabsContent>
 
         <TabsContent value="Comments"><CommentsPanel c={data.comments} /></TabsContent>
-
-        <TabsContent value="Internal & Profit">
-          <div className="space-y-4">
-            <div className="flex justify-end gap-2">
-              <Button size="sm" asChild><Link href={`/test-lab?product_id=${p.id}&new=1`}>+ Tạo test cho sản phẩm này</Link></Button>
-              {f.has_internal && <Button size="sm" variant="outline" asChild><Link href={`/test-lab?product_id=${p.id}`}>Mở Test Lab của sản phẩm</Link></Button>}
-            </div>
-            {!f.has_internal ? <Card><Empty>Sản phẩm chưa được test nội bộ — chỉ test tạo cho đúng sản phẩm này mới hiện ở đây.</Empty></Card> : (
-              <>
-                <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
-                  <Stat label="Spend" value={fmt.money(f.internal_spend)} />
-                  <Stat label="Orders" value={fmt.n(f.orders)} sub={`Confirm ${fmt.pct(f.confirm_rate)}`} />
-                  <Stat label="Revenue (booked)" value={fmt.money(f.revenue)} />
-                  <Stat label="Profit (delivered)" value={fmt.money(f.profit)} sub={`CM ${fmt.pct(f.contribution_margin)}`} />
-                  <Stat label="ROAS / MER" value={`${fmt.n(f.roas, 2)} / ${fmt.n(f.mer, 2)}`} />
-                  <Stat label="CPA / AOV" value={`${fmt.money(f.cpa)} / ${fmt.money(f.aov)}`} />
-                  <Stat label="Delivery rate" value={fmt.pct(f.delivery_rate)} />
-                  <Stat label="Refusal / Return" value={`${fmt.pct(f.refusal_rate)} / ${fmt.pct(f.return_rate)}`} />
-                </div>
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-                  <Card title="Order → delivery funnel">
-                    <Funnel stages={[
-                      { label: "Orders", value: f.orders }, { label: "Confirmed", value: f.confirmed_orders }, { label: "Shipped", value: f.shipped },
-                      { label: "Delivered", value: f.delivered }, { label: "Refused", value: f.refused, ok: (f.refusal_rate || 0) < 0.22, of: f.shipped }, { label: "Returned", value: f.returned, of: f.delivered },
-                    ]} />
-                  </Card>
-                  <Card title="Lý do khách từ chối (AI phân loại)">
-                    {Object.keys(data.orders.refusal_reasons || {}).length ?
-                      <BarList rows={Object.entries(data.orders.refusal_reasons).map(([k, v]) => ({ label: k.replace(/_/g, " "), value: v as number }))} color="bg-serious" /> :
-                      <Empty>Chưa có đơn bị từ chối.</Empty>}
-                  </Card>
-                </div>
-                {data.experiments.map((e: any) => <ExperimentCard key={e.id} e={e} />)}
-              </>
-            )}
-          </div>
-        </TabsContent>
       </Tabs>
     </div>
   );

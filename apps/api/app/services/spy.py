@@ -4,7 +4,7 @@
 2. what customers say                        → public marketplace reviews (AliExpress feedback API) + reviews embedded in
                                                the landing page (JSON-LD `review`)
 Everything is written back onto the `ads` rows (price, price_source, rating) and into `comments` (source=review /
-landing_review) so Comment Intelligence, scoring and the product page pick it up without any new reader.
+landing_review) so scoring and the product page pick it up without any new reader.
 Runs on demand (POST /api/products/{id}/scan) and every few minutes from the scheduler (a slice of URLs per tick).
 """
 from __future__ import annotations

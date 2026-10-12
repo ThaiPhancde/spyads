@@ -459,3 +459,8 @@ class PipelineRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     steps: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(16), default="running")
+
+
+from .eu_market import models as eu_models  # noqa: E402,F401 — EU Market tables join the same metadata (auto_migrate)
+from .visual import models as visual_models  # noqa: E402,F401 — image index tables (product_images, product_matches)
+from .pricing import models as pricing_models  # noqa: E402,F401 — price memory + enrichment queue (price_observations, price_jobs)

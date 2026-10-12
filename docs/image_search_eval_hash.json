@@ -1,0 +1,100 @@
+{
+ "ran_at": "2026-10-09T05:56:19.736584",
+ "n": 150,
+ "k": 10,
+ "index": {
+  "images": 72375,
+  "embeddings": 20243
+ },
+ "engine": "hash",
+ "recall_at_k": {
+  "q35": 0.993,
+  "half": 1.0,
+  "webp": 1.0,
+  "crop5": 0.94,
+  "crop15": 0.027,
+  "crop25_bright": 0.013
+ },
+ "exact_rank1": {
+  "q35": 0.98,
+  "half": 0.98,
+  "webp": 0.98
+ },
+ "same_picture_other_product": {
+  "rate": 0.12,
+  "cases": 18,
+  "examples": [
+   {
+    "query_creative": 1803,
+    "hit_creative": 1128,
+    "query_product": 349,
+    "hit_product": 348
+   },
+   {
+    "query_creative": 86889,
+    "hit_creative": 86867,
+    "query_product": 5325,
+    "hit_product": 5324
+   },
+   {
+    "query_creative": 5664,
+    "hit_creative": 3726,
+    "query_product": 774,
+    "hit_product": 778
+   },
+   {
+    "query_creative": 15831,
+    "hit_creative": 24273,
+    "query_product": 773,
+    "hit_product": 153
+   },
+   {
+    "query_creative": 35938,
+    "hit_creative": 3595,
+    "query_product": 773,
+    "hit_product": 153
+   },
+   {
+    "query_creative": 91137,
+    "hit_creative": 89492,
+    "query_product": 6523,
+    "hit_product": 5652
+   },
+   {
+    "query_creative": 50388,
+    "hit_creative": 3597,
+    "query_product": 773,
+    "hit_product": 153
+   },
+   {
+    "query_creative": 27678,
+    "hit_creative": 27662,
+    "query_product": 3368,
+    "hit_product": 3361
+   }
+  ],
+  "note": "data ambiguity (unmerged duplicates), not a hash error \u2014 why LIKELY_SAME needs metadata agreement"
+ },
+ "suspicious_exact": {
+  "rate": 0.0,
+  "cases": 0,
+  "examples": [],
+  "note": "EXACT by hash but CLIP cosine < SIMILAR_COS (needs the clip engine; 0 when hash-only)"
+ },
+ "other_angle_proxy": {
+  "queries": 121,
+  "different_picture_in_top_k": 0,
+  "recall": 0.0,
+  "note": "proxy: a hash-far creative of the same product (noisy labels \u2014 products group several photos / angles / variants)"
+ },
+ "latency_ms": {
+  "p50": 16,
+  "p95": 226,
+  "max": 2012,
+  "queries": 900
+ },
+ "thresholds": {
+  "exact_dist": 6,
+  "similar_dist": 14
+ }
+}

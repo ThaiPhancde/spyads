@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .. import events, media, realtime
 from ..collector.contract import AdRecord
 from ..collector.factory import PUSH_SOURCES, ConnectorFactory
-from ..db import get_db
+from ..db import get_db, ingest_lock
 from ..ingest import ingest_ads
 from ..markets import REGION_LABEL, REGIONS, ad_scope_filter, product_in_scope, targets
 from ..models import (Ad, AdSource, Advertiser, Connector, Creative, Event, Product, SearchJob,
@@ -226,7 +226,7 @@ def ingest_ads_api(body: IngestAds, db: Session = Depends(get_db)):
             recs.append(AdRecord.from_dict(r))
         except TypeError as e:
             raise HTTPException(422, f"record không đúng Common Data Contract: {e}")
-    with realtime._ingest_lock:  # serialize writers (see realtime.py)
+    with ingest_lock():  # serialize writers (see realtime.py)
         stats = ingest_ads(db, recs, saved_by=body.saved_by)
     realtime.after_business_events(db, set(stats["product_ids"]))
     return stats
@@ -258,7 +258,7 @@ def ingest_product(body: IngestProduct, db: Session = Depends(get_db)):
         media=[{"type": "video", "url": u} for u in body.video_urls] + [{"type": "image", "url": u} for u in body.image_urls],  # type: ignore
     )
     rec = AdRecord.from_dict(rec.to_dict())
-    with realtime._ingest_lock:
+    with ingest_lock():
         stats = ingest_ads(db, [rec], saved_by=body.saved_by)
     realtime.after_business_events(db, set(stats["product_ids"]))
     return stats
@@ -408,7 +408,7 @@ class LiveSearch(BaseModel):
 
 
 @router.post("/api/search/live")
-def live_search(body: LiveSearch, bg: BackgroundTasks, db: Session = Depends(get_db)):
+def live_search(body: LiveSearch, db: Session = Depends(get_db)):
     """Search the sources right now (Meta Ad Library, Apify, providers…). Progress via SSE SEARCH_PROGRESS/SEARCH_DONE."""
     countries = [c.strip().upper() for c in body.countries if c.strip()] or ["ALL"]
     kws = split_keywords(body.query)[:10]  # ponytail: hard cap — every keyword is a full scan of every source
@@ -443,8 +443,7 @@ def live_search(body: LiveSearch, bg: BackgroundTasks, db: Session = Depends(get
                     db.add(TrackedQuery(connector_id=c.id, query=kw, countries=countries,
                                         every_minutes=max(15, body.every_minutes), created_by=body.user))
     db.commit()
-    realtime.LIVE_JOBS.add(job.id)
-    bg.add_task(realtime.run_search, job.id)
+    realtime.start_search(job.id)
     return {"job_id": job.id}
 
 
@@ -466,7 +465,7 @@ class MoreIn(BaseModel):
 
 
 @router.post("/api/search/jobs/{jid}/more")
-def search_more(jid: int, body: MoreIn, bg: BackgroundTasks, db: Session = Depends(get_db)):
+def search_more(jid: int, body: MoreIn, db: Session = Depends(get_db)):
     """Next results page: continue the live search from its saved cursor, `count` more ads per country."""
     j = db.get(SearchJob, jid)
     if not j:
@@ -479,8 +478,7 @@ def search_more(jid: int, body: MoreIn, bg: BackgroundTasks, db: Session = Depen
         raise HTTPException(409, "nguồn đã hết kết quả")
     j.status = "running"
     db.commit()
-    realtime.LIVE_JOBS.add(jid)
-    bg.add_task(realtime.run_search, jid, max(10, min(body.count, 1000)))
+    realtime.start_search(jid, max(10, min(body.count, 1000)))
     return {"ok": True}
 
 
@@ -539,10 +537,21 @@ def retry_creative(cid: int, db: Session = Depends(get_db)):
     c = db.get(Creative, cid)
     if not c:
         raise HTTPException(404)
+    if c.type == "video":  # videos are never kept in the vault: a dead signed link only needs a fresh one to stream
+        if c.status != "stored" and not source_alive(c.source_url):
+            try:  # ask TikTok again by ad id (~10 s)
+                ok = media.refresh_source(c)
+            except Exception as e:
+                raise HTTPException(502, f"Không lấy được link mới: {e}"[:200])
+            if not ok:
+                raise HTTPException(410, "Nguồn không còn video này — mở trang quảng cáo gốc")
+            c.status, c.attempts, c.error = "pending", 0, None
+            db.commit()
+        return creative_dict(c)
     c.status, c.attempts, c.error = "pending", 0, None
     db.commit()
-    media.enqueue([cid], force=True)  # explicit request: the one place a video is still downloaded by default
-    return {"ok": True}
+    media.enqueue([cid], force=True)  # explicit request: save this one image
+    return creative_dict(c)
 
 
 @router.get("/api/creatives/{cid}/thumb")
@@ -700,7 +709,7 @@ def _radar(country: str | None, funnel: str | None, db: Session) -> dict:
             continue
         if not product_in_scope(p, country):
             continue
-        pts.append({"id": p.id, "name": p.canonical_name, "x": v["market_demand"], "y": v["wave_potential"],
+        pts.append({"id": p.id, "name": p.canonical_name, "x": v["market_demand"], "y": v.get("momentum", v["wave_potential"]),
                     "opportunity": v["opportunity"], "quadrant": p.classification, "decision": p.recommendation})
     return {"points": pts, "counts": dict(Counter(p["quadrant"] for p in pts))}
 
@@ -1030,7 +1039,7 @@ def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
     for it in body.items[:500]:
         if isinstance(it, dict) and it.get("ad_archive_id"):
             recs.append(map_library_ad(it, "meta_library", (body.country or "").upper() or None))
-    with realtime._ingest_lock:  # serialize writers (see realtime.py)
+    with ingest_lock():  # serialize writers (see realtime.py)
         stats = ingest_ads(db, recs, saved_by=body.saved_by)
     realtime.after_business_events(db, set(stats["product_ids"]))
     return stats

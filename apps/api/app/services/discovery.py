@@ -9,6 +9,7 @@ Every number is a formula over stored data. AI never assigns these scores.
 """
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -189,6 +190,47 @@ def market_fit_score(dna: dict, market: str, category: str | None, angle: str | 
     return round(50 + (raw - 50) * weight, 1)
 
 
+# ------------------------------------------------------------ ranking v2 (2026-10-09): what marketers trust
+# The old demand = lin(active_ads, 1, 12)… sat at 0 for the 82 % of products with one ad, so 98 % were LOW_SIGNAL and
+# the decision fell through to WATCH. Signals below are log-scaled for the skewed data (p50 1 ad / 108 days).
+def _log_lin(x, lo, hi) -> float:
+    return lin(math.log1p(max(x or 0, 0)), math.log1p(lo), math.log1p(hi))
+
+
+def _sellers(n: int) -> float:
+    """Validation bell: 1 seller proves nothing, 2-10 = validated, crowded beyond (saturation penalises it too)."""
+    return 0.0 if n <= 1 else 60.0 if n == 2 else 100.0 if n <= 10 else 70.0 if n <= 15 else 40.0
+
+
+def market_demand(f: dict) -> float:
+    """Proof the product sells: strongest live ad keeps running · the advertiser scales it · several sellers · reach."""
+    return (0.35 * _log_lin(f.get("longevity_days"), 7, 120)
+            + 0.30 * max(_log_lin(f.get("active_ads"), 1, 10), lin(f.get("variants") or 1, 1, 5), lin(f.get("strong_ads") or 0, 1, 5))
+            + 0.20 * _sellers(f.get("advertiser_count") or 0) + 0.15 * lin(f.get("market_count") or 0, 1, 4))
+
+
+def momentum(f: dict) -> float:
+    """Growing right now: new ads and new sellers in the last 7 days."""
+    return 0.6 * lin(f.get("new_ads_7d") or 0, 0, 5) + 0.4 * lin(f.get("new_advertisers_7d") or 0, 0, 3)
+
+
+def evidence(p: Product, f: dict, ads: list[Ad]) -> dict:
+    """Raw facts discovery_decision gates on (kept on product.potential so the UI can show them)."""
+    mix = Counter(a.funnel for a in ads if a.funnel and a.channel in (None, "ads"))
+    return {"active_ads": f.get("active_ads", 0), "longevity_days": f.get("longevity_days", 0),
+            "advertisers": f.get("advertiser_count", 0), "advertisers_at_primary_market": f.get("advertisers_at_primary_market", 0),
+            "variants": f.get("variants", 1), "non_commerce_share": round((mix.get("app", 0) + mix.get("form", 0)) / max(1, sum(mix.values())), 2),
+            "non_product": p.category == "non_product", "unnamed": bool(NO_PRODUCT_NAME.search(p.canonical_name or ""))}
+
+
+# placeholder names, CTA strings and ad headlines that ended up as a cluster name ("Chat trong Messenger", "Natural Relief In
+# Weeks", "Sculpiflex Is Just A Scam I M"): a product name is a noun phrase, not a sentence. Single-letter tokens are
+# apostrophe cuts ("Don T", "I M").
+NO_PRODUCT_NAME = re.compile(
+    r"\(chưa đặt tên\)|^(chat|nhắn tin|message|send message|inbox|contact)(?!\w)|messenger|whatsapp|دردش|راسلنا|تواصل"
+    r"|(^|\s)[A-Za-z](\s|$)|(?<!\w)(scam|reasons?|in \d+ \w+|in weeks|money back|miss out|is just|are you|how to|why you|you need)(?!\w)", re.I)
+
+
 # ------------------------------------------------------------ the vector
 def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creative], votes: list[Vote],
                      taste: TasteModel, dna: dict) -> dict:
@@ -197,13 +239,7 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     cs = creative_signals(ext_ads, creatives)
     age_days = (now - p.first_seen_at).days if p.first_seen_at else 0
 
-    # Calibrated on the real DB 2026-10-07 (3,213 products with ≥1 ad-library ad). Measured percentiles p50/p90/p99:
-    #   active_ads 1/2/12 · advertiser_count 1/1/3 · ads_running_30d 1/2/9 · market_count 1/1/6 · longevity_days 131/524/1351
-    #   · variants (max same-copy group) 1/2/6. 82 % of products have a single ad, so p90 sits near 0 whatever the range;
-    #   ranges are set so p99 ≈ 100 and the marketer thresholds (≥14/30 days, 2-10 sellers) land in the 60-80 band.
-    demand = 0.30 * lin(f.get("active_ads", 0), 1, 12) + 0.25 * lin(f.get("advertiser_count", 0), 1, 4) \
-        + 0.15 * lin(f.get("ads_running_30d", 0), 0, 9) + 0.10 * lin(f.get("market_count", 0), 1, 6) \
-        + 0.10 * lin(f.get("longevity_days", 0), 14, 120) + 0.10 * lin(f.get("variants", 1), 1, 6)
+    demand, mom, ev = market_demand(f), momentum(f), evidence(p, f, ext_ads)
     # keyword_competition dropped (weight 0): no source fills it yet — remaining weights renormalised to 100
     novelty = (0.30 * (100 - lin(f.get("advertiser_count", 0), 2, 15)) + 0.20 * (100 - lin(f.get("store_count", 0), 1, 4))
                + 0.20 * lin(60 - age_days, 0, 60) + 0.15 * (100 - lin(f.get("market_count", 0), 1, 6))) / 0.85
@@ -246,47 +282,65 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     risk, flags = compliance_risk([a.ad_text or "" for a in ext_ads[:60]] + [p.canonical_name])
     competition = p.saturation_score or 0
     economics = (f.get("_scores") or {}).get("margin_potential") or 55.0
-    operational = 60.0  # neutral: no operations data feeds this term
     conf = p.confidence_score or 0
 
-    raw = (0.16 * market_fit + 0.10 * mkt_appeal + 0.08 * operational + 0.14 * novelty + 0.18 * wave + 0.14 * creative
-           + 0.10 * economics + 0.10 * demand) - 0.12 * max(0, competition - 30) - 0.5 * max(0, risk - 20)
+    # market evidence (demand + momentum) carries 42 %; regex creative signals (wave, creative) only 16 % — they are weak
+    raw = (0.28 * demand + 0.14 * mom + 0.12 * market_fit + 0.10 * mkt_appeal + 0.08 * novelty + 0.08 * wave + 0.08 * creative
+           + 0.12 * economics) - 0.12 * max(0, competition - 30) - 0.5 * max(0, risk - 20)
     opportunity_raw = max(0.0, min(100.0, raw * (0.75 + 0.25 * conf / 100)))
-    boost = priority_boost(markets)  # PH first — applied once here (engine.compute_scores does the same for opportunity_score)
+    boost = priority_boost(markets)  # PH first — applied once here; engine copies this onto product.opportunity_score
     opportunity = min(100.0, opportunity_raw + boost)
 
-    quadrant = ("BREAKOUT" if wave >= 55 and demand >= 50 else "EXPERIMENTAL" if wave >= 55 else
+    # validated by the market (demand) × growing this week (momentum)
+    quadrant = ("BREAKOUT" if mom >= 40 and demand >= 50 else "EXPERIMENTAL" if mom >= 40 else
                 "STABLE_WINNER" if demand >= 50 else "LOW_SIGNAL")
     vec = {
-        "market_demand": demand, "novelty": novelty, "wave_potential": wave, "creative_potential": creative,
+        "market_demand": demand, "momentum": mom, "novelty": novelty, "wave_potential": wave, "creative_potential": creative,
         "market_fit": market_fit, "mkt_appeal": mkt_appeal, "competition": competition, "saturation": p.saturation_score,
         "economics": economics, "compliance_risk": risk, "confidence": conf, "opportunity": opportunity, "opportunity_raw": opportunity_raw, "priority_boost": boost,
     }
     vec = {k: (round(v, 1) if isinstance(v, (int, float)) else v) for k, v in vec.items()}
+    decision = discovery_decision(vec, quadrant, ev)
+    # every list sorts by opportunity: a gated product (stopped, app, crowded, unnamed…) must not outrank a TEST
+    cap = OPPORTUNITY_CAP.get(decision[0])
+    if cap is not None and vec["opportunity"] > cap:
+        vec["opportunity"] = float(cap)
     return {
-        "vector": vec, "quadrant": quadrant, "compliance_flags": flags, "mkt_appeal_source": appeal_src,
+        "vector": vec, "quadrant": quadrant, "decision": decision, "compliance_flags": flags, "mkt_appeal_source": appeal_src,
         "mkt_appeal_predicted": predicted, "wave_parts": {k: round(v, 1) for k, v in wave_parts.items()},
         "creative_parts": {k: round(v, 1) for k, v in creative_parts.items()},
-        "per_market": {m: {"market_fit": s, "decision": discovery_decision(vec | {"market_fit": s}, quadrant)[0]}
+        "per_market": {m: {"market_fit": s, "decision": discovery_decision(vec | {"market_fit": s}, quadrant, ev)[0]}
                        for m, s in per_market.items()},
         "signals": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in cs.items()},
+        "evidence": ev,
     }
 
 
-def discovery_decision(v: dict, quadrant: str) -> tuple[str, list[str]]:
-    """Before a test (market signals only): TEST_NOW · TEST · WATCH · REVIEW · SKIP."""
+OPPORTUNITY_CAP = {"SKIP": 30, "REVIEW": 30, "WATCH": 55}
+
+
+def discovery_decision(v: dict, quadrant: str, e: dict | None = None) -> tuple[str, list[str]]:
+    """Before a test (market evidence only): TEST_NOW · TEST · WATCH · REVIEW · SKIP. Gates on raw facts first (no live
+    ad, not a product, compliance, crowded), then demand × momentum. On the 2026-10-09 DB: ≈0.2 % TEST_NOW, ≈7 % TEST."""
+    e = e or {}
+    d, m = v["market_demand"], v.get("momentum", 0)
+    facts = f"{e.get('active_ads', 0)} ads đang chạy · {e.get('advertisers', 0)} người bán · ad lâu nhất {e.get('longevity_days', 0)} ngày"
+    if e and not e.get("active_ads"):
+        return "SKIP", ["Không có quảng cáo nào đang chạy (chỉ có listing nguồn hàng hoặc ad đã dừng)"]
+    if e.get("non_product") or e.get("non_commerce_share", 0) >= 0.5:
+        return "SKIP", ["App / dịch vụ / form đăng ký — không phải sản phẩm vật lý"]
     if v["compliance_risk"] >= 60:
         return "REVIEW", [f"Compliance risk {v['compliance_risk']:.0f} — kiểm tra hàng nhái / claim trước khi test"]
-    if quadrant == "BREAKOUT" and v["opportunity"] >= 62 and v["market_fit"] >= 55:
-        return "TEST_NOW", [f"Breakout: wave {v['wave_potential']:.0f} + demand {v['market_demand']:.0f}", f"Opportunity {v['opportunity']:.0f}"]
-    if v["novelty"] >= 70 and v["wave_potential"] >= 60 and v["creative_potential"] >= 55 and v["market_fit"] >= 50:
-        return "TEST", [f"Novelty {v['novelty']:.0f}, Wave {v['wave_potential']:.0f}, Creative {v['creative_potential']:.0f}"]
-    if quadrant == "EXPERIMENTAL" and v["confidence"] < 60:
-        return "TEST", [f"Wave {v['wave_potential']:.0f} cao nhưng thị trường chưa xác nhận — test nhỏ ngân sách"]
-    if v["competition"] >= 70:
-        return "SKIP", [f"Bão hoà {v['competition']:.0f}"]
-    if quadrant == "STABLE_WINNER":
-        return "WATCH", ["Đã được xác nhận nhưng ít tín hiệu sóng mới — theo dõi đối thủ"]
-    if v["opportunity"] < 30:
-        return "SKIP", [f"Opportunity {v['opportunity']:.0f}"]
-    return "WATCH", ["Mới phát hiện — cần thêm dữ liệu"]
+    if max(e.get("advertisers_at_primary_market", 0), e.get("advertisers", 0)) > 15 or v["competition"] >= 70:
+        return "SKIP", [f"Bão hoà: {e.get('advertisers', 0)} người bán ({e.get('advertisers_at_primary_market', 0)} ở thị trường ưu tiên), saturation {v['competition']:.0f}"]
+    if e.get("unnamed") and d >= 45:
+        return "WATCH", ["Tín hiệu mạnh nhưng chưa xác định được sản phẩm — mở ad để xem", facts]
+    if quadrant == "BREAKOUT" and e.get("longevity_days", 0) >= 14 and v["market_fit"] >= 50:
+        return "TEST_NOW", [f"Đã được xác nhận (demand {d:.0f}) và đang tăng tuần này (momentum {m:.0f})", facts]
+    if quadrant in ("BREAKOUT", "EXPERIMENTAL"):
+        return "TEST", [f"Đang tăng nhanh (momentum {m:.0f}) nhưng chưa chạy đủ lâu / chưa được xác nhận — test ngân sách nhỏ", facts]
+    if d >= 55 and (e.get("advertisers", 0) >= 2 or e.get("variants", 1) >= 2):
+        return "TEST", [f"Đã được xác nhận (demand {d:.0f}): nhiều người bán hoặc đang nhân bản creative", facts]
+    if d >= 45 or m >= 20:
+        return "WATCH", [f"Có tín hiệu (demand {d:.0f}, momentum {m:.0f}) — chờ thêm người bán / ads mới", facts]
+    return "SKIP", [f"Tín hiệu yếu (demand {d:.0f}, momentum {m:.0f})", facts]

@@ -6,6 +6,7 @@ import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useLiveStatus } from "@/lib/realtime";
 import { Badge } from "@/components/ui/badge";
+import { GlobalImageSearch } from "@/components/visual/global-image-search";
 
 export function SiteHeader() {
   const path = usePathname();
@@ -17,6 +18,7 @@ export function SiteHeader() {
         <Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" />
         <h1 className="text-base font-medium">{titleFor(path)}</h1>
         <div className="ml-auto flex items-center gap-2">
+          <GlobalImageSearch variant="ghost" size="icon-sm" iconOnly className="size-8" />
           <Badge variant="outline" className="hidden gap-1.5 sm:inline-flex">
             <span className={`size-1.5 rounded-full ${live === "live" ? "bg-good" : live === "offline" ? "bg-critical" : "bg-warning"}`} />
             {live === "live" ? "Realtime" : live === "offline" ? "Offline" : "Đang kết nối"}

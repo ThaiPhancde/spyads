@@ -15,9 +15,20 @@ IS_SQLITE = DATABASE_URL.startswith("sqlite")
 WRITE_LOCK_WARN_S = float(os.getenv("WRITE_LOCK_WARN_S", "5"))
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False, "timeout": 60} if IS_SQLITE else {},
+    # Postgres: timezone=UTC — the app stores naive utcnow(); the server default (Asia/Bangkok) would shift timestamps
+    connect_args={"check_same_thread": False, "timeout": 60} if IS_SQLITE else {"options": "-c timezone=UTC"},
     pool_pre_ping=not IS_SQLITE,
+    **({} if IS_SQLITE else {"pool_size": int(os.getenv("DB_POOL_SIZE", "20")), "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20"))}),
 )
+
+if not IS_SQLITE:
+    from sqlalchemy import String
+    from sqlalchemy.ext.compiler import compiles
+
+    @compiles(String, "postgresql")
+    def _pg_unbounded_varchar(type_, compiler, **kw):
+        # SQLite never enforced String(n); keep that — a long ad title must not fail an ingest batch on Postgres
+        return "VARCHAR"
 
 if IS_SQLITE:
     from sqlalchemy import event
@@ -55,6 +66,30 @@ if IS_SQLITE:
                                                 time.time() - t0, threading.current_thread().name, conn.info.pop("w_stack", ""))
         conn.info.pop("w_stack", None)
 READ_ONLY: ContextVar[bool] = ContextVar("db_read_only", default=False)
+
+_ingest_tlock = threading.Lock()
+
+
+@contextmanager
+def ingest_lock():
+    """Serialize ingest (get-or-create of products / advertisers / ads) across threads *and* processes — the API
+    (live searches) and the worker (scheduler) both ingest. Postgres: an advisory lock on its own connection, since
+    ingest commits several times inside. SQLite: BEGIN IMMEDIATE already serializes processes; the thread lock suffices.
+    ponytail: one global lock — fetches run outside it, so only the short DB part is serialized."""
+    with _ingest_tlock:
+        if IS_SQLITE:
+            yield
+            return
+        from sqlalchemy import text
+
+        with engine.connect() as conn:
+            conn.execute(text("SELECT pg_advisory_lock(727001)"))
+            conn.commit()
+            try:
+                yield
+            finally:
+                conn.execute(text("SELECT pg_advisory_unlock(727001)"))
+                conn.commit()
 
 
 @contextmanager
@@ -94,11 +129,14 @@ def get_db():
 
 
 def auto_migrate():
-    """Add columns that exist in the models but not yet in the database (additive only, nullable).
+    """Create missing tables, then add columns that exist in the models but not yet in the database (additive only, nullable).
     Keeps an existing SQLite/Postgres DB usable after upgrades; use Alembic for anything destructive."""
     from sqlalchemy import inspect, text
 
     with engine.begin() as conn:  # one connection for both reading the schema and altering it (no self-lock)
+        if not IS_SQLITE:  # API and worker start together: one migrates, the other waits (concurrent DDL collides)
+            conn.execute(text("SELECT pg_advisory_xact_lock(727002)"))
+        Base.metadata.create_all(conn)
         insp = inspect(conn)
         existing_tables = set(insp.get_table_names())
         for table in Base.metadata.sorted_tables:

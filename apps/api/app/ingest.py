@@ -100,7 +100,8 @@ def guess_product_name(rec: AdRecord) -> str:
     url = rec.product_url or rec.landing_page or ""
     host = urlparse(url).netloc.lower().removeprefix("www.")
     marketplace = re.search(r"alibaba|aliexpress|amazon\.|noon\.com|shopee|lazada|temu\.|ebay\.", host) or _is_host(host, SOCIAL_HOSTS + MESS_HOSTS)
-    if re.search(r"/(products?|p|item|dp)/", urlparse(url).path) and not marketplace:  # e-commerce product page → slug is the product
+    # e-commerce product page → slug is the product (/pages/, /collections/, /sp/ are advertorials / category pages)
+    if re.search(r"/(products?|p|item|dp)/", urlparse(url).path) and not marketplace:
         slug = _slug_name(url)
         if slug:
             return slug
@@ -126,6 +127,7 @@ _PRICE_RE = re.compile(r"(?<![\w.])(₱|PHP|P|SAR|AED|QAR|KWD|OMR|BHD|US\$|USD|\
                        r"|(?<![\w.])" + _NUM + r" ?(SAR|AED|QAR|KWD|OMR|BHD|PHP|VND|VNĐ|USD|EUR|GBP|AUD|NZD|ر\.س|د\.إ|ريال|درهم|đ|₫|[kK]|tr|triệu)(?![\w%])",
                        re.I)
 _VI = re.compile(r"[ăâđêôơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ]")
+_VI_PRICE_WORD = re.compile(r"(?<!\w)(giá|gia ban|chỉ còn|đồng|freeship|mua ngay)(?!\w)", re.I)  # á/à/ã are shared with es/pt, so match words
 _COUNT_WORD = re.compile(r"^\s*(lượt|khách|người|đơn|follow|view|sold|hạt|chai|hộp|sản phẩm|sp\b|đã bán|members?|customers?|units?|pcs)", re.I)
 
 
@@ -149,7 +151,7 @@ def parse_price(text: str | None, country: str | None = None) -> tuple[float, st
         if s == "K":
             if v < 10:  # "4K video", "5K followers" — not a price
                 return None
-            if not (country == "VN" or _VI.search(text)):
+            if not (country == "VN" or _VI.search(text) or _VI_PRICE_WORD.search(text)):
                 return None  # "99k" outside a Vietnamese ad: thousands of what? — no currency to convert, so no price
             return (v * 1000, "VND")
         if not re.search(r"giá|chỉ|còn|từ|trả|đồng|vnđ|₫", ctx):  # million-đồng amounts need price context ("chỉ hơn 9 triệu đồng")

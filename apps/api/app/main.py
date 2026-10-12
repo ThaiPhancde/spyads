@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
-from .db import Base, ReadOnlyGets, engine, get_db
+from .db import ReadOnlyGets, get_db
 from .markets import ad_scope_filter, expand, product_in_scope
 from .models import (ad_in_country, Ad, Advertiser, AdvertiserDailySnapshot, Alert, Comment, Connector, LifecycleEvent,
                      Product, ProductDailySnapshot, Store)
@@ -29,7 +29,7 @@ app = FastAPI(title="Market Intelligence OS", version="0.1.0")
 
 class AdminGuard:
     """ASGI middleware: every write (non GET/HEAD/OPTIONS) needs `X-Admin-Token` = ADMIN_TOKEN (.env). Fails closed when
-    unset. /api/ingest/* uses X-Ingest-Token instead; /api/health stays open for probes."""
+    unset. /api/ingest/* uses X-Ingest-Token, the Allegro bot callback its job token + secret, /api/agent/v1/* Bearer GROK_TOOL_TOKEN; /api/health stays open for probes."""
 
     def __init__(self, app):
         self.app = app
@@ -37,7 +37,8 @@ class AdminGuard:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
             path = scope["path"]
-            if not path.startswith("/api/ingest/") and path != "/api/health":
+            # Grok Bot paths authenticate in the route: callback = job token + X-Callback-Secret, /api/agent/v1 = Bearer GROK_TOOL_TOKEN
+            if not path.startswith(("/api/ingest/", "/api/eu-market/allegro/callback/", "/api/agent/v1/")) and path not in ("/api/health", "/api/imports/allegro"):  # bridge route checks X-ToolSpy-Token itself
                 want = os.getenv("ADMIN_TOKEN")
                 got = next((v.decode() for k, v in scope["headers"] if k == b"x-admin-token"), None)
                 if not want:
@@ -50,7 +51,8 @@ class AdminGuard:
 app.add_middleware(ReadOnlyGets)
 app.add_middleware(AdminGuard)
 # CORS last = outermost, so 401/503 from the guard still carry CORS headers for the browser
-app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in os.getenv("WEB_ORIGIN", "http://localhost:3000").split(",") if o.strip()],
+app.add_middleware(CORSMiddleware, allow_origin_regex=r"chrome-extension://[a-p]{32}",  # Browser Bridge
+                   allow_origins=[o.strip() for o in os.getenv("WEB_ORIGIN", "http://localhost:3000").split(",") if o.strip()],
                    allow_methods=["*"], allow_headers=["*"])
 
 
@@ -58,9 +60,42 @@ from .routers.intel import router as intel_router  # noqa: E402
 
 app.include_router(intel_router)
 
+from .visual.routes import router as visual_router  # noqa: E402 — global image search (docs/IMAGE_SEARCH.md)
+
+app.include_router(visual_router)
+
+from .pricing.routes import router as pricing_router  # noqa: E402 — background price enrichment (docs/PRICE_INTELLIGENCE.md)
+
+app.include_router(pricing_router)
+
+from .routers.bridge import router as bridge_router  # noqa: E402 — Browser Bridge (extensions/allegro-bridge)
+
+app.include_router(bridge_router)
+
+from .eu_market.jobs import enabled as eu_market_enabled  # noqa: E402
+
+if eu_market_enabled():  # EU_MARKET_ENABLED=0 → no /api/eu-market routes (the web page shows "disabled")
+    from .eu_market.routes import agent_router, router as eu_market_router
+
+    app.include_router(eu_market_router)
+    app.include_router(agent_router)  # /api/agent/v1 — Grok Bot tools (docs/grokbot_integration.md)
+
 
 @app.on_event("startup")
 async def _startup():
+    import threading
+
+    def _warm_hash_index():  # ~1-2 s for 72k rows; otherwise the first image search of the day pays it
+        try:
+            from .db import SessionLocal
+            from .visual.service import HASH_INDEX
+
+            with SessionLocal() as db:
+                HASH_INDEX.refresh(db, force=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    threading.Thread(target=_warm_hash_index, name="hash-index-warmup", daemon=True).start()
     import asyncio
     import logging
 
@@ -71,7 +106,6 @@ async def _startup():
     logging.basicConfig(level=logging.INFO)
     for noisy in ("httpx", "httpcore"):  # one INFO line per request, with the full (signed) CDN URL — drowns real logs
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    Base.metadata.create_all(engine)
     auto_migrate()
     with SessionLocal() as db:
         ensure_default_connectors(db)
@@ -94,11 +128,11 @@ async def _startup():
         platforms.backfill(db)  # rows from before network/channel existed; the scheduler's first full re-score picks them up
         adsignals.refresh(db)  # per-ad force / variation / target-market flags (cheap; keeps them in sync with .env)
         db.commit()
-    from .media import requeue_lost
+    if os.getenv("DISABLE_SCHEDULER", "").lower() not in ("1", "true"):  # else `python -m app.worker` runs all of this
+        from .media import requeue_lost
 
-    logging.getLogger(__name__).info("media: %s lost creatives re-queued", requeue_lost())
-    enqueue_pending()
-    if os.getenv("DISABLE_SCHEDULER", "").lower() not in ("1", "true"):
+        logging.getLogger(__name__).info("media: %s lost creatives re-queued", requeue_lost())
+        enqueue_pending()
         app.state.scheduler = asyncio.create_task(scheduler_loop())
 
 
@@ -573,8 +607,8 @@ def alert_dict(a: Alert, db: Session | None = None) -> dict:
 @app.get("/api/alerts")
 def alerts(type: str | None = None, unread: bool = False, limit: int = Query(200, le=500), db: Session = Depends(get_db)):
     q = select(Alert).order_by(Alert.created_at.desc(), Alert.id.desc())
-    if type:
-        q = q.where(Alert.type == type)
+    if type:  # "EU_*" = prefix match (EU Market alert family)
+        q = q.where(Alert.type.like(f"{type[:-1]}%") if type.endswith("*") else Alert.type == type)
     if unread:
         q = q.where(Alert.is_read.is_(False))
     rows = db.scalars(q.limit(limit)).all()

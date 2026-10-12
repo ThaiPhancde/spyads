@@ -1,8 +1,10 @@
 "use client";
 import Link from "next/link";
-import { ArrowRight, ExternalLink } from "lucide-react";
+import { ArrowRight, BadgeEuro, Camera, ExternalLink, Eye, Megaphone, Truck } from "lucide-react";
 import { CreativeMedia, DownloadButton } from "@/components/media";
+import { visualHref } from "@/components/visual/global-image-search";
 import { NetworkBadge, usePlatforms } from "@/components/platforms";
+import { PriceTag } from "@/components/pricing/price-tag";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -71,6 +73,15 @@ export function AdDetailSheet({ ad, open, onOpenChange }: { ad: any; open: boole
               <ExtLink href={ad.advertiser_url}>Trang advertiser</ExtLink>
               <ExtLink href={ad.landing_url}>{ad.landing_domain || "Landing page"}</ExtLink>
               {ad.product && <Button variant="outline" size="sm" asChild><Link href={`/products/${ad.product.id}`}>Sản phẩm: {ad.product.name} <ArrowRight /></Link></Button>}
+            </div>
+            {!organic && <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm"><PriceTag subject={`ad:${ad.id}`} priority={10} fallback={{ price: ad.price, currency: ad.currency }} className="text-sm" /></div>}
+            {/* spec §8 Ads Detail: image-based actions on this ad's creative */}
+            <div className="flex flex-wrap gap-1.5">
+              <Button variant="secondary" size="xs" asChild><Link href={visualHref({ ad_id: ad.id })}><Camera /> Tìm bằng ảnh</Link></Button>
+              <Button variant="secondary" size="xs" asChild><Link href={visualHref({ ad_id: ad.id, mode: "find_suppliers" })}><Truck /> Tìm nguồn hàng</Link></Button>
+              <Button variant="secondary" size="xs" asChild><Link href={visualHref({ ad_id: ad.id, mode: "compare_prices" })}><BadgeEuro /> So sánh giá</Link></Button>
+              <Button variant="secondary" size="xs" asChild><Link href={visualHref({ ad_id: ad.id, mode: "ads_match" })}><Megaphone /> Quảng cáo tương tự</Link></Button>
+              <Button variant="secondary" size="xs" asChild><Link href={visualHref({ ad_id: ad.id, mode: "compare_prices", watch: 1 } as any)}><Eye /> Theo dõi</Link></Button>
             </div>
 
             {media.length > 0 && (

@@ -64,11 +64,34 @@ assert sat < 45, (sat, state)  # 6 sellers at PH = healthy band, not saturated
 f16 = {**f, "advertisers_at_primary_market": 18}
 assert saturation_score(f16)[0] > sat  # >15 sellers penalised
 p1, ads1, f1, pv1 = mk(1, 1, 120)
-assert pv1["vector"]["market_demand"] < 30, pv1["vector"]["market_demand"]
+assert pv1["vector"]["market_demand"] < 45, pv1["vector"]["market_demand"]  # one long-running ad, one seller: below the WATCH bar
 assert rarity_score(f1)[0] > rarity_score(f)[0]
 assert f1["creative_growth_7d"] == 0.0
 _, _, f_new, _ = mk(1, 1, 2)
 assert f_new["creative_growth_7d"] == round(1 / 3, 3)  # 1 new ad on 1 ad is +33 %, not +100 %
+
+# ---- ranking v2: evidence-gated decisions
+from app.services.discovery import discovery_decision
+assert pv["evidence"]["advertisers"] == 6 and pv["quadrant"] in ("BREAKOUT", "STABLE_WINNER")  # 12 ads, 6 sellers, 60 days
+assert pv["vector"]["momentum"] == 0.0 and pv["quadrant"] == "STABLE_WINNER"  # all ads 60 days old: nothing new this week
+assert discovery_decision(pv["vector"], pv["quadrant"], pv["evidence"])[0] == "TEST"  # validated: 6 sellers
+_, _, _, pv_new = mk(6, 3, 20)  # 6 ads, 3 sellers, all launched 20 days ago → none new this week
+assert discovery_decision(pv_new["vector"], pv_new["quadrant"], pv_new["evidence"])[0] in ("TEST", "WATCH")
+v_hot = {**pv["vector"], "momentum": 60.0}
+assert discovery_decision(v_hot, "BREAKOUT", pv["evidence"])[0] == "TEST_NOW"
+assert discovery_decision(v_hot, "BREAKOUT", {**pv["evidence"], "longevity_days": 5})[0] == "TEST"  # too young for TEST_NOW
+assert discovery_decision(v_hot, "BREAKOUT", {**pv["evidence"], "unnamed": True})[0] == "WATCH"  # can't test an unknown product
+assert discovery_decision(v_hot, "BREAKOUT", {**pv["evidence"], "non_commerce_share": 0.8})[0] == "SKIP"  # app installs / lead forms
+assert discovery_decision(v_hot, "BREAKOUT", {**pv["evidence"], "active_ads": 0})[0] == "SKIP"  # listing only / all stopped
+assert discovery_decision(v_hot, "BREAKOUT", {**pv["evidence"], "advertisers_at_primary_market": 18})[0] == "SKIP"  # crowded
+assert discovery_decision(v_hot, "BREAKOUT", {**pv["evidence"], "advertisers": 23})[0] == "SKIP"  # crowded overall
+from app.services.discovery import NO_PRODUCT_NAME
+assert all(NO_PRODUCT_NAME.search(n) for n in ["Dim Gadget Ph (Chưa Đặt Tên)", "Chat trong Messenger", "دردش معنا"])
+assert all(NO_PRODUCT_NAME.search(n) for n in ["Don T Miss Out", "Natural Relief In Weeks", "Sculpiflex Is Just A Scam I M",
+                                                "Reasons People Over Walk Painfree"])
+assert not any(NO_PRODUCT_NAME.search(n) for n in ["Instant Posture Corrector", "Initial Necklace", "Zodiac Sign Bracelet"])
+assert pv1["decision"][0] == "SKIP" and pv1["vector"]["opportunity"] <= 30  # gated products never outrank a TEST
+assert discovery_decision(pv1["vector"], pv1["quadrant"], pv1["evidence"])[0] == "SKIP"  # 1 ad, 1 seller, nothing new
 
 # ---- removed networks stay out of features
 bad = Ad(id=99, external_id="g", source="google_ads_transparency", platform="google", product_id=1, channel="ads", network="google",

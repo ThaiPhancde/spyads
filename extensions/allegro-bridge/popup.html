@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><title>ToolSpy Bridge</title>
+<style>
+ body{font:13px system-ui,sans-serif;width:380px;margin:10px}
+ label{display:block;margin:6px 0 2px;color:#444} input{width:100%;box-sizing:border-box;padding:4px}
+ button{margin:8px 4px 0 0;padding:6px 10px} #status{margin-top:8px;white-space:pre-wrap}
+ textarea{width:100%;height:200px;font:11px monospace;box-sizing:border-box;margin-top:6px}
+ .err{color:#b00}.ok{color:#070}
+</style></head>
+<body>
+ <b>ToolSpy Browser Bridge — Allegro</b>
+ <div style="color:#666;font-size:11px">Chỉ đọc trang listing bạn đang mở, khi bạn bấm nút. Không tự mở trang, không tự chuyển trang.</div>
+ <label>Số sản phẩm tối đa (limit)</label><input id="limit" type="number" min="1" max="200" value="5">
+ <label>API URL</label><input id="api" value="http://127.0.0.1:8000">
+ <label>Token (TOOLSPY_BRIDGE_TOKEN)</label><input id="token" type="password" placeholder="dán token từ D:\ToolSpy\.env">
+ <button id="run">Extract &amp; send</button><button id="extractOnly">Chỉ extract</button><button id="copy">Copy JSON</button>
+ <div id="status"></div>
+ <textarea id="preview" readonly></textarea>
+ <script src="parser.js"></script>
+ <script src="popup.js"></script>
+</body></html>

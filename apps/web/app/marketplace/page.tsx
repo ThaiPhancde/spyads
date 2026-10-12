@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { api, fmt, qs, usePaged } from "@/lib/api";
+import { GlobalImageSearch } from "@/components/visual/global-image-search";
 
 const CACHE_HOURS = 72;  // same keyword + sources within this window → reuse the earlier search, no new crawl / Apify spend
 
@@ -73,7 +74,9 @@ export default function Marketplace() {
 
   return (
     <div>
-      <PageHeader title="Nguồn hàng Trung Quốc" subtitle="AliExpress, 1688, Taobao: giá nhập và số đã bán. Mỗi listing được nối vào cùng sản phẩm với quảng cáo — giá nhập là mốc để tính biên lợi nhuận." />
+      <PageHeader title="Nguồn hàng Trung Quốc" subtitle="AliExpress, 1688, Taobao: giá nhập và số đã bán. Mỗi listing được nối vào cùng sản phẩm với quảng cáo — giá nhập là mốc để tính biên lợi nhuận.">
+        <GlobalImageSearch preset={{ mode: "find_suppliers" }} label="Tìm nguồn hàng bằng ảnh" />
+      </PageHeader>
       <Card className="mb-4">
         <form className="flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); setApplied(q.trim()); }}>
           <div className="relative min-w-[200px] flex-1">

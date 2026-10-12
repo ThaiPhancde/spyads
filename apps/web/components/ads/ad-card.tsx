@@ -5,6 +5,7 @@ import { ArrowRight, Check, ExternalLink, Eye, Heart, Link2, Maximize2, RotateCc
 import { AdDetailSheet, FUNNEL, PLATFORM, TIER, ago, marketsOf } from "@/components/ads/ad-detail-sheet";
 import { CreativeMedia, DownloadButton } from "@/components/media";
 import { Hint, NetworkBadge, usePlatforms } from "@/components/platforms";
+import { PriceTag } from "@/components/pricing/price-tag";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -106,6 +107,7 @@ export function AdCard({ ad }: { ad: any }) {
         {media.length > 1 && <div className="text-[11px] text-muted-foreground">{media.length} ảnh / video trong quảng cáo — vuốt ngang để xem</div>}
       </div>
 
+      {!organic && !(ad.landing_domain || ad.title || ad.cta) && <div className="mx-3 mt-2"><PriceTag subject={`ad:${ad.id}`} fallback={{ price: ad.price, currency: ad.currency }} /></div>}
       {(ad.landing_domain || ad.title || ad.cta) && (
         <div className="mx-3 mt-2 flex items-center justify-between gap-2 rounded-lg bg-muted px-3 py-2">
           <div className="min-w-0">
@@ -113,6 +115,7 @@ export function AdCard({ ad }: { ad: any }) {
               ? <a href={ad.landing_url} target="_blank" rel="noreferrer" title={ad.landing_url} className="flex items-center gap-1 truncate text-[10px] tracking-wide text-link uppercase hover:underline"><Link2 className="size-3 shrink-0" /> {ad.landing_domain}</a>
               : <div className="truncate text-[10px] tracking-wide text-muted-foreground uppercase">{ad.landing_domain}</div>)}
             {ad.title && <div className="truncate text-[13px] font-semibold">{ad.title}</div>}
+            {!organic && <PriceTag subject={`ad:${ad.id}`} fallback={{ price: ad.price, currency: ad.currency }} />}
           </div>
           {ad.cta && (ad.landing_url
             ? <Button variant="outline" size="xs" className="shrink-0" asChild><a href={ad.landing_url} target="_blank" rel="noreferrer">{ad.cta}</a></Button>

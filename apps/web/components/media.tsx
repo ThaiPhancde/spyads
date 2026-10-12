@@ -2,11 +2,12 @@
 import { NetworkStrip, usePlatforms } from "@/components/platforms";
 import Link from "next/link";
 import { useState } from "react";
-import { Clock, Copy, Download, ExternalLink, ImageOff, Link2, Pin, Play, Save } from "lucide-react";
+import { Clock, Copy, Download, ExternalLink, ImageOff, Link2, Pin, Play, RotateCw } from "lucide-react";
 import { toast } from "sonner";
 import { api, fmt, useAction } from "@/lib/api";
 import { getUser } from "@/lib/realtime";
 import { RecBadge } from "@/components/ui";
+import { PriceTag } from "@/components/pricing/price-tag";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -46,17 +47,7 @@ export function CreativeMedia({ c, height = 220, autoPlay = false }: { c: any; h
     return <img src={c.thumb} alt="" loading="lazy" decoding="async" className="w-full rounded-lg bg-muted object-contain" style={{ height }} />;
   }
   if (c.stream_url) return <SourceVideo c={c} height={height} />;  // not in the vault: platform thumbnail, source streamed on Play
-  if (c.status !== "stored" && c.thumb) {  // archived / expired / failed: still show the frame so MKT can tell the product
-    return (
-      <div className="relative overflow-hidden rounded-lg bg-muted" style={{ height }}>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={c.thumb} alt="" loading="lazy" className="h-full w-full object-contain opacity-70" />
-        <div className="absolute inset-x-0 bottom-0 bg-black/65 px-2 py-1.5 text-center text-[11px] text-white">
-          {c.status === "archived" ? "Video không lưu trong kho — chỉ còn ảnh bìa + thông tin" : c.status === "expired" || c.origin_alive === false ? "Link video gốc đã hết hạn — chỉ còn ảnh bìa (thu thập lại ad để lấy link mới)" : "Video chưa tải được — đang hiện ảnh bìa"}
-        </div>
-      </div>
-    );
-  }
+  if (c.status !== "stored" && c.thumb) return <ExpiredCover c={c} height={height} />;  // archived / expired / failed
   if (c.status !== "stored") {
     return (
       <Placeholder height={height} icon={c.status === "pending" ? Clock : ImageOff}>
@@ -72,6 +63,30 @@ export function CreativeMedia({ c, height = 220, autoPlay = false }: { c: any; h
   ) : (
     // eslint-disable-next-line @next/next/no-img-element
     <img src={c.url} alt="" loading="lazy" className="w-full rounded-lg bg-muted object-contain" style={{ height }} />
+  );
+}
+
+/** Still show the frame so MKT can tell the product; a dead TikTok link can be re-fetched by ad id (~10 s) and streamed. */
+function ExpiredCover({ c, height }: { c: any; height: number }) {
+  const [fresh, setFresh] = useState<any>(null);
+  const act = useAction();
+  if (fresh?.stream_url) return <SourceVideo c={fresh} height={height} />;
+  const dead = c.type === "video" && (c.status === "expired" || c.origin_alive === false);
+  const refresh = () => act.run(async () => setFresh(await api(`/creatives/${c.id}/retry`, { method: "POST" })));
+  return (
+    <div className="relative overflow-hidden rounded-lg bg-muted" style={{ height }}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={c.thumb} alt="" loading="lazy" className="h-full w-full object-contain opacity-70" />
+      <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-1 bg-black/65 px-2 py-1.5 text-center text-[11px] text-white">
+        {c.status === "archived" ? "Video không lưu trong kho — chỉ còn ảnh bìa + thông tin" : dead ? "Link video gốc đã hết hạn" : "Video chưa tải được — đang hiện ảnh bìa"}
+        {dead && c.source?.includes("tiktok") && (
+          <Button type="button" size="xs" variant="secondary" disabled={act.busy} onClick={refresh}>
+            <RotateCw className={cn(act.busy && "animate-spin")} /> {act.busy ? "Đang lấy link mới…" : "Lấy link mới"}
+          </Button>
+        )}
+        {act.error && <span className="text-[10px] text-red-300">{act.error}</span>}
+      </div>
+    </div>
   );
 }
 
@@ -101,16 +116,14 @@ export function SourceVideo({ c, height }: { c: any; height: number }) {
   );
 }
 
-/** Not in the vault: open / copy the original link, or ask the server to save this one video. */
+/** Not in the vault (videos never are): open / copy the original link. */
 function SourceActions({ c, small }: { c: any; small?: boolean }) {
   const size = small ? "xs" : "sm";
   const copy = () => navigator.clipboard?.writeText(c.origin_url).then(() => toast.success("Đã copy URL"), () => toast.error("Copy lỗi"));
-  const save = () => api(`/creatives/${c.id}/retry`, { method: "POST" }).then(() => toast("Đang lưu video về kho…"), (e: any) => toast.error(e.message));
   return (
     <span className="inline-flex flex-wrap items-center gap-1">
       {c.origin_alive && <Button asChild variant="outline" size={size}><a href={c.origin_url} target="_blank" rel="noreferrer" title="Mở / tải video gốc từ nền tảng"><ExternalLink /> Video gốc</a></Button>}
       <Button type="button" variant="outline" size={size} onClick={copy} title={c.origin_url}><Copy /> Copy URL</Button>
-      {c.origin_alive && c.type === "video" && <Button type="button" variant="outline" size={size} onClick={save} title="Tải video này về kho (chỉ khi cần)"><Save /> Lưu</Button>}
     </span>
   );
 }
@@ -188,6 +201,7 @@ export function ProductMediaCard({ p, onVoted }: { p: any; onVoted?: () => void 
           <a href={p.landing_url} target="_blank" rel="noreferrer" title={p.landing_url}
              className="inline-flex min-w-0 items-center gap-1 text-[11px] text-link hover:underline"><Link2 className="size-3 shrink-0" /><span className="truncate">{hostOf(p.landing_url)}</span><ExternalLink className="size-3 shrink-0" /></a>
         )}
+        <PriceTag subject={`product:${p.id}`} fallback={{ price: p.price, currency: p.currency }} />
         <NetworkStrip networks={p.networks} byKey={byKey} />
         {(p.listings > 0 || p.organic_views > 0) && (
           <div className="flex flex-wrap gap-x-2 text-[11px] text-ink2">

@@ -1,113 +1,142 @@
-# Market Intelligence OS
+# ToolSpy (Market Intelligence OS)
 
-App nội bộ cho MKT Mess và MKT Ladi: **spy quảng cáo social (Meta, TikTok, Snapchat) để tìm sản phẩm vật lý nhập được từ Trung Quốc**, rồi kiểm chứng giá nhập (AliExpress; 1688/Taobao qua Apify) để quyết định TEST hay SKIP. Không spy Google/Bing, không theo dõi Amazon/Walmart. Hai nhiệm vụ chính:
+App nội bộ cho MKT Mess và MKT Ladi: **spy quảng cáo social (Meta, TikTok, Snapchat) để tìm sản phẩm vật lý nhập được từ Trung Quốc**, rồi kiểm chứng giá nhập (AliExpress, 1688, Taobao) để quyết định có nên test hay không. Thị trường ưu tiên số 1 là **Philippines**.
 
-1. **Tìm sản phẩm.** Tìm theo từ khoá, thị trường và funnel (Mess/Ladi) trong kho dữ liệu, hoặc **tìm trực tiếp trên Meta Ad Library và các nguồn đã kết nối**. Mỗi sản phẩm có video và ảnh quảng cáo thật, **xem và tải về được**.
-2. **Xếp hạng và ra quyết định.** Product Potential Vector (novelty, wave, creative, market fit theo từng thị trường, MKT appeal, compliance…) kết hợp dữ liệu nội bộ (ads, đơn, giao hàng, hoàn, lợi nhuận) để ra các quyết định **TEST NOW / TEST / WATCH / REVIEW / SKIP** (trước khi test, theo tín hiệu thị trường) và **SCALE / HOLD / ITERATE / STOP** (sau khi test, theo dữ liệu nội bộ), cập nhật **realtime**.
+Hai việc chính:
 
-Thiết kế theo (tài liệu gốc, thắng khi mâu thuẫn): [docs/spy_ads_product_sourcing_architecture.md](docs/spy_ads_product_sourcing_architecture.md). Chi tiết: [product_discovery_intelligence_summary.md](docs/product_discovery_intelligence_summary.md), [spy_app_chat_summary.md](docs/spy_app_chat_summary.md) (connector contract), [competitive_ads_analysis_module.md](docs/competitive_ads_analysis_module.md) (Ad Detail), [market_intelligence_app_blueprint.md](docs/market_intelligence_app_blueprint.md).
+1. **Tìm sản phẩm.** Tìm trong kho theo từ khoá, thị trường, funnel (Mess/Ladi), hoặc **quét trực tiếp mọi nguồn** đang bật. Mỗi sản phẩm là một cụm quảng cáo của nhiều đối thủ, kèm creative (ảnh bìa lưu sẵn, video phát từ nguồn và tải về được), giá bán đối thủ và giá nhập.
+2. **Xếp hạng và khuyến nghị.** Công thức xác định (AI không chấm điểm) ra nhãn **TEST_NOW / TEST / WATCH / REVIEW / SKIP**, cập nhật ngay sau mỗi lần thu thập.
 
-**Muốn chạy bằng dữ liệu thật, cần API nào và triển khai thế nào: xem [docs/DATA_SOURCES_AND_DEPLOY.md](docs/DATA_SOURCES_AND_DEPLOY.md).**
+Ngoài phạm vi: quảng cáo Google/Bing, sàn Amazon/Walmart, spy store Shopify, video TikTok organic, dữ liệu nội bộ sau test (đơn, vận đơn, attribution). Dữ liệu của các nguồn này đã được xoá khỏi DB ngày 09/10/2026.
+
+Phân tích nghiệp vụ và thiết kế đầy đủ: **[docs/SYSTEM_ANALYSIS.md](docs/SYSTEM_ANALYSIS.md)**. Nguồn dữ liệu và triển khai: [docs/DATA_SOURCES_AND_DEPLOY.md](docs/DATA_SOURCES_AND_DEPLOY.md).
 
 ## Chạy local
 
 ```powershell
-./start.ps1      # tạo venv, cài deps, chạy API :8000 và Web :3000
+./start.ps1      # nạp .env, tạo venv, cài deps, chạy API :8000 và Web :3000
 ```
-Mở http://localhost:3000/search, gõ từ khoá rồi bấm **⚡ Tìm trực tiếp trên nguồn**. Kết quả là dữ liệu thật từ Meta Ad Library, không cần key. Video được tải về `apps/api/data/creatives/`.
 
-App chỉ dùng dữ liệu thật: bộ sinh dữ liệu demo (`seed.py`, `/api/admin/demo-data`) đã bị gỡ.
+Mở http://localhost:3000/search, gõ từ khoá (nhiều từ khoá: `a | b`), chọn nước rồi bấm **⚡ Tìm trực tiếp trên nguồn**. Meta Ad Library không cần key. Nguồn trả phí (Apify) chỉ chạy khi tích **"Dùng nguồn trả phí"**.
 
-## Kiến trúc (Unified Spy Collector)
+`.env` tối thiểu: `ADMIN_TOKEN`, `INGEST_TOKEN`. Danh sách đầy đủ biến môi trường: [SYSTEM_ANALYSIS.md §11.2](docs/SYSTEM_ANALYSIS.md#112-biến-môi-trường-chính).
+
+## Kiến trúc
 
 ```text
-Meta Ad Library · TikTok Ad Library / API · Snapchat · Apify · Pipiads/Minea (API / export) · Chrome extension · Pancake · Carrier
-                                + nguồn hàng TQ (AliExpress) · store Shopify đối thủ
+Meta Ad Library · TikTok Creative Center / Ad Library · Snapchat (EU) · AliExpress · 1688 (AK) · Apify · export Pipiads/Minea · Chrome extension
         │ connectors (apps/api/app/collector) — chỉ authenticate · fetch · extract · map
         ▼
- Common Data Contract (collector/contract.py) → POST /api/ingest/*
-        ▼
- raw storage (raw/<source>/<ngày>) → normalize → dedup + provenance (ad_sources) → product cluster
-        ▼                                           ▼
- Creative Vault (media.py: tải ngay · sha256 · thumbnail · dHash family)   analytics (scoring, discovery, decision)
-        ▼
- Postgres/SQLite  +  R2/local  →  API  →  Next.js (SSE realtime)
+ AdRecord (collector/contract.py) → ingest.py: raw batch → dedup + provenance → gom cụm sản phẩm → funnel / giá / hook
+        ▼                                            ▼
+ media.py: ảnh bìa ≤480px (video phát từ nguồn)      services/: features → scores → potential vector → quyết định
+        ▼                                            ▼
+ Postgres (SQLite cho 1 người)  +  local / Cloudflare R2  →  FastAPI  →  Next.js (SSE realtime)
 ```
 
 | Thành phần | File |
 |---|---|
-| BaseConnector, rate limit, retry, Retry-After | [collector/base.py](apps/api/app/collector/base.py) |
-| Meta Ad Library (public), Meta API (chính thức), Apify Meta, Meta Ads insights | [collector/adapters/meta.py](apps/api/app/collector/adapters/meta.py) |
-| Export folder (Pipiads/Minea), Generic REST, Apify actor, TikTok Commercial API | [collector/adapters/generic.py](apps/api/app/collector/adapters/generic.py) |
-| TikTok / Snapchat Ad Library · TikTok trending · Shopify store · AliExpress (nguồn hàng TQ) | [ad_libraries.py](apps/api/app/collector/adapters/ad_libraries.py), [free.py](apps/api/app/collector/adapters/free.py), [marketplaces.py](apps/api/app/collector/adapters/marketplaces.py) |
-| ConnectorFactory · registry network/channel | [collector/factory.py](apps/api/app/collector/factory.py), [platforms.py](apps/api/app/platforms.py) |
-| Ingest: raw, dedup giữa các nguồn, provenance, đặt tên sản phẩm, funnel Mess/Ladi | [ingest.py](apps/api/app/ingest.py) |
-| Creative Vault | [media.py](apps/api/app/media.py), [storage.py](apps/api/app/storage.py) (local / Cloudflare R2) |
-| Realtime: scheduler theo tier, live search, webhook, chuẩn hoá trạng thái hãng vận chuyển, alert incremental | [realtime.py](apps/api/app/realtime.py), [events.py](apps/api/app/events.py) |
-| Product Potential Vector, Taste Model, Market DNA, compliance | [services/discovery.py](apps/api/app/services/discovery.py) |
-| API: tìm kiếm, vault, vote, discovery, attribution, collector admin, SSE | [routers/intel.py](apps/api/app/routers/intel.py) |
-| Market Win/Saturation/Rarity, lifecycle (từ blueprint đầu) | `services/scoring.py`, `decision.py`, `engine.py` |
+| BaseConnector, rate limit, retry | [collector/base.py](apps/api/app/collector/base.py), [factory.py](apps/api/app/collector/factory.py) |
+| Meta (public, Graph API EU, Apify) | [adapters/meta.py](apps/api/app/collector/adapters/meta.py) |
+| TikTok Creative Center (headless / headers), TikTok Ad Library, Snapchat | [adapters/ad_libraries.py](apps/api/app/collector/adapters/ad_libraries.py) |
+| AliExpress · 1688 (AK, fallback Apify) · Apify 1688/Taobao/TikTok | [marketplaces.py](apps/api/app/collector/adapters/marketplaces.py), [ali1688.py](apps/api/app/collector/adapters/ali1688.py), [apify.py](apps/api/app/collector/adapters/apify.py) |
+| Export folder, Generic REST, TikTok Commercial API | [adapters/generic.py](apps/api/app/collector/adapters/generic.py) |
+| Network / channel registry | [platforms.py](apps/api/app/platforms.py) |
+| Ingest: dedup, funnel Mess/Ladi, tên sản phẩm, giá trong ad | [ingest.py](apps/api/app/ingest.py) |
+| Gom cụm sản phẩm | [services/entity_resolution.py](apps/api/app/services/entity_resolution.py) |
+| Giá landing page + review đối thủ | [services/spy.py](apps/api/app/services/spy.py) |
+| Chấm điểm và phân hạng | [services/discovery.py](apps/api/app/services/discovery.py), [scoring.py](apps/api/app/services/scoring.py), [engine.py](apps/api/app/services/engine.py), [hidden.py](apps/api/app/services/hidden.py) |
+| Scheduler, live search, liveness | [realtime.py](apps/api/app/realtime.py), [events.py](apps/api/app/events.py) |
+| Creative Vault, dọn kho | [media.py](apps/api/app/media.py), [retention.py](apps/api/app/retention.py), [storage.py](apps/api/app/storage.py) |
+| API | [main.py](apps/api/app/main.py), [routers/intel.py](apps/api/app/routers/intel.py) |
+
+## Phân hạng (ranking v2, 09/10/2026)
+
+Mỗi sản phẩm có hai trục chính, tính từ quảng cáo **đang chạy** (không tính listing nguồn hàng):
+
+- **Demand (đã được thị trường xác nhận)**: ad mạnh nhất đã chạy bao lâu (35%), đối thủ có đang nhân bản không: số ads / biến thể / ad mạnh (30%), số người bán: 1 = chưa xác nhận, 2–10 = tốt, >15 = đông (20%), số thị trường (15%).
+- **Momentum (đang tăng tuần này)**: ads mới và người bán mới trong 7 ngày.
+
+Quyết định đi theo thứ tự, dừng ở điều kiện đầu tiên khớp:
+
+| Điều kiện | Nhãn |
+|---|---|
+| Không còn ad nào đang chạy (chỉ có listing nguồn hàng hoặc ad đã dừng) | SKIP |
+| App / dịch vụ / form đăng ký (≥50% ads), hoặc không phải hàng vật lý | SKIP |
+| Rủi ro compliance ≥ 60 (hàng nhái, claim y tế…) | REVIEW |
+| >15 người bán, hoặc saturation ≥ 70 | SKIP |
+| Chưa xác định được tên sản phẩm (tên là câu CTA) và có tín hiệu | WATCH |
+| Demand ≥ 50, momentum ≥ 40, ad chạy ≥ 14 ngày, hợp thị trường | **TEST_NOW** |
+| Momentum ≥ 40 (đang tăng nhưng chưa xác nhận) | TEST (ngân sách nhỏ) |
+| Demand ≥ 55 và (≥2 người bán hoặc ≥2 biến thể) | TEST |
+| Demand ≥ 45 hoặc momentum ≥ 20 | WATCH |
+| Còn lại | SKIP (tín hiệu yếu) |
+
+Sắp xếp mọi danh sách theo **opportunity** = 42% demand + momentum, phần còn lại là market fit, vote của team, novelty, creative, biên lợi nhuận, trừ điểm bão hoà và compliance, cộng 15 điểm nếu chạy ở Philippines. Lý do khuyến nghị ghi rõ số ads, số người bán và số ngày chạy. Self-check: `cd apps/api && .venv\Scripts\python test_scoring_rules.py`.
+
+Hidden Winners là danh sách riêng: ≤5 người bán nhưng có ad mạnh (chạy lâu, nhiều biến thể, nhiều placement).
 
 ## Màn hình
 
-- **Tìm & khám phá:** Tìm sản phẩm · Product Radar (bảng theo thị trường + khung thời gian: xu hướng, ads, sellers, tuổi, điểm, ad mạnh nhất, biến thể scale) (tải thêm từ nguồn, cuộn vô hạn) · Thư viện quảng cáo (từng quảng cáo kiểu Meta Ad Library: carousel, CTA, tải video) · Product Discovery (Opportunity Radar + 13 tab: Breakout, Experimental, High Wave, Creative Goldmine, MKT Favorites, Hợp MKT Mess/Ladi…) · Creative Vault · Hidden Winners
+- **Khám phá sản phẩm:** Tìm sản phẩm · Product Radar · Product Discovery (Opportunity Radar demand × momentum + các tab) · Hidden Winners
+- **Nguồn dữ liệu:** Thư viện quảng cáo · Nguồn hàng & Store · Creative Vault
 - **Thị trường:** Daily Pulse · Market Radar · Xếp hạng sản phẩm · Competitor Radar
-- **Hệ thống:** Alerts · AI Agent · Data & Connectors (health, cấu hình, tracked queries, upload export, hướng dẫn ingest)
-
-Nguyên tắc: điểm số luôn do công thức tính từ database. AI (Claude, tuỳ chọn) chỉ trích xuất dữ liệu và giải thích.
+- **Hệ thống:** Alerts · AI Agent · Data & Connectors (health, cấu hình, tracked queries, upload export, dung lượng)
 
 ## Thị trường
 
-Mặc định app tổng hợp **Trung Đông (SA, AE, KW, QA, OM, BH, JO, EG, IQ) · Mỹ · Châu Âu + UK · Úc / NZ · Việt Nam · Toàn cầu** — cấu hình bằng `TARGET_MARKETS` trong `.env`.
-Quảng cáo ở nước khác (Đông Nam Á…) vẫn được lưu nhưng **không bao giờ lẫn vào số liệu "tất cả"** (radar, xếp hạng, tìm kiếm); muốn xem thì gõ mã nước ở ô "Nước khác".
+`TARGET_MARKETS` (mặc định): Philippines · Trung Đông (SA, AE, KW, QA, OM, BH, JO, EG, IQ) · Mỹ · EU + UK · Úc / NZ · Việt Nam. Quảng cáo ở nước khác vẫn được lưu nhưng không lẫn vào số liệu "tất cả"; muốn xem thì chọn nước đó. `PRIORITY_MARKETS=PH` và `PRIORITY_BOOST=15` đẩy sản phẩm chạy ở Philippines lên đầu.
 
-## Realtime
+## Chạy tự động (tiến trình `python -m app.worker`, tick 30 giây)
 
 | Việc | Chu kỳ |
 |---|---|
-| Quét từ khoá theo dõi (`python -m app.bootstrap_markets --no-run` tạo bộ từ khoá cho từng thị trường) | 60–180 phút / từ khoá |
-| Xác minh quảng cáo còn chạy (hỏi lại Meta danh sách ads đang chạy của từng advertiser; 2 lần liên tiếp không thấy mới đánh dấu "đã dừng") | 20 phút |
-| Market Radar, Product Radar | tính trực tiếp mỗi lần mở trang + tự làm mới khi có dữ liệu mới |
-| Chấm lại điểm toàn bộ + snapshot lịch sử | 6 giờ |
-| Xoá lứa video cũ, bắt đầu lứa mới (giữ ảnh bìa + thông tin) | 0h mỗi ngày (+ dọn ảnh/raw mỗi 6 giờ) |
+| Tracked queries (`python -m app.bootstrap_markets --no-run` tạo bộ từ khoá theo thị trường) | theo từng query (PH 30 phút) |
+| Connector có lịch (TikTok Creative Center headless 12 giờ, export folder khi có file mới) | theo cấu hình |
+| Lấy ảnh bìa creative | 2 phút |
+| Alerts | 15 phút |
+| Quét giá landing page + review đối thủ | 10 phút (`SPY_EVERY_MIN`) |
+| Xác minh ads còn chạy (2 lần liên tiếp không thấy mới đánh dấu "đã dừng") | 20 phút |
+| Chấm lại toàn bộ + snapshot ngày | 6 giờ |
+| Dọn kho (video theo lứa ngày, ảnh 30 ngày, raw 90 ngày) | 6 giờ + ngay sau 0h giờ VN |
 
-## Video: Video on Demand (HLS) + CDN
+Chạy **1 API + 1 worker** (`start.ps1` mở cả hai khi `DISABLE_SCHEDULER=1`). Database: Postgres (`DATABASE_URL`); nhiều người bấm Tìm cùng lúc được.
 
-Mỗi video quảng cáo được chuyển thành **HLS nhiều độ phân giải** (360p + 540p, đoạn 4 giây, mỗi độ phân giải là 1 file fMP4 đọc theo byte-range) rồi lưu lên R2; bản gốc bị xoá.
-- Trình duyệt chỉ tải khi bấm Play, rồi tải dần từng đoạn để xem (giữ khoảng 12 giây phía trước). Mạng nhanh thì đoạn sau dùng 540p, mạng yếu tự hạ xuống 360p (hls.js; Safari dùng HLS gốc).
-- "Tải video" trả về file 540p (MP4 xem được bình thường).
-- **Video theo lứa mỗi ngày:** mỗi ngày lưu tối đa `VIDEO_DAILY_QUOTA` (3000) video, chỉ quảng cáo **đang chạy ở thị trường mục tiêu**, quảng cáo mạnh nhất (chạy lâu, nhiều biến thể, nhiều vị trí) được tải trước. Hết hạn mức thì video còn lại chờ sang ngày sau (chờ quá 2 ngày thì bỏ, vì link gốc đã hết hạn).
-- **0h mỗi ngày** (giờ UTC+`DAY_TZ_OFFSET`, mặc định giờ VN) xoá video cũ hơn `VIDEO_KEEP_DAYS` (1 = chỉ giữ lứa hôm nay) khỏi R2, giữ ảnh bìa + thông tin, rồi bắt đầu tải lứa mới. **Không xoá:** video đã ghim 📌, sản phẩm đã vote LOVE/TEST/WATCH, quảng cáo lưu bằng extension.
-- `R2_MAX_GB` (mặc định **20**) là trần cứng: chạm trần thì ngừng nhận media mới (≈ 2500 video/ngày). Cloudflare tính tiền theo trung bình dung lượng đỉnh mỗi ngày, 10 GB đầu miễn phí → chạy R2 ở trần 20 GB tốn ≈ 0,15 USD/tháng; để demo thì dùng `STORAGE_BACKEND=local` (0 đồng).
-- Phân phối: `R2_PUBLIC_URL` = link r2.dev (bị giới hạn tốc độ, dùng để thử). Production: gắn **custom domain** vào bucket trong Cloudflare → file được cache ở CDN gần người xem; đổi `R2_PUBLIC_URL` sang domain đó.
-- Chuyển kho cũ: `python -m app.vod_migrate --plan`, `--transcode`, `--upload`.
+## Creative: ảnh bìa lưu sẵn, video phát từ nguồn
 
-## Đẩy dữ liệu lên Cloudflare R2
+Link video của Meta/TikTok có chữ ký và hết hạn sau vài giờ, nên mỗi creative được lưu ngay **một ảnh bìa JPEG ≤480px**. Bấm Play thì phát thẳng từ nguồn. Muốn giữ file: bấm tải/lưu trên creative (tải theo yêu cầu), hoặc đặt `VIDEO_DOWNLOAD=1` để tải mọi video (theo hạn mức `VIDEO_DAILY_QUOTA`). Không bao giờ tự xoá: creative đã ghim 📌, sản phẩm đã vote LOVE/TEST/WATCH, ads lưu bằng extension.
 
-1. Trong Cloudflare Dashboard → **R2 Object Storage** → bật R2 cho tài khoản (bắt buộc; hiện API trả "Please enable R2").
-2. `.env` ở thư mục gốc đã có `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `CLOUDFLARE_API_TOKEN` (file này không được đưa lên git).
-3. `cd apps/api` rồi `.venv\Scripts\python -m app.r2_sync --setup` — kiểm tra token, tạo bucket, ghi/đọc thử.
-4. `.venv\Scripts\python -m app.r2_sync --upload` — đẩy video/ảnh/raw đang có lên R2 (chạy lại được, bỏ qua file đã có).
-5. Đổi `STORAGE_BACKEND=local` → `STORAGE_BACKEND=r2` trong `.env`, khởi động lại app. Từ đó media mới ghi thẳng lên R2.
+Lưu trữ: `STORAGE_BACKEND=local` (mặc định, `apps/api/data/`) hoặc `r2`. Với R2, `R2_MAX_GB` (20) là trần cứng, chia ngăn theo `STORAGE_SHARES=meta:45,tiktok:30,ads_other:10,commerce:15`.
+
+Đẩy lên Cloudflare R2:
+1. Cloudflare Dashboard → R2 Object Storage → bật R2.
+2. Điền `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (và `R2_PUBLIC_URL` nếu có custom domain) vào `.env`.
+3. `cd apps/api` → `.venv\Scripts\python -m app.r2_sync --setup` (kiểm tra token, tạo bucket) → `--upload` (đẩy file đang có).
+4. Đổi `STORAGE_BACKEND=r2`, khởi động lại.
 
 ## Thêm dữ liệu khi không có API
 
-1. **Meta Ad Library:** không cần API, bấm "Tìm trực tiếp trên nguồn" (chọn 50–1000 quảng cáo, "Tải thêm" để lấy tiếp từ chỗ dừng).
-2. **Chrome extension** ([apps/extension](apps/extension)): `chrome://extensions` → bật Developer mode → Load unpacked → chọn thư mục `apps/extension`. Mở biểu tượng extension, điền địa chỉ app (vd `http://localhost:8000`), token và tên. Vào facebook.com/ads/library, tìm và cuộn: quảng cáo hiện ra tự được lưu (góc phải dưới có bộ đếm). Trên trang sản phẩm bất kỳ: bấm "Lưu trang này vào kho".
-3. **File export** (Pipiads, Minea…): upload trong Data & Connectors.
-
-## Gỡ dữ liệu của nguồn đã bỏ (Google, Bing, Amazon, Walmart, Shopify)
-
-`cd apps/api` rồi `.venv\Scripts\python -m app.purge_removed` (chỉ đếm, không đổi gì) → kiểm tra số liệu → thêm `--apply` để xoá thật: ads, creative + file media (local / R2), connector, raw, sản phẩm không còn ad nào (giữ sản phẩm có vote / đơn / test). Chạy một lần ở máy local và một lần với `DATABASE_URL` + biến `R2_*` của server.
+1. **Meta Ad Library:** bấm "Tìm trực tiếp trên nguồn", "Tải thêm" để lấy tiếp từ chỗ dừng.
+2. **Chrome extension** ([apps/extension](apps/extension)): `chrome://extensions` → Developer mode → Load unpacked → chọn `apps/extension`. Điền địa chỉ API, `INGEST_TOKEN` và tên. Duyệt facebook.com/ads/library: quảng cáo hiện ra tự được lưu. Trên trang sản phẩm bất kỳ: "Lưu trang này vào kho".
+3. **File export** (Pipiads, Minea): upload trong Data & Connectors, hoặc thả vào `apps/api/data/import/<nguồn>/`.
 
 ## Deploy
 
-Không gắn với nhà cung cấp nào. Có `Dockerfile` trong `apps/api` (kèm ffmpeg) và `apps/web`, chạy được trên VPS, Docker host hay PaaS bất kỳ. Biến môi trường: [.env.example](.env.example). Các bước: [docs/DATA_SOURCES_AND_DEPLOY.md](docs/DATA_SOURCES_AND_DEPLOY.md#4-triển-khai-ở-nơi-khác).
+Hai Dockerfile: `apps/api` (kèm ffmpeg) và `apps/web`. Web proxy `/api/*` sang `API_URL`. Postgres qua `DATABASE_URL`. Connector TikTok Creative Center headless cần Edge/Chrome cài trên máy chạy API (image mặc định không có). Chi tiết: [docs/DATA_SOURCES_AND_DEPLOY.md](docs/DATA_SOURCES_AND_DEPLOY.md#4-triển-khai-ở-nơi-khác).
 
-## Bảo mật (từ 07/10/2026)
+## Bảo mật
 
-- Mọi request ghi (POST/PATCH/DELETE) vào API cần header `X-Admin-Token` = `ADMIN_TOKEN` trong `.env`; web (`apps/web/middleware.js`) tự gắn header khi proxy `/api/*`, nên chỉ cần đặt cùng `ADMIN_TOKEN` cho cả API và web. Thiếu `ADMIN_TOKEN` → API trả 503 cho mọi request ghi.
-- Ingest/webhook dùng `INGEST_TOKEN` (header `X-Ingest-Token`), bắt buộc.
-- CORS chỉ cho `WEB_ORIGIN` (mặc định `http://localhost:3000`).
-- Nguồn trả phí (Apify) chỉ chạy khi bật "Dùng nguồn trả phí" trên trang tìm kiếm.
-- Audit + nhật ký sửa: [docs/AUDIT_2026-10-07.md](docs/AUDIT_2026-10-07.md).
+- Mọi request ghi (POST/PATCH/DELETE) cần `X-Admin-Token` = `ADMIN_TOKEN`; web (`apps/web/middleware.js`) tự gắn phía server. Thiếu `ADMIN_TOKEN` → API trả 503 cho mọi request ghi.
+- Ingest (`/api/ingest/*`, extension) dùng `INGEST_TOKEN` (header `X-Ingest-Token`), bắt buộc.
+- CORS chỉ cho `WEB_ORIGIN`. Web có Basic Auth tuỳ chọn (`BASIC_AUTH_USER` / `BASIC_AUTH_PASS`).
+- Token Apify bị che khỏi mọi thông báo lỗi; nguồn trả phí chỉ chạy khi bật tay.
+- Audit và nhật ký sửa: [docs/AUDIT_2026-10-07.md](docs/AUDIT_2026-10-07.md).
+
+## Tiện ích vận hành
+
+| Lệnh (`cd apps/api`) | Việc |
+|---|---|
+| `.venv\Scripts\python -m app.bootstrap_markets --no-run` | Tạo tracked queries theo thị trường |
+| `.venv\Scripts\python -m app.purge_removed` (`--apply`) | Xoá dữ liệu của nguồn đã bỏ (đã chạy 09/10/2026; chạy lại với `DATABASE_URL` của server nếu server có DB riêng) |
+| `.venv\Scripts\python -m app.r2_sync --setup / --upload` | Cloudflare R2 |
+| `POST /api/pipeline/run` | Chạy lại toàn bộ pipeline chấm điểm |

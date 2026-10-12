@@ -3,11 +3,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ScanSearch } from "lucide-react";
-import { NAV, isActive } from "@/components/layout/nav";
+import { NAV, isActive, isSubActive } from "@/components/layout/nav";
 import { NavUser } from "@/components/layout/nav-user";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu,
-  SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, useSidebar,
+  SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, useSidebar,
 } from "@/components/ui/sidebar";
 import { api } from "@/lib/api";
 import { useEvents } from "@/lib/realtime";
@@ -53,6 +53,20 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
                         <span>{it.label}</span>
                       </Link>
                     </SidebarMenuButton>
+                    {it.children && (
+                      <SidebarMenuSub>
+                        {it.children.map((c) => (
+                          <SidebarMenuSubItem key={c.href}>
+                            <SidebarMenuSubButton asChild size="sm" isActive={isSubActive(c.href, it.href, path)}>
+                              <Link href={c.href}>
+                                <c.icon />
+                                <span>{c.label}</span>
+                              </Link>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                        ))}
+                      </SidebarMenuSub>
+                    )}
                     {it.href === "/alerts" && unread > 0 && (
                       <SidebarMenuBadge className="bg-critical text-white">{unread > 99 ? "99+" : unread}</SidebarMenuBadge>
                     )}

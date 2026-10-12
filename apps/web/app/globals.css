@@ -181,7 +181,7 @@
   }
 }
 
-/* Legacy helpers still used by the internal (Company Fit) pages: test-lab, logistics, attribution, comments, learning.
+/* Legacy helpers still used by search, ads, alerts, data, agent, competitors, markets, radar.
    Delete once those pages are migrated to components/ui. */
 @layer components {
   .card { @apply bg-card text-card-foreground rounded-xl border; }

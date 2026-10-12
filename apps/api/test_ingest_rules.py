@@ -62,9 +62,12 @@ cases = {
     "Only ₱189 today": (189.0, "PHP"), "PHP 189 COD": (189.0, "PHP"), "P189 free shipping": (189.0, "PHP"),
     "now 199 SAR": (199.0, "SAR"), "SAR 199 only": (199.0, "SAR"), "199 ر.س": (199.0, "SAR"),
     "AED 99 delivery": (99.0, "AED"), "1,299.00 AED": (1299.0, "AED"),
-    "just $19.99": (19.99, "USD"), "€29 shipped": (29.0, "EUR"), "chỉ 199.000đ": (199000.0, "VND"), "giá 199k": (199000.0, None),
+    "just $19.99": (19.99, "USD"), "€29 shipped": (29.0, "EUR"), "chỉ 199.000đ": (199000.0, "VND"), "giá 199k": (199000.0, "VND"), "4K video": None, "99k followers": None,
 }
 for text, want in cases.items():
+    if want is None:
+        assert parse_price(text) is None, text
+        continue
     assert parse_price(text) == want, (text, parse_price(text))
 for text in ("iPhone 15 Pro", "P2P lending", "no price here", "call 0917 123 4567", ""):
     assert parse_price(text) is None, (text, parse_price(text))

@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.orm import Session
 
 from .models import Ad, Creative, Event, Vote
@@ -90,7 +90,7 @@ def stored_files(db: Session, fresh: bool = False) -> list:
     one = (select(Creative.storage_key, func.min(Creative.network).label("network"), func.min(Creative.source_platform).label("source_platform"),
                   func.min(Creative.source).label("source"), func.min(Creative.type).label("type"),
                   func.max(func.coalesce(Creative.stored_bytes, Creative.size_bytes, 0)).label("bytes"),
-                  func.sum(func.coalesce(Creative.pinned, 0)).label("pinned"))
+                  func.sum(case((Creative.pinned.is_(True), 1), else_=0)).label("pinned"))
            .where(Creative.status == "stored", Creative.storage_key.is_not(None)).group_by(Creative.storage_key).subquery())
     rows = db.execute(select(one.c.network, one.c.source_platform, one.c.source, one.c.type, func.count().label("files"),
                              func.sum(one.c.bytes).label("bytes"), func.sum(one.c.pinned).label("pinned"))

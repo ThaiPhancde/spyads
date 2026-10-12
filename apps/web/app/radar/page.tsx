@@ -14,9 +14,9 @@ import { useEvents, useTeam } from "@/lib/realtime";
 const TAB_ORDER = ["breakout", "experimental", "new", "hidden", "wave", "novelty", "creative", "mess", "ladi", "favorites", "scaling", "saved", "risk"];
 // Quadrants: 3 validated categorical slots + neutral gray for "low signal" (≤3 coloured series on a scatter).
 const QUAD: [string, string, string][] = [
-  ["BREAKOUT", "🚀 Breakout (wave cao + đã được xác nhận)", "var(--series-1)"],
-  ["EXPERIMENTAL", "💎 Experimental (wave cao, chưa xác nhận)", "var(--series-2)"],
-  ["STABLE_WINNER", "🏛 Stable winner (xác nhận, ít sóng mới)", "var(--series-3)"],
+  ["BREAKOUT", "🚀 Breakout (đang tăng + đã được xác nhận)", "var(--series-1)"],
+  ["EXPERIMENTAL", "💎 Experimental (đang tăng, chưa xác nhận)", "var(--series-2)"],
+  ["STABLE_WINNER", "🏛 Stable winner (xác nhận, tuần này không tăng)", "var(--series-3)"],
   ["LOW_SIGNAL", "Low signal", "var(--axis)"],
 ];
 const tick = { fill: "var(--muted-foreground)", fontSize: 11 };
@@ -32,8 +32,8 @@ function RadarChart({ country, funnel }: { country: string; funnel: string }) {
           <CartesianGrid stroke="var(--border)" />
           <XAxis type="number" dataKey="x" domain={[0, 100]} name="Market validation" tick={tick} stroke="var(--axis)"
                  label={{ value: "Market validation (demand) →", position: "insideBottom", offset: -12, ...tick }} />
-          <YAxis type="number" dataKey="y" domain={[0, 100]} name="Wave potential" tick={tick} stroke="var(--axis)" width={40}
-                 label={{ value: "Wave ↑", angle: -90, position: "insideLeft", ...tick }} />
+          <YAxis type="number" dataKey="y" domain={[0, 100]} name="Momentum" tick={tick} stroke="var(--axis)" width={40}
+                 label={{ value: "Momentum (7 ngày) ↑", angle: -90, position: "insideLeft", ...tick }} />
           <ZAxis type="number" dataKey="opportunity" range={[40, 260]} name="Opportunity" />
           <ReferenceLine x={50} stroke="var(--axis)" strokeDasharray="4 4" />
           <ReferenceLine y={55} stroke="var(--axis)" strokeDasharray="4 4" />
@@ -44,7 +44,7 @@ function RadarChart({ country, funnel }: { country: string; funnel: string }) {
                      return (
                        <div className="rounded-lg border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md">
                          <div className="font-semibold">{p.name}</div>
-                         <div className="tnum">Demand {p.x} · Wave {p.y} · Opportunity {p.opportunity}</div>
+                         <div className="tnum">Demand {p.x} · Momentum {p.y} · Opportunity {p.opportunity}</div>
                          <div className="text-muted-foreground">{p.quadrant} · {p.decision}</div>
                        </div>
                      );
@@ -80,7 +80,7 @@ export default function Discovery() {
         <Button asChild><Link href="/search"><Search />Tìm sản phẩm mới</Link></Button>
       </PageHeader>
       <MarketPicker value={country} onChange={setCountry} />
-      <Card title="Opportunity Radar — wave × market validation"><RadarChart country={country} funnel={team} /></Card>
+      <Card title="Opportunity Radar — momentum × market validation"><RadarChart country={country} funnel={team} /></Card>
       <ToggleGroup type="single" variant="outline" size="sm" spacing={1.5} value={tab} onValueChange={(v) => v && setTab(v)} className="flex-wrap justify-start">
         {TAB_ORDER.map((t) => (
           <ToggleGroupItem key={t} value={t} className="text-xs data-[state=on]:bg-primary data-[state=on]:text-primary-foreground">

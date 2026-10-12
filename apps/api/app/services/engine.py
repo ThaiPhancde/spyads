@@ -68,7 +68,7 @@ class ScoreContext:
 
 def score_product(db: Session, product: Product, data: ProductData, ctx: ScoreContext) -> dict:
     from ..models import Creative, Vote
-    from .discovery import discovery_decision, potential_vector
+    from .discovery import potential_vector
 
     prev_rec = product.recommendation
     f = compute_features(data)
@@ -106,7 +106,10 @@ def score_product(db: Session, product: Product, data: ProductData, ctx: ScoreCo
     stored = [c for c in creatives if c.status == "stored"]
     if stored:
         product.cover_creative_id = sorted(stored, key=lambda c: (c.type != "video", c.id))[0].id
-    action, reasons = discovery_decision(v, pv["quadrant"])
+    # one ranking number everywhere (lists, radar, search, media order): the vector's opportunity, which carries the
+    # market evidence; the scoring.py blend stays in features._scores / snapshots for history
+    product.opportunity_score = v["opportunity"]
+    action, reasons = pv["decision"]
     product.recommendation, product.recommendation_reasons = action, reasons
     product.scored_at = datetime.utcnow()
     auto_lifecycle(db, product)

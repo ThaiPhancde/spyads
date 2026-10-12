@@ -90,14 +90,20 @@ assert media.source_alive(f"https://v16m.tiktokcdn.com/abc/?x-expires={int(time.
 _sig = "678f66ed36e1039817667ee65ebf7b6e"  # tiktokcdn video: expiry is the hex path segment after the signature
 assert media.source_alive(f"https://v16m-default.tiktokcdn.com/{_sig}/{int(time.time()) - 10:x}/video/tos/a/?a=0") is False
 assert media.source_alive(f"https://v16m-default.tiktokcdn.com/{_sig}/{int(time.time()) + 7200:x}/video/tos/a/?a=0") is True
-assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) - 10}/video/aHR0") is False
+# TikTok Ad Library proxy: the number is the issue time, the expiry is the inner (base64) tiktokcdn link's
+import base64 as _b64
+_lib = lambda exp: f"https://library.tiktok.com/api/v1/cdn/{int(time.time())}/video/" + _b64.urlsafe_b64encode(
+    f"https://v77.tiktokcdn.com/{_sig}/{exp:x}/video/tos/a/".encode()).decode().rstrip("=") + "?signature=x"
+assert media.source_alive(_lib(int(time.time()) + 7200)) is True
+assert media.source_alive(_lib(int(time.time()) - 10)) is False
+assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) - 7 * 3600}/video/aHR0") is False
 assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) + 7200}/video/aHR0") is True
 assert media.source_alive("https://ae01.alicdn.com/kf/S1.jpg") is True  # no expiry → playable
 assert media.source_alive(None) is False
-_sig = "678f66ed36e1039817667ee65ebf7b6e"  # TikTok expiry in the path: tiktokcdn hex, Ad Library decimal
+_sig = "678f66ed36e1039817667ee65ebf7b6e"  # TikTok expiry in the path: tiktokcdn hex; Ad Library = issue time + ~6 h
 assert media.source_alive(f"https://v16m-default.tiktokcdn.com/{_sig}/{int(time.time()) - 10:x}/video/tos/alisg/x/?a=0") is False
 assert media.source_alive(f"https://v16m-default.tiktokcdn.com/{_sig}/{int(time.time()) + 7200:x}/video/tos/alisg/x/?a=0") is True
-assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) - 10}/video/aHR0cHM6Ly9") is False
+assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) - 7 * 3600}/video/aHR0cHM6Ly9") is False
 assert media.source_alive(f"https://library.tiktok.com/api/v1/cdn/{int(time.time()) + 7200}/video/aHR0cHM6Ly9") is True
 
 a = "https://scontent.xx.fbcdn.net/v/t42.1790-2/123_n.mp4?_nc_cat=1&oe=66AA"

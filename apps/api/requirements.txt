@@ -11,3 +11,5 @@ Pillow>=10.0                # thumbnails + perceptual hash
 openpyxl>=3.1               # XLSX exports from Pipiads / Minea
 psycopg[binary]>=3.2        # PostgreSQL
 playwright>=1.45            # tiktok_top_ads_headless (drives the installed Edge/Chrome; no browser download)
+ImageHash>=4.3               # pHash / dHash for image search (docs/IMAGE_SEARCH.md)
+numpy>=1.26                  # hash / embedding index in RAM

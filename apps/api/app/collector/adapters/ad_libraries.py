@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from typing import Iterator
 
+from ...storage import DATA_DIR
 from ..base import BaseConnector, ConnectorError, FetchParams, NotConfigured, RateLimit
 from ..contract import AdRecord, MediaItem
 from .free import _CffiConnector, _csv, _iso
@@ -194,8 +196,8 @@ class TikTokAdLibraryConnector(_CffiConnector):
 class TikTokTopAdsConnector(_CffiConnector):
     """TikTok Creative Center · Top Ads — the best-performing in-feed ads per country (US, EU, SA, AE …), MP4 + likes/CTR.
 
-    Runs on the request headers of the user's own logged-in free Creative Center session (pasted from DevTools);
-    the app never generates TikTok signatures itself. /top_ads/v2/list serves ≤ 25 pages × 20 per country / period (500 ads); /top_ads/v2/detail adds landing page,
+    Runs on the request headers of the user's own logged-in free Creative Center session — harvested automatically
+    (auto_cc_headers) or pasted from DevTools; the app never generates TikTok signatures itself. /top_ads/v2/list serves ≤ 25 pages × 20 per country / period (500 ads); /top_ads/v2/detail adds landing page,
     every country the ad ran in, comments, shares. Without a keyword the scheduler browses the full top list.
     """
 
@@ -207,8 +209,8 @@ class TikTokTopAdsConnector(_CffiConnector):
     supports_search = True
     browses = True  # scheduled run without a keyword = the whole top list per country
     config_fields = [
-        {"key": "headers", "label": "Request headers từ DevTools (cookie, user-sign, timestamp, web-id, anonymous-user-id)",
-         "secret": True, "required": True},
+        {"key": "headers", "label": "Request headers từ DevTools — để trống = tự thu bằng trình duyệt ẩn (đăng nhập 1 lần: "
+         "python scripts/tiktok_login.py)", "secret": True},
         {"key": "countries", "label": "Quốc gia (PH, US, GB, DE, FR, AU, SA, AE …)"},
         {"key": "keywords", "label": "Keyword (mỗi dòng 1) — để trống = toàn bộ top ads"},
         {"key": "period", "label": "Khoảng ngày: 7 / 30 / 180 (mặc định 30)"},
@@ -219,22 +221,24 @@ class TikTokTopAdsConnector(_CffiConnector):
     ]
     BASE = "https://ads.tiktok.com/creative_radar_api/v1"
 
-    def _headers(self) -> dict:
+    def _headers(self, fresh: bool = False) -> dict:
         raw = self.config.get("headers")
         if isinstance(raw, dict):
             h = raw
         else:  # "Name: value" lines as copied from DevTools → Request Headers
             h = dict(l.split(":", 1) for l in str(raw or "").splitlines() if ":" in l and not l.startswith(":"))
         h = {k.strip(): v.strip() for k, v in h.items()}
-        if not h.get("user-sign") and not h.get("cookie"):
-            raise NotConfigured("Dán request headers (cookie, user-sign, timestamp, web-id, anonymous-user-id) từ DevTools "
-                                "trên ads.tiktok.com/business/creativecenter khi đã đăng nhập tài khoản free")
+        if fresh or getattr(self, "_auto", False) or not (h.get("user-sign") or h.get("cookie")):
+            self._auto = True  # nothing pasted / pasted ones expired: harvested automatically from now on
+            return auto_cc_headers(fresh)
         return h
 
     def _get(self, path: str, **params) -> dict:
         data = self._req("GET", f"{self.BASE}{path}", params=params, headers=self._headers()).json()
+        if data.get("code") == 40101:  # expired: harvest fresh headers once, then give up
+            data = self._req("GET", f"{self.BASE}{path}", params=params, headers=self._headers(fresh=True)).json()
         if data.get("code") == 40101:
-            raise ConnectorError("AUTH_EXPIRED: Creative Center 'no permission' — dán lại headers mới")
+            raise ConnectorError("AUTH_EXPIRED: Creative Center 'no permission' — chạy scripts/tiktok_login.py để đăng nhập lại")
         if data.get("code") not in (0, None):
             raise ConnectorError(f"UPSTREAM_CHANGED: Creative Center {path} → {data.get('code')} {data.get('msg')}")
         return data.get("data") or {}
@@ -295,6 +299,44 @@ class TikTokTopAdsHeadlessConnector(BaseConnector):
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
           "Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0")  # default headless UA says "HeadlessChrome"
 
+    @staticmethod
+    def _launch(p):
+        for ch in ("msedge", "chrome"):
+            try:
+                return p.chromium.launch(channel=ch, headless=True)
+            except Exception as e:
+                err = e
+        raise NotConfigured(f"cần cài Microsoft Edge hoặc Google Chrome trên máy chạy API ({err})")
+
+    def video(self, material_id: str) -> dict:
+        """Fresh signed `video_info` of one ad (CDN links die within hours): the public detail page makes its own
+        /top_ads/v2/detail call — no login, no cookie. ~10 s."""
+        from playwright.sync_api import sync_playwright
+
+        got: dict = {}
+
+        def on_response(r):
+            if "/top_ads/v2/detail" in r.url and r.status == 200:
+                try:
+                    got.update((r.json().get("data") or {}).get("video_info") or {})
+                except Exception:
+                    pass
+
+        with sync_playwright() as p:
+            b = self._launch(p)
+            try:
+                pg = b.new_context(locale="en-US", user_agent=self.UA).new_page()
+                pg.on("response", on_response)
+                pg.goto(f"https://ads.tiktok.com/business/creativecenter/topads/{material_id}/pc/en",
+                        wait_until="domcontentloaded", timeout=60000)
+                for _ in range(30):
+                    if got:
+                        break
+                    pg.wait_for_timeout(500)
+            finally:
+                b.close()
+        return got
+
     def _scrape(self, country: str, period: str) -> list[dict]:
         from playwright.sync_api import sync_playwright
 
@@ -308,14 +350,7 @@ class TikTokTopAdsHeadlessConnector(BaseConnector):
                     pass
 
         with sync_playwright() as p:
-            for ch in ("msedge", "chrome"):
-                try:
-                    b = p.chromium.launch(channel=ch, headless=True)
-                    break
-                except Exception as e:
-                    err = e
-            else:
-                raise NotConfigured(f"cần cài Microsoft Edge hoặc Google Chrome trên máy chạy API ({err})")
+            b = self._launch(p)
             try:
                 pg = b.new_context(locale="en-US", viewport={"width": 1400, "height": 900}, user_agent=self.UA).new_page()
                 pg.on("response", on_response)
@@ -355,6 +390,64 @@ class TikTokTopAdsHeadlessConnector(BaseConnector):
                         continue  # reach / video views = brand awareness, not a product being sold
                     done.add(m["id"])
                     yield map_tiktok_top_ad(m, country, None)
+
+
+TIKTOK_PROFILE = DATA_DIR / "browser" / "tiktok"  # Creative Center browser profile; log in once: scripts/tiktok_login.py
+CC_PAGE = "https://ads.tiktok.com/business/creativecenter/inspiration/topads/pc/en?period=30&region=US"
+_cc_cache: dict = {}
+_cc_lock = threading.Lock()
+
+
+def harvest_cc_headers() -> dict:
+    """Request headers (cookie, user-sign, timestamp, anonymous-user-id…) of the Creative Center page's own
+    /top_ads/v2/list call, read in a headless browser on TIKTOK_PROFILE. Logged in (tiktok_login.py run once): every
+    page, ≤ 500 ads / country; anonymous: page 1 only. Each visit lets TikTok renew that profile's session cookies."""
+    from playwright.sync_api import sync_playwright
+
+    got: dict = {}
+
+    def on_request(r):
+        if "/top_ads/v2/list" in r.url and not got:
+            got.update({k: v for k, v in r.all_headers().items()
+                        if not k.startswith(":") and k not in ("host", "content-length", "accept-encoding")})
+
+    TIKTOK_PROFILE.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        for ch in ("msedge", "chrome"):
+            try:
+                ctx = p.chromium.launch_persistent_context(str(TIKTOK_PROFILE), channel=ch, headless=True, locale="en-US",
+                                                           user_agent=TikTokTopAdsHeadlessConnector.UA)
+                break
+            except Exception as e:
+                err = e
+        else:
+            raise NotConfigured(f"cần Microsoft Edge / Google Chrome trên máy chạy API ({err})")
+        try:
+            pg = ctx.new_page()
+            pg.on("request", on_request)
+            pg.goto(CC_PAGE, wait_until="domcontentloaded", timeout=60000)
+            for _ in range(40):
+                if got:
+                    break
+                pg.wait_for_timeout(500)
+        finally:
+            ctx.close()
+    if not got:
+        raise ConnectorError("UPSTREAM_CHANGED: Creative Center không gọi /top_ads/v2/list — trang đổi?")
+    if "sessionid" not in got.get("cookie", ""):
+        log.warning("tiktok_top_ads: profile chưa đăng nhập — chỉ lấy được trang 1 (chạy scripts/tiktok_login.py)")
+    return got
+
+
+def auto_cc_headers(fresh: bool = False) -> dict:
+    """Harvested headers, reused for 20 min (one browser launch per run, not per request)."""
+    with _cc_lock:  # one browser at a time on the profile
+        if fresh or time.time() - _cc_cache.get("at", 0) > 1200:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(1) as ex:  # sync Playwright refuses to run inside an asyncio loop thread
+                _cc_cache.update(h=ex.submit(harvest_cc_headers).result(), at=time.time())
+        return _cc_cache["h"]
 
 
 def map_tiktok_top_ad(m: dict, country: str, query: str | None) -> AdRecord:

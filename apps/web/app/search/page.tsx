@@ -22,6 +22,7 @@ import { api, qs, useApi, usePaged } from "@/lib/api";
 import { NetworkBadge, usePlatforms } from "@/components/platforms";
 import { getUser, useTeam } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
+import { GlobalImageSearch } from "@/components/visual/global-image-search";
 
 const FUNNELS: [string, string][] = [["", "Tất cả funnel"], ["mess", "💬 MKT Mess (inbox/WhatsApp)"], ["ladi", "🧾 MKT Ladi (landing page)"], ["form", "Form"]];
 const SORTS: [string, string][] = [["opportunity", "Opportunity"], ["wave", "Wave potential"], ["novelty", "Độ mới lạ"],
@@ -135,6 +136,7 @@ function SearchPage() {
         <div className="flex flex-wrap gap-2">
           <TagInput tags={tags} setTags={setTags} draft={q} setDraft={setQ} onSubmit={(l) => (l ? live() : submit())}
                     placeholder="Nhiều từ khoá, Enter sau mỗi từ: fengshui ⏎ lucky bracelet ⏎ pixiu ⏎ (khớp BẤT KỲ từ nào)" />
+          <GlobalImageSearch variant="outline" size="default" iconOnly preset={{ keywords: kws().join("|") || undefined, country: scope || undefined }} />
           <Button type="button" variant="outline" onClick={submit}>Tìm trong kho</Button>
           <Tooltip>
             <TooltipTrigger asChild>
