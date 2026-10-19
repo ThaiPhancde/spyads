@@ -1,6 +1,7 @@
 """Price enrichment API — called by product / ad cards, never by a page of its own.
 
   GET  /api/prices?subjects=ad:1,product:2   what memory has now (+ queue status for the rest)
+  POST /api/prices/lookup {subject}            interactive lookup; background TEST enrichment has its own budget
   POST /api/prices/enrich {subjects, priority} queue the ones that are on screen (dedupe server-side) → same shape
   GET  /api/prices/quota                       both providers' budgets + queue stats
   GET  /api/prices/history?subject=ad:1        every observation (monitoring)
@@ -62,6 +63,25 @@ def enrich(body: EnrichIn, db: Session = Depends(get_db)):
     subs = _subjects(body.subjects)
     jobs.enqueue(db, subs, max(0, min(10, body.priority)))
     return _view(db, subs)
+
+
+class LookupIn(BaseModel):
+    subject: str
+
+
+@router.post("/api/prices/lookup")
+def lookup(body: LookupIn, db: Session = Depends(get_db)):
+    """Interactive lookup; joins cached image searches and the cluster's shared price lock."""
+    subs = _subjects([body.subject])
+    if not subs:
+        raise HTTPException(400, {"code": "bad_subject", "message": "subject = ad:<id> | product:<id> | listing:<id>"})
+    try:
+        r = jobs.lookup_now(subs[0])
+    except ValueError as e:  # unknown / deleted subject: the caller's mistake, not a server error
+        raise HTTPException(404, {"code": "subject_not_found", "message": str(e)})
+    if r.get("pending"):
+        jobs.enqueue(db, subs, 10, retry_negative=True)
+    return {**_view(db, subs), "found": r["found"], "steps": r["steps"], "pending": r.get("pending", False), "error": r.get("error")}
 
 
 @router.get("/api/prices/quota")

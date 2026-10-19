@@ -1,0 +1,153 @@
+{
+  "date": "2026-10-19",
+  "original_tables_before": {
+    "ads": {
+      "rows": 16131,
+      "sha256": "84f083af25060e7752790b0c0a780de6f99b8775a03a9db2396ff52ef77d3403"
+    },
+    "products": {
+      "rows": 11681,
+      "sha256": "71850cb46e988c82011da87e7d8778d4ba96f2ed848cbcd93d8269f2e347719a"
+    },
+    "creatives": {
+      "rows": 99547,
+      "sha256": "70c6d381af1c1786be3d4d6f1973dc31c926f7434ef82ef25b2bc76b104c0afc"
+    },
+    "advertisers": {
+      "rows": 4958,
+      "sha256": "9058c172683d36ee40a51a2fd978a1375fe25cf2454bdfc4f006537dd8c2efab"
+    },
+    "product_daily_snapshots": {
+      "rows": 55071,
+      "sha256": "b7ec76f2135048fb1731530e5d67b033c3caa2f79d665ef0628ddbda263080e2"
+    },
+    "lifecycle_events": {
+      "rows": 545,
+      "sha256": "5b102f20c65b7702d1b376073fd66d96025150a34e9b06f72b633727ab87fb2c"
+    },
+    "ad_sources": {
+      "rows": 16701,
+      "sha256": "2d085bd968ae6069b593f9c4a98a5f42f815e43cabd560f8f8a157ca8bfea75e"
+    }
+  },
+  "original_tables_after": {
+    "ads": {
+      "rows": 16131,
+      "sha256": "84f083af25060e7752790b0c0a780de6f99b8775a03a9db2396ff52ef77d3403"
+    },
+    "products": {
+      "rows": 11681,
+      "sha256": "71850cb46e988c82011da87e7d8778d4ba96f2ed848cbcd93d8269f2e347719a"
+    },
+    "creatives": {
+      "rows": 99547,
+      "sha256": "70c6d381af1c1786be3d4d6f1973dc31c926f7434ef82ef25b2bc76b104c0afc"
+    },
+    "advertisers": {
+      "rows": 4958,
+      "sha256": "9058c172683d36ee40a51a2fd978a1375fe25cf2454bdfc4f006537dd8c2efab"
+    },
+    "product_daily_snapshots": {
+      "rows": 55071,
+      "sha256": "b7ec76f2135048fb1731530e5d67b033c3caa2f79d665ef0628ddbda263080e2"
+    },
+    "lifecycle_events": {
+      "rows": 545,
+      "sha256": "5b102f20c65b7702d1b376073fd66d96025150a34e9b06f72b633727ab87fb2c"
+    },
+    "ad_sources": {
+      "rows": 16701,
+      "sha256": "2d085bd968ae6069b593f9c4a98a5f42f815e43cabd560f8f8a157ca8bfea75e"
+    }
+  },
+  "original_tables_unchanged": true,
+  "migration_runs": 2,
+  "overlay_counts": {
+    "product_clusters": 11681,
+    "ad_cluster_memberships": 16131,
+    "duplicate_ad_links": 0
+  },
+  "apply": {
+    "mode": "apply",
+    "before": {
+      "products": 11681,
+      "products_with_ads": 11681,
+      "ads": 16131,
+      "single_ad_products": 10275,
+      "unnamed_products": 4620,
+      "products_in_target": 8219,
+      "unnamed_in_target": 4469,
+      "single_ad_in_target": 7013,
+      "pending_links": 471,
+      "single_ad_pct": 88.0,
+      "single_ad_pct_in_target": 85.3,
+      "clusters": 11681,
+      "clustered_ads": 16131,
+      "duplicate_ad_links": 0
+    },
+    "after": {
+      "products": 11681,
+      "products_with_ads": 11681,
+      "ads": 16131,
+      "single_ad_products": 10275,
+      "unnamed_products": 4620,
+      "products_in_target": 8219,
+      "unnamed_in_target": 4469,
+      "single_ad_in_target": 7013,
+      "pending_links": 89,
+      "single_ad_pct": 88.0,
+      "single_ad_pct_in_target": 85.3,
+      "clusters": 11680,
+      "clustered_ads": 16131,
+      "duplicate_ad_links": 8
+    },
+    "scored": 894,
+    "verdict_pending": 89,
+    "verdict_auto": 1,
+    "verdict_similar": 768,
+    "verdict_blocked": 36,
+    "stored": {
+      "pending": 2,
+      "similar": 525,
+      "blocked": 19
+    },
+    "merged": 1,
+    "stale": 0,
+    "duplicate_ads": 8,
+    "product_ids": [
+      13696,
+      16265
+    ]
+  },
+  "original_tables_after_apply": {
+    "ads": {
+      "rows": 16131,
+      "sha256": "84f083af25060e7752790b0c0a780de6f99b8775a03a9db2396ff52ef77d3403"
+    },
+    "products": {
+      "rows": 11681,
+      "sha256": "71850cb46e988c82011da87e7d8778d4ba96f2ed848cbcd93d8269f2e347719a"
+    },
+    "creatives": {
+      "rows": 99547,
+      "sha256": "70c6d381af1c1786be3d4d6f1973dc31c926f7434ef82ef25b2bc76b104c0afc"
+    },
+    "advertisers": {
+      "rows": 4958,
+      "sha256": "9058c172683d36ee40a51a2fd978a1375fe25cf2454bdfc4f006537dd8c2efab"
+    },
+    "product_daily_snapshots": {
+      "rows": 55071,
+      "sha256": "b7ec76f2135048fb1731530e5d67b033c3caa2f79d665ef0628ddbda263080e2"
+    },
+    "lifecycle_events": {
+      "rows": 545,
+      "sha256": "5b102f20c65b7702d1b376073fd66d96025150a34e9b06f72b633727ab87fb2c"
+    },
+    "ad_sources": {
+      "rows": 16701,
+      "sha256": "2d085bd968ae6069b593f9c4a98a5f42f815e43cabd560f8f8a157ca8bfea75e"
+    }
+  },
+  "original_tables_unchanged_after_apply": true
+}

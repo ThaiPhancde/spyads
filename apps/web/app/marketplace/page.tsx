@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { api, fmt, qs, usePaged } from "@/lib/api";
 import { GlobalImageSearch } from "@/components/visual/global-image-search";
 
+const PAGE = 50;  // listings per 1688 search page (3 API calls of ≤ 20, ~25 s) — "Cào thêm" fetches the next 50
 const CACHE_HOURS = 72;  // same keyword + sources within this window → reuse the earlier search, no new crawl / Apify spend
 
 export default function Marketplace() {
@@ -33,39 +34,54 @@ export default function Marketplace() {
   const { networks, byKey } = usePlatforms();
   const path = `/ads${qs({ q: applied, country, sort, channel: "commerce", network, t: tick })}`;
 
-  /** "Tìm mới trên 1688": live job on the 1688 AK API (+ Apify fallback when ticked); "Lọc" never leaves the DB. */
+  /** "Tìm mới trên 1688": live job on the 1688 AK API (+ Apify fallback when ticked); "Lọc" never leaves the DB.
+   *  One run = PAGE listings (3 API calls); "Cào thêm" continues the same job from where it stopped. */
+  const [job, setJob] = useState<{ id: number; page: number; more: boolean } | null>(null);
+  async function watch(job_id: number, page: number, reused: boolean, t0: number) {
+    let j: any;
+    const deadline = Date.now() + 5 * 60_000;  // a queued / slow Apify run can hold the job: stop waiting, it keeps running
+    for (;;) {
+      j = await api(`/search/jobs/${job_id}`);
+      if (!alive.current) return;
+      if (j.status !== "running") break;
+      if (Date.now() > deadline) return setLive({ busy: false, msg: "Vẫn đang chạy nền — bấm Lọc lại sau ít phút để xem kết quả." });
+      const got = Object.values(j.sources || {}).reduce((a: number, v: any) => a + (v.listings ?? v.stored ?? 0), 0);
+      setLive({ busy: true, msg: `Đang tìm trên 1688 và lưu sản phẩm… ${Math.round((Date.now() - t0) / 1000)}s${got ? ` · đã lưu ${got} listing` : ""}` });
+      if (got) setTick((t) => t + 1);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    const src: any = Object.values(j.sources || {})[0] || {};
+    const n = src.listings ?? src.stored ?? 0;
+    const err = src.error || j.error;
+    setJob({ id: job_id, page, more: !!j.has_more });
+    if (!n) {
+      setLive({ busy: false, bad: true, msg: `Không thể lấy thêm từ 1688: ${err || "không có kết quả"}` +
+        (paid ? "" : " — có thể bật “Dùng Apify” (có thể phát sinh phí).") });
+    } else {
+      setLive({ busy: false, bad: !!err, msg: (reused ? `Dùng kết quả đã lưu: ${n} listing (tìm lúc ${fmt.dt(j.created_at)}, hạn ${CACHE_HOURS}h).`
+        : `Xong trang ${page}: tổng ${n} listing 1688 đã lưu (${src.new ?? 0} mới).`) + (j.has_more ? " Bấm “Cào thêm” để lấy trang sau." : " Nguồn đã hết kết quả.") + (err ? ` Lưu ý: ${err}` : "") });
+    }
+    setTick((t) => t + 1);
+  }
   async function search1688() {
     const kw = q.trim();
     if (!kw) return setLive({ busy: false, msg: "Nhập từ khoá trước.", bad: true });
     setLive({ busy: true, msg: "Đang kiểm tra dữ liệu đã lưu…" });
-    setApplied(kw); setNetwork("1688"); setCountry("");  // show the 1688 list right away: new listings appear while the job runs
-    const t0 = Date.now();
+    setApplied(kw); setNetwork("1688"); setCountry(""); setJob(null);  // show the 1688 list right away: new listings appear while the job runs
     try {
       const { job_id, reused } = await api("/search/live", { method: "POST", body: JSON.stringify({
-        query: kw, countries: ["ALL"], limit: 80, reuse_hours: CACHE_HOURS, adapters: paid ? ["ali1688", "apify_1688"] : ["ali1688"] }) });
-      let j: any;
-      const deadline = Date.now() + 5 * 60_000;  // a queued / slow Apify run can hold the job: stop waiting, it keeps running
-      for (;;) {
-        j = await api(`/search/jobs/${job_id}`);
-        if (!alive.current) return;
-        if (j.status !== "running") break;
-        if (Date.now() > deadline) return setLive({ busy: false, msg: "Vẫn đang chạy nền — bấm Lọc lại sau ít phút để xem kết quả." });
-        const got = Object.values(j.sources || {}).reduce((a: number, v: any) => a + (v.listings ?? v.stored ?? 0), 0);
-        setLive({ busy: true, msg: `Đang tìm trên 1688 và lưu sản phẩm… ${Math.round((Date.now() - t0) / 1000)}s${got ? ` · đã lưu ${got} listing` : ""}` });
-        if (got) setTick((t) => t + 1);
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-      const src: any = Object.values(j.sources || {})[0] || {};
-      const n = src.listings ?? src.stored ?? 0;
-      const err = src.error || j.error;
-      if (!n) {
-        setLive({ busy: false, bad: true, msg: `Không thể lấy thêm từ 1688: ${err || "không có kết quả"}` +
-          (paid ? "" : " — có thể bật “Dùng Apify” (có thể phát sinh phí).") });
-      } else {
-        setLive({ busy: false, bad: !!err, msg: (reused ? `Dùng kết quả đã lưu: ${n} listing (tìm lúc ${fmt.dt(j.created_at)}, hạn ${CACHE_HOURS}h).`
-          : `Xong: ${n} listing 1688 (${src.new ?? 0} mới).`) + (err ? ` Lưu ý: ${err}` : "") });
-      }
-      setTick((t) => t + 1);
+        query: kw, countries: ["ALL"], limit: PAGE, reuse_hours: CACHE_HOURS, adapters: paid ? ["ali1688", "apify_1688"] : ["ali1688"] }) });
+      await watch(job_id, 1, reused, Date.now());
+    } catch (e: any) {
+      setLive({ busy: false, bad: true, msg: String(e.message || e) });
+    }
+  }
+  async function more1688() {
+    if (!job) return;
+    setLive({ busy: true, msg: "Đang cào trang sau…" });
+    try {
+      await api(`/search/jobs/${job.id}/more`, { method: "POST", body: JSON.stringify({ count: PAGE }) });
+      await watch(job.id, job.page + 1, false, Date.now());
     } catch (e: any) {
       setLive({ busy: false, bad: true, msg: String(e.message || e) });
     }
@@ -85,6 +101,7 @@ export default function Marketplace() {
           </div>
           <Button size="sm" type="submit">Lọc</Button>
           {network === "1688" && <Button variant="outline" size="sm" type="button" disabled={live?.busy} onClick={search1688}>{live?.busy ? <><Spinner /> Đang tìm…</> : "Tìm mới trên 1688"}</Button>}
+          {network === "1688" && job?.more && <Button size="sm" type="button" disabled={live?.busy} onClick={more1688}>Cào thêm {PAGE} (trang {job.page + 1})</Button>}
         </form>
         {network === "1688" && (
           <div className="mt-2 flex items-center gap-1.5">
@@ -98,7 +115,7 @@ export default function Marketplace() {
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <SimpleSelect value={sort} onChange={setSort} className="w-44"
                         options={[["sold", "Bán nhiều nhất"], ["reviews", "Nhiều đánh giá nhất"], ["price", "Giá thấp nhất"], ["recent", "Mới thu thập"]]} />
-          <Badge variant="outline" className="tnum ml-auto">{total.toLocaleString()} listing</Badge>
+          <Badge variant="outline" className="tnum ml-auto">{total.toLocaleString("en-US")} listing</Badge>
         </div>
       </Card>
       {error ? <Loading error={error} /> : rows.length === 0 && loading ? <Loading /> : rows.length === 0 ? (

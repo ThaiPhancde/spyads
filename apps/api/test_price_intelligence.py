@@ -79,14 +79,18 @@ except quota.QuotaError as e:
 with SessionLocal() as db:
     q = quota.remaining(db, "brightdata")
     assert q["day_used"] == 2 and q["month_remaining"] == 1
-# messenger ad: no page, cluster has no reference, Bright Data refused by budget, SerpApi has no key → NOT_FOUND (negative cache)
+# messenger ad: the background queue never spends Bright Data / SerpApi → NOT_FOUND (needs_click), ledger untouched
 os.environ["SERPAPI_API_KEY"] = ""
 r = jobs.run_one(2)
 print("job2 ->", r)
 assert r.get("found") == [NOT_FOUND], r
 with SessionLocal() as db:
     j = db.get(PriceJob, 2)
-    assert j.status == "done" and any(s["step"] == "brightdata_search" and s["code"] == "quota_exceeded_daily" for s in j.steps), j.steps
+    assert j.status == "done" and any(s["step"] == "search" and s["code"] == "needs_click" for s in j.steps), j.steps
+    assert quota.remaining(db, "brightdata")["day_used"] == 2
+# the "Hiện giá" button (paid=True): Bright Data refused by budget, SerpApi has no key → nothing found, nothing stored
+l = jobs.lookup_now(f"ad:{idb}")
+assert not l["found"] and any(s["step"] == "brightdata_search" and s["code"] == "quota_exceeded_daily" for s in l["steps"]), l
 
 # --- API
 c = TestClient(app)

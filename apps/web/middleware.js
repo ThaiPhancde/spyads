@@ -2,12 +2,12 @@ import { NextResponse } from "next/server";
 
 // Optional Basic Auth for the demo deployment: set BASIC_AUTH_USER / BASIC_AUTH_PASS.
 // Ingest & webhook endpoints are excluded — they use X-Ingest-Token instead.
-// /api/* is proxied to the backend (next.config rewrites); the backend wants X-Admin-Token on every write,
-// so it is attached here server-side and the browser never sees it.
+// /api/* is proxied with the user's session cookie. Backend RBAC and CSRF checks are authoritative.
 export function middleware(req) {
   const p = req.nextUrl.pathname;
   const headers = new Headers(req.headers);
-  if (p.startsWith("/api/") && process.env.ADMIN_TOKEN) headers.set("x-admin-token", process.env.ADMIN_TOKEN);
+  // The browser authenticates with its HttpOnly session. Never elevate it with a server admin token.
+  headers.delete("x-admin-token");
   const next = () => NextResponse.next({ request: { headers } });
   const user = process.env.BASIC_AUTH_USER;
   const pass = process.env.BASIC_AUTH_PASS;

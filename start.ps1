@@ -20,10 +20,11 @@ if (-not (Test-Path "$api/.venv")) {
   & "$api/.venv/Scripts/python.exe" -m pip install -r "$api/requirements.txt"
 }
 if (-not (Test-Path "$web/node_modules")) { Push-Location $web; npm install; Pop-Location }
-Start-Process -WorkingDirectory $api -FilePath "$api/.venv/Scripts/python.exe" -ArgumentList "-m","uvicorn","app.main:app","--port","8000"
+Start-Process -WindowStyle Hidden -WorkingDirectory $api -FilePath "$api/.venv/Scripts/python.exe" -ArgumentList "-m","uvicorn","app.main:app","--port","8000"
 # lịch chạy (đồng bộ nguồn, liveness, media, chấm điểm) — tiến trình riêng khi DISABLE_SCHEDULER=1
 if ($env:DISABLE_SCHEDULER -in "1","true") {
-  Start-Process -WorkingDirectory $api -FilePath "$api/.venv/Scripts/python.exe" -ArgumentList "-m","app.worker"
+  Start-Process -WindowStyle Hidden -WorkingDirectory $api -FilePath "$api/.venv/Scripts/python.exe" -ArgumentList "-m","app.worker"
 }
-Start-Process -WorkingDirectory $web -FilePath "npm.cmd" -ArgumentList "run","dev"
-Write-Host "API: http://localhost:8000/docs   Web: http://localhost:3000/search"
+Start-Process -WindowStyle Hidden -WorkingDirectory $web -FilePath "npm.cmd" -ArgumentList "run","dev"
+Write-Host "API: http://localhost:8000/docs   Web: http://localhost:3000/login"
+Write-Host "ADMIN ban dau: cd apps/api; .venv/Scripts/python.exe -m app.workspace.cli create-admin"

@@ -235,6 +235,11 @@ class TikTokTopAdsConnector(_CffiConnector):
 
     def _get(self, path: str, **params) -> dict:
         data = self._req("GET", f"{self.BASE}{path}", params=params, headers=self._headers()).json()
+        for wait in (20, 45, 90):  # 40100 "too many requests": back off, same session
+            if data.get("code") != 40100:
+                break
+            time.sleep(wait)
+            data = self._req("GET", f"{self.BASE}{path}", params=params, headers=self._headers()).json()
         if data.get("code") == 40101:  # expired: harvest fresh headers once, then give up
             data = self._req("GET", f"{self.BASE}{path}", params=params, headers=self._headers(fresh=True)).json()
         if data.get("code") == 40101:
@@ -365,7 +370,14 @@ class TikTokTopAdsHeadlessConnector(BaseConnector):
                     if not btn.count():
                         break
                     before = len(seen)
-                    btn.first.click(timeout=8000)
+                    try:
+                        btn.first.click(timeout=8000)
+                    except Exception:  # promo modal re-opened over the button: close it, retry once, keep what we have
+                        pg.keyboard.press("Escape")
+                        try:
+                            btn.first.click(timeout=8000)
+                        except Exception:
+                            break
                     pg.wait_for_timeout(3500)
                     if len(seen) == before:
                         break
@@ -488,8 +500,8 @@ def map_tiktok_library(a: dict, det: dict, regions: list[str], query: str | None
         + [MediaItem("image", u) for u in ad.get("image_urls") or []],
         landing_page=url, product_url=url, category=None,
         first_seen=ms(ad.get("first_shown_date")), last_seen=ms(ad.get("last_shown_date")),
-        # the library publishes last_shown_date with a lag of days: shown in the last 14 days = still running
-        active=bool(ad.get("last_shown_date")) and int(ad["last_shown_date"]) / 1000 > time.time() - 14 * 86400,
+        # Recency is not proof of delivery status. Only explicit source status is authoritative.
+        active={"active": True, "inactive": False}.get(str(ad.get("status") or "").lower()),
         impressions_text=ad.get("estimated_audience") or None,
         spend_text=str(ad["spent"]) if ad.get("spent") else None, product_name=query,
         snapshot_url=f"https://library.tiktok.com/ads/detail/?ad_id={ad.get('id')}", raw_source={"ad": a, "detail": det},

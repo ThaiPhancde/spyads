@@ -2,8 +2,8 @@ const $ = (id) => document.getElementById(id);
 const status = (msg, cls = "") => { $("status").textContent = msg; $("status").className = cls; };
 let last = null;
 
-chrome.storage.local.get({ limit: 5, api: "http://127.0.0.1:8000", token: "" }, (s) => {
-  $("limit").value = s.limit; $("api").value = s.api; $("token").value = s.token;
+chrome.storage.local.get({ limit: 5, api: "http://127.0.0.1:8000", token: "", webOrigin: "" }, (s) => {
+  $("limit").value = s.limit; $("api").value = s.api; $("token").value = s.token; $("web").value = s.webOrigin;
 });
 ["limit", "api", "token"].forEach((k) => $(k).addEventListener("change", () =>
   chrome.storage.local.set({ [k]: k === "limit" ? Number($(k).value) || 5 : $(k).value.trim() })));
@@ -48,4 +48,17 @@ $("copy").onclick = async () => {
   if (!last) return status("Chưa có dữ liệu — bấm extract trước.", "err");
   await navigator.clipboard.writeText(JSON.stringify(last.records, null, 2));
   status("Đã copy JSON.", "ok");
+};
+// Web origin: storage first, then permission request (same click = user gesture). background.js registers bridge.js once both exist.
+$("saveWeb").onclick = () => {
+  const v = $("web").value.trim();
+  if (!v) { chrome.storage.local.set({ webOrigin: "" }); return status("Đã xoá web origin tuỳ chỉnh (localhost:3000 vẫn hoạt động).", "ok"); }
+  const p = originPattern(v);
+  if (!p) return status("Origin không hợp lệ, vd http://192.168.1.10:3000", "err");
+  const origin = p.slice(0, -2);
+  $("web").value = origin;
+  chrome.storage.local.set({ webOrigin: origin });
+  chrome.permissions.request({ origins: [p] }).then(
+    (ok) => status(ok ? `Đã bật cho ${origin} — tải lại trang ToolSpy.` : "Bạn đã từ chối quyền truy cập origin này.", ok ? "ok" : "err"),
+    (e) => status(e.message, "err"));
 };

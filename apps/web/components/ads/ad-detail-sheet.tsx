@@ -4,6 +4,7 @@ import { ArrowRight, BadgeEuro, Camera, ExternalLink, Eye, Megaphone, Truck } fr
 import { CreativeMedia, DownloadButton } from "@/components/media";
 import { visualHref } from "@/components/visual/global-image-search";
 import { NetworkBadge, usePlatforms } from "@/components/platforms";
+import { EngagementLine } from "@/components/ads/engagement-line";
 import { PriceTag } from "@/components/pricing/price-tag";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +12,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { fmt } from "@/lib/api";
+import { AdActions, FollowButton } from "@/components/workspace/actions";
 
 export const PLATFORM: Record<string, string> = {
   facebook: "Facebook", instagram: "Instagram", messenger: "Messenger", audience_network: "Audience Network",
@@ -68,6 +70,7 @@ export function AdDetailSheet({ ad, open, onOpenChange }: { ad: any; open: boole
         </SheetHeader>
         <ScrollArea className="h-[calc(100vh-5rem)]">
           <div className="space-y-4 p-4">
+            <div className="flex flex-wrap gap-2"><FollowButton id={ad.advertiser_id} /><AdActions id={ad.id} />{ad.advertiser_id && <Link className="text-sm underline" href={`/competitors/${ad.advertiser_id}`}>Chi tiết advertiser</Link>}</div>
             <div className="flex flex-wrap gap-2">
               <ExtLink href={ad.snapshot_url}>{organic ? "Bài gốc" : "Trang thư viện quảng cáo"}</ExtLink>
               <ExtLink href={ad.advertiser_url}>Trang advertiser</ExtLink>
@@ -116,8 +119,7 @@ export function AdDetailSheet({ ad, open, onOpenChange }: { ad: any; open: boole
               <Row k="Hiển thị" v={ad.impressions_text} />
               <Row k="Chi tiêu" v={ad.spend_text} />
               <Row k="Reach EU" v={ad.reach && fmt.n(ad.reach)} />
-              <Row k="Lượt xem" v={ad.views && fmt.n(ad.views)} />
-              <Row k="Thích" v={ad.likes && fmt.n(ad.likes)} />
+              {ad.channel !== "commerce" && <div className="flex items-start justify-between gap-3 text-xs"><span className="text-muted-foreground">Tương tác</span><EngagementLine ad={ad} detail /></div>}
               <Row k="Nền tảng" v={(ad.platforms || []).map((p: string) => PLATFORM[p] || p)} />
               <Row k="Thị trường" v={marketsOf(ad)} />
               <Row k="Phiên bản" v={ad.variants > 1 ? ad.variants : null} />

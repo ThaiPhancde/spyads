@@ -10,7 +10,7 @@ export async function GET(req: Request) {
   let upstream: Response;
   try {
     upstream = await fetch(`${API}/api/events/stream`, {
-      headers: { accept: "text/event-stream" },
+      headers: { accept: "text/event-stream", cookie: req.headers.get("cookie") || "" },
       signal: req.signal,
       cache: "no-store",
     });

@@ -249,6 +249,8 @@ class MetaLibraryConnector(BaseConnector):
                 search_type="PAGE" if params.page_ids else "KEYWORD_UNORDERED", page_ids=params.page_ids or None,
                 cursor=st.get("cursor"), first=30, sort_mode=None, session_id=st["sid"], collation_token=st["tok"])
         except Exception as e:
+            if params.extra.get("competitor_strict"):
+                raise ConnectorError("Meta advertiser query failed; no access-challenge fallback") from e
             if st.get("cursor"):
                 raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}") from e
             try:  # GraphQL broke on page 1 → server-rendered payload (first page only)
@@ -259,6 +261,8 @@ class MetaLibraryConnector(BaseConnector):
             if not raw_ads:
                 raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}") from e
             resp, cursor = {"ads": raw_ads}, None
+        if params.extra.get("competitor_strict") and not isinstance(resp.get("ads"), list):
+            raise ConnectorError("Meta advertiser response missing ads list")
         items = resp.get("ads") or extract_ads(resp.get("raw"))
         # Meta shows one card per collation group (the first item carries collation_count); siblings are the same creative
         # ponytail: dedupe within a page only — siblings split across pages become extra ads
@@ -285,6 +289,7 @@ class MetaGraphConnector(BaseConnector):
     config_fields = [
         {"key": "access_token", "label": "Access token (app đã verify, quyền ads_read)", "secret": True, "required": True},
         {"key": "api_version", "label": "API version (mặc định v21.0)"},
+        {"key": "countries", "label": "Quốc gia cho competitor tracker (VD FR,DE; cần nằm trong phạm vi API cấp quyền)"},
     ]
 
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:

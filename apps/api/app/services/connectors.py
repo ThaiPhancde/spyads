@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Ad, Advertiser, Comment, Connector, Product, RawRecord, Store
+from . import content_filter
 from . import enrichment as E
 from .entity_resolution import resolve_product
 
@@ -33,9 +34,9 @@ DEFAULT_CONNECTORS = [
     ("apify_meta", "Apify · Facebook Ads Library (production volume)", False, 60, 2, {}),
     ("tiktok_commercial", "TikTok Commercial Content API (official, EU)", False, 360, 2, {}),
     ("apify_actor", "Apify · TikTok ads / Creative Center", False, 60, 2, {"source": "tiktok"}),
-    ("http", "Pipiads API (Enterprise)", False, 60, 2, {"source": "pipiads"}),
-    ("export", "Export · pipiads", True, 5, 2, {"source": "pipiads"}),
-    ("export", "Export · minea", True, 5, 2, {"source": "minea"}),
+    ("http", "Pipiads · API doanh nghiệp", False, 60, 2, {"source": "pipiads"}),
+    ("export", "Pipiads · Nhập file CSV/XLSX/JSON", True, 5, 2, {"source": "pipiads"}),
+    ("export", "Minea · Nhập file CSV/XLSX/JSON", True, 5, 2, {"source": "minea"}),
     # the TikTok ad volume source: ≤ 500 top ads per country, MP4 + likes, incl. SA / AE. Runs on request headers pasted
     # from DevTools (ads.tiktok.com/business/creativecenter, logged in to a free account) — the app never signs requests
     ("tiktok_top_ads", "TikTok Creative Center · Top Ads (free account) — PH/US/EU/SA/AE", False, 360, 2,
@@ -68,13 +69,24 @@ FREE_READY = ("meta_library", "export", "snapchat_ads_library", "tiktok_ad_libra
 def ensure_default_connectors(db: Session):
     """Seed default connectors; on existing DBs only add defaults that are missing (matched by name)."""
     from ..collector.factory import ConnectorFactory
+    from ..connector_identity import identity
 
-    have = set(db.scalars(select(Connector.name).where(Connector.adapter.is_not(None))))
+    existing = list(db.scalars(select(Connector).where(Connector.adapter.is_not(None)).order_by(Connector.id)))
+    have = {c.name for c in existing}
     for adapter, name, enabled, every, tier, cfg in DEFAULT_CONNECTORS:
+        brand = identity(adapter, cfg)
+        if brand:
+            match = next((c for c in existing if c.adapter == adapter and str((c.config or {}).get("source") or "").strip().lower() == brand["provider"]), None)
+            if match:
+                match.name, match.provider = brand["name"], brand["provider"]
+                match.config = dict(match.config or {}) | {"source": brand["provider"]}
+                if adapter == "export":
+                    match.health = ConnectorFactory.get(adapter, match.config).health_check()["status"]
+                continue  # match by adapter+source, so renaming cannot seed a duplicate watcher
         if name in have:
             continue
         cls = ConnectorFactory.connectors[adapter]
-        db.add(Connector(name=name, provider=adapter, adapter=adapter, kind=cls.kind, group=cls.group,
+        db.add(Connector(name=name, provider=brand["provider"] if brand else adapter, adapter=adapter, kind=cls.kind, group=cls.group,
                          config=cfg, enabled=enabled, every_minutes=every, tier=tier,
                          status="ready" if adapter in FREE_READY else "not_configured"))
     # adapters dropped from the code (Shopify stores …): switched off, rows kept
@@ -197,9 +209,9 @@ def _norm_ad(db: Session, rec: dict, source_hint: str | None):
     if existing:  # dedupe → refresh activity & engagement
         existing.last_seen_at = max(existing.last_seen_at, _dt(rec.get("last_seen"), now))
         existing.is_active = _b(rec.get("is_active"), True)
-        existing.likes = max(existing.likes, _i(rec.get("likes")))
-        existing.comments_count = max(existing.comments_count, _i(rec.get("comments_count")))
-        existing.shares = max(existing.shares, _i(rec.get("shares")))
+        existing.likes = max(existing.likes or 0, _i(rec.get("likes")))
+        existing.comments_count = max(existing.comments_count or 0, _i(rec.get("comments_count")))
+        existing.shares = max(existing.shares or 0, _i(rec.get("shares")))
         return existing
     country = (rec.get("country") or "").upper() or None
     name = rec.get("product_name") or (rec.get("ad_text") or "")[:60]
@@ -207,7 +219,9 @@ def _norm_ad(db: Session, rec: dict, source_hint: str | None):
     category = rec.get("category") or E.classify_category(name, rec.get("ad_text"))
     product = _product_by_ref(db, {**rec, "product_name": name, "category": category, "country": country}, source=source)
     platform = rec.get("platform") or "meta"
-    adv = _advertiser(db, rec.get("advertiser"), platform, country, rec.get("advertiser_url"))
+    from ..workspace.identity import resolve_values
+    adv = resolve_values(db, source, str(rec.get("page_id") or f"unverified:ad:{ext_id}"),
+                         rec.get("advertiser") or ext_id, platform, country, rec.get("advertiser_url"))
     first = _dt(rec.get("first_seen"), now)
     st = _store(db, rec.get("landing_url"), product, adv, country, price, first)
     cr = E.classify_creative(rec.get("ad_text"))
@@ -265,6 +279,12 @@ def normalize_pending(db: Session, limit: int = 20000) -> dict:
     # process order matters: ads/stores create products before signals reference them
     order = {"ad": 0, "store": 1, "product_signal": 2}
     for r in sorted(raws, key=lambda r: (order.get(r.entity_type, 9), r.id)):
+        p = r.payload or {}
+        if r.entity_type == "ad" and content_filter.classify(p.get("advertiser"), p.get("title"), p.get("ad_text"), p.get("cta_type"),
+                                                             None, p.get("landing_url"), _f(p.get("price")))[0] == "block":
+            r.processed, r.error = True, "excluded: entertainment"  # short drama / movie / streaming ad (content_filter)
+            stats["excluded_entertainment"] = stats.get("excluded_entertainment", 0) + 1
+            continue
         try:
             with db.begin_nested():
                 rec = r.payload

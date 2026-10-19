@@ -34,14 +34,14 @@ SPEC_SCHEMA = {
         "country": {"type": ["string", "null"], "description": "ISO-2 country code"},
         "category": {"type": ["string", "null"], "enum": ["beauty", "health", "home", "gadgets", "fashion", "pets", None]},
         "max_advertisers": {"type": ["integer", "null"]},
-        "min_win_score": {"type": ["number", "null"]},
+        "min_opportunity": {"type": ["number", "null"]},
         "fast_growing": {"type": "boolean"},
         "hidden_winner": {"type": "boolean"},
         "days": {"type": ["integer", "null"]},
         "product_query": {"type": ["string", "null"]},
         "limit": {"type": "integer"},
     },
-    "required": ["intent", "country", "category", "max_advertisers", "min_win_score",
+    "required": ["intent", "country", "category", "max_advertisers", "min_opportunity",
                  "fast_growing", "hidden_winner", "days", "product_query", "limit"],
     "additionalProperties": False,
 }
@@ -71,8 +71,8 @@ def parse_rules(q: str) -> dict:
     if m:
         spec["days"] = int(m.group(1) or m.group(2))
     spec["fast_growing"] = bool(re.search(r"tăng nhanh|tăng trưởng|fast grow|growing|đang tăng", t))
-    if re.search(r"win score cao|high win", t):
-        spec["min_win_score"] = 65
+    if re.search(r"opportunity cao|high opportunity|điểm cao|high score|win score cao|high win", t):
+        spec["min_opportunity"] = 50  # "win score" (v1) phrases map to the v2 number
 
     if re.search(r"complaint|phàn nàn|khiếu nại", t):
         spec["intent"] = "top_complaints"
@@ -115,7 +115,7 @@ def _product_row(p: Product) -> dict:
     return {
         "id": p.id, "product_code": p.product_code, "name": p.canonical_name, "country": p.country, "category": p.category,
         "advertisers": f.get("advertiser_count"), "active_ads": f.get("active_ads"),
-        "growth_7d": f.get("creative_growth_7d"), "win": p.win_score, "rarity": p.rarity_score,
+        "growth_7d": f.get("creative_growth_7d"), "rarity": p.rarity_score,
         "saturation": p.saturation_score, "opportunity": p.opportunity_score, "confidence": p.confidence_score,
         "recommendation": p.recommendation,
     }
@@ -145,7 +145,7 @@ def execute(db: Session, spec: dict) -> dict:
                 continue
             if spec.get("max_advertisers") is not None and f.get("advertiser_count", 0) >= spec["max_advertisers"]:
                 continue
-            if spec.get("min_win_score") is not None and p.win_score < spec["min_win_score"]:
+            if spec.get("min_opportunity") is not None and p.opportunity_score < spec["min_opportunity"]:
                 continue
             if spec.get("fast_growing") and f.get("creative_growth_7d", 0) < 0.3:
                 continue
@@ -174,18 +174,10 @@ def execute(db: Session, spec: dict) -> dict:
         return {"kind": "complaints", "product": _product_row(p), "rows": rows, "total": len(cs)}
 
     if intent == "market_hidden_winners":
-        last = db.scalar(select(func.max(MarketDailySnapshot.date)))
-        rows = []
-        if last:
-            since = last - timedelta(days=(spec.get("days") or 7) - 1)
-            data = db.execute(
-                select(MarketDailySnapshot.country, func.max(MarketDailySnapshot.hidden_winners).label("hw"))
-                .where(MarketDailySnapshot.date >= since).group_by(MarketDailySnapshot.country, MarketDailySnapshot.category)
-            ).all()
-            agg = Counter()
-            for country, hw in data:
-                agg[country] += hw or 0
-            rows = [{"country": c, "hidden_winners": n} for c, n in agg.most_common(limit)]
+        from .hidden import compute
+        # Current rule verdicts, not the max of historical counts made under a different rule.
+        agg = Counter(c for r in compute(db) for c in r["countries"])
+        rows = [{"country": c, "hidden_winners": n} for c, n in agg.most_common(limit)]
         return {"kind": "markets", "rows": rows, "total": len(rows)}
 
     if intent == "competitors_scaling":
@@ -246,30 +238,24 @@ def ask(db: Session, question: str) -> dict:
 
 # ------------------------------------------------------------ Score explanation (§20)
 def explain_product(p: Product) -> str:
+    """Explains the v2 verdict only (Opportunity + TEST_NOW / TEST / WATCH / SKIP); Win / Rare Winner (v1) are not part of it."""
     f = p.features or {}
-    b = f.get("_breakdown", {})
-    ext = b.get("external", {})
-    tops = sorted(((k, v["value"] * v["weight"]) for k, v in ext.items() if v["weight"] > 0), key=lambda x: -x[1])
-    weak = sorted(((k, v["value"]) for k, v in ext.items() if v["weight"] > 0), key=lambda x: x[1])[:2]
-    strong = ", ".join(f"{k} ({ext[k]['value']:.0f})" for k, _ in tops[:3])
-    weak_s = ", ".join(f"{k} ({v:.0f})" for k, v in weak)
+    v = (p.potential or {}).get("vector") or {}
     reasons = "; ".join(p.recommendation_reasons or [])
     base = (
-        f"{p.canonical_name} có Win Score {p.win_score:.0f} (External {p.external_win_score:.0f}). "
-        f"Đóng góp lớn nhất: {strong}. Điểm yếu: {weak_s}. "
-        f"Saturation {p.saturation_score:.0f} ({p.saturation_state}), Rarity {p.rarity_score:.0f}, "
-        f"Confidence {p.confidence_score:.0f} → Opportunity {p.opportunity_score:.0f}. "
-        f"Khuyến nghị: {p.recommendation} ({reasons})."
+        f"{p.canonical_name}: Opportunity {p.opportunity_score:.0f} → {p.recommendation} ({reasons}). "
+        f"Demand {v.get('market_demand', 0):.0f} · Momentum {v.get('momentum', 0):.0f} · Market fit {v.get('market_fit', 0):.0f} · "
+        f"Competition {v.get('competition', 0):.0f} ({p.saturation_state}) · Compliance risk {v.get('compliance_risk', 0):.0f} · "
+        f"Confidence {p.confidence_score:.0f}."
     )
     if llm.available():
         text = llm.complete_text(
             system=("Bạn giải thích điểm số sản phẩm cho team marketing bằng tiếng Việt. Điểm số đã được tính bằng công thức; "
                     "KHÔNG được thay đổi hay tự chấm điểm, chỉ giải thích vì sao ra con số đó và rủi ro cần lưu ý. Tối đa 150 từ."),
             user=json.dumps({"product": p.canonical_name, "scores": {
-                "win": p.win_score, "external": p.external_win_score,
-                "saturation": p.saturation_score, "rarity": p.rarity_score, "confidence": p.confidence_score,
-                "opportunity": p.opportunity_score, "recommendation": p.recommendation},
-                "breakdown": b, "features": {k: v for k, v in f.items() if not k.startswith("_")}}, ensure_ascii=False, default=str),
+                "opportunity": p.opportunity_score, "recommendation": p.recommendation, "reasons": p.recommendation_reasons, "vector": v,
+                "saturation": p.saturation_score, "confidence": p.confidence_score},
+                "features": {k: v for k, v in f.items() if not k.startswith("_")}}, ensure_ascii=False, default=str),
         )
         if text:
             return text

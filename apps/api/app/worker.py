@@ -1,6 +1,6 @@
 """Scheduler process — `python -m app.worker` (run the API with DISABLE_SCHEDULER=1).
 
-Scheduled syncs, tracked queries, liveness, spy scans, media queue, alerts, retention and the 6-hourly re-score run
+Scheduled syncs, tracked queries, liveness, spy scans, media queue, retention and the 6-hourly re-score run
 here, so a heavy tick never competes with user requests (live searches stay in the API process).
 Run exactly one worker: the scheduler keeps its "what is due / running" state in memory.
 """
@@ -16,6 +16,14 @@ for noisy in ("httpx", "httpcore"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 if __name__ == "__main__":
-    auto_migrate()
+    from .workspace.migrate import migrate
+    from .workspace.worker import tracker_loop
+    migrate()
+    from .cluster_migrate import migrate as migrate_clusters
+    migrate_clusters()
     logging.getLogger("app.worker").info("media: %s lost creatives re-queued", requeue_lost())
-    asyncio.run(scheduler_loop())  # enqueue_pending runs on its first tick
+    from .preferences import loop as preference_loop
+    from .recommend import loop as recommendation_loop
+    async def run():
+        await asyncio.gather(scheduler_loop(), tracker_loop(), preference_loop(), recommendation_loop())
+    asyncio.run(run())

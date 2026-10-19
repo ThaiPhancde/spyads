@@ -12,7 +12,6 @@ from .decision import auto_lifecycle
 from .features import ProductData, compute_features, load_product_data
 from ..markets import priority_boost
 
-POTENTIAL_WINNER_MIN = 65
 NEUTRAL_MARKET_FIT = 60.0  # rare_winner_score factor; per-market fit lives in discovery.market_fit_score
 
 
@@ -79,12 +78,6 @@ def score_product(db: Session, product: Product, data: ProductData, ctx: ScoreCo
     f["_scores"] = {k: sc[k] for k in ("growth_velocity", "market_fit", "margin_potential", "opportunity_raw")}
     f["_breakdown"] = sc["breakdown"]
     f["opportunity_raw"], f["priority_boost"] = sc["opportunity_unboosted"], sc["priority_boost"]
-    f["hidden_alerted"] = (product.features or {}).get("hidden_alerted", False)  # alert state survives rescoring (alerts.py)
-    from .hidden import evaluate
-
-    hw = evaluate(product, data.ads, f)
-    f["hidden_score"] = hw["score"] if hw else None
-    product.tags = hw["tags"] if hw else []
     product.features = f
     product.last_seen_at = max((a.last_seen_at for a in data.ads), default=product.last_seen_at)
 
@@ -111,6 +104,14 @@ def score_product(db: Session, product: Product, data: ProductData, ctx: ScoreCo
     product.opportunity_score = v["opportunity"]
     action, reasons = pv["decision"]
     product.recommendation, product.recommendation_reasons = action, reasons
+    # Evaluate after the v2 decision, so SKIP cannot retain an earlier Hidden label.
+    from .hidden import assess, store_verdict
+    from ..visual.models import ProductImage
+    snapshots = list(db.scalars(select(ProductDailySnapshot).where(ProductDailySnapshot.product_id == product.id,
+                     ProductDailySnapshot.date >= datetime.utcnow().date() - timedelta(days=14))))
+    images = {im.source_id: im for im in db.scalars(select(ProductImage).where(ProductImage.source == "creative",
+              ProductImage.source_id.in_([c.id for c in creatives])))}
+    store_verdict(product, assess(product, data.ads, snapshots=snapshots, creatives=creatives, images=images))
     product.scored_at = datetime.utcnow()
     auto_lifecycle(db, product)
     if prev_rec and prev_rec != action:
@@ -139,11 +140,13 @@ def rescore_products(db: Session, product_ids) -> int:
 
 def is_hidden_winner(p: Product) -> bool:
     """Stored verdict of services/hidden.evaluate (set by score_product): same rule as the Hidden Winners page."""
-    return (p.features or {}).get("hidden_score") is not None
+    verdict = (p.features or {}).get("hidden_verdict") or {}
+    return verdict.get("rule_version") == 3 and verdict.get("status") == "CONFIRMED" and p.recommendation != "SKIP"
 
 
-def is_potential_winner(p: Product) -> bool:
-    return p.win_score >= POTENTIAL_WINNER_MIN and p.confidence_score >= 45
+def is_test_candidate(p: Product) -> bool:
+    """The only "winner-ish" verdict MKT sees: the v2 label (discovery.discovery_decision). Win / Rare Winner (v1) stay stored, never decide."""
+    return p.recommendation in ("TEST", "TEST_NOW")
 
 
 def score_all(db: Session, commit_every: int | None = None) -> int:
@@ -162,10 +165,12 @@ def score_all(db: Session, commit_every: int | None = None) -> int:
 
 # ------------------------------------------------------------ Daily snapshots (§18)
 def _product_snapshot(p: Product, data: ProductData, d: date) -> tuple[ProductDailySnapshot, dict, dict]:
+    from .product_evidence import capture_activity
     f = compute_features(data, d)
     sc = compute_scores(p, f)
     snap = ProductDailySnapshot(
         product_id=p.id, date=d,
+        activity_evidence=capture_activity(data.ads) if d == datetime.utcnow().date() else None,
         active_ads=f["active_ads"], new_ads=sum(1 for a in data.ads if not a.is_internal and a.first_seen_at.date() == d),
         removed_ads=f["removed_ads_7d"], advertisers=f["advertiser_count"], new_advertisers=f["new_advertisers_7d"],
         markets=f["market_count"], new_markets=len(f["new_markets_7d"]), stores=f["store_count"],
@@ -211,9 +216,7 @@ def build_snapshots(db: Session, d: date | None = None, products: list[Product] 
             m["active_ads"] += sum(1 for a in active if c in ad_markets(a))
             m["new_ads"] += sum(1 for a in active if c in ad_markets(a) and a.first_seen_at.date() == d)
             market_adv[key] |= {a.advertiser_id for a in active if c in ad_markets(a)}
-            pseudo = Product(win_score=sc["win_score"], confidence_score=sc["confidence_score"],
-                             rare_winner_score=sc["rare_winner_score"], saturation_score=sc["saturation_score"], features=f)
-            m["potential_winners"] += 1 if is_potential_winner(pseudo) else 0
+            m["potential_winners"] += 1 if is_test_candidate(p) else 0  # column keeps its old name (history); ponytail: counts today's label, no per-day label stored
             m["hidden_winners"] += 1 if is_hidden_winner(p) else 0
             market_opp[key].append(sc["opportunity_score"])
 

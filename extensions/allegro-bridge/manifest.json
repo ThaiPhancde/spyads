@@ -1,9 +1,14 @@
 {
   "manifest_version": 3,
   "name": "ToolSpy Browser Bridge (Allegro)",
-  "version": "0.1.0",
-  "description": "Reads the Allegro listing page YOU opened, only when you click the button, and sends it to your local ToolSpy API.",
+  "version": "0.2.0",
+  "description": "Reads Allegro listing pages in YOUR Chrome (on your click, or one search at a time requested by your ToolSpy web) and sends them to your local ToolSpy API.",
   "action": { "default_popup": "popup.html", "default_title": "ToolSpy Browser Bridge" },
-  "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["https://allegro.pl/*", "http://127.0.0.1/*", "http://localhost/*"]
+  "background": { "service_worker": "background.js" },
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": ["https://allegro.pl/*", "http://127.0.0.1/*", "http://localhost/*", "http://localhost:3000/*", "http://127.0.0.1:3000/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "content_scripts": [
+    { "matches": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"], "js": ["lib.js", "bridge.js"], "run_at": "document_start" }
+  ]
 }

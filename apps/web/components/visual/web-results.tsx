@@ -75,7 +75,7 @@ export function WebResultCard({ r, jobId, index, cached, onChanged }: { r: any; 
     if (!s?.eu_listing_id) return;
     await api("/search/images/watch", { method: "POST", body: JSON.stringify({ name: (r.title || r.shop_name || "Web result").slice(0, 80), owner: getUser().name || "team",
       eu_listing_id: s.eu_listing_id, eu_product_ids: s.eu_product_id ? [s.eu_product_id] : [], thumb: r.thumbnail_url, rules: { price_drop_pct: 10 } }) });
-    toast.success("Đã theo dõi — xem EU Market › Watchlists & Alerts");
+    toast.success("Đã theo dõi — xem EU Market › Watchlists");
   });
   const img = r.thumbnail_url || r.image_url;
   return (

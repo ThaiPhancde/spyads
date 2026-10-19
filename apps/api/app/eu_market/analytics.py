@@ -1,4 +1,4 @@
-"""Price / Trend / Rarity / Supplier + Ad matching / Watchlist alerts (spec §7.2–7.6, P2–P3).
+"""Price / Trend / Rarity / Supplier + Ad matching (spec §7.2–7.6, P2–P3).
 
 Every score here is an internal signal over the data we collected — never sales, revenue or ROAS. Each result says
 which inputs it had, which were missing, and flags `insufficient_data` instead of extrapolating.
@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import ADS_ONLY, Ad, Alert
+from ..models import ADS_ONLY, Ad
 from .models import EUAdMatch, EUListing, EUPriceSnapshot, EUProduct, EUProductMatch, EUTrendSignal, EUWatchlist
 from .service import fold, to_eur, tokens
 
@@ -271,50 +271,4 @@ def match_ads(db: Session, product_ids: list[int] | None = None, title_limit: in
                 added += 1
     db.commit()
     return {"added": added}
-
-
-# ------------------------------------------------------------------ watchlist alerts (reuse the app's Alert table)
-def evaluate_watchlists(db: Session, fx: dict, now: datetime | None = None) -> dict:
-    now = now or datetime.utcnow()
-    made = 0
-    for w in db.scalars(select(EUWatchlist).where(EUWatchlist.active.is_(True))).all():
-        rules = w.rules or {}
-        pids = list(w.product_ids or [])
-        if w.keywords:
-            from .service import keyword_filter
-
-            q = select(EUListing.product_id).where(keyword_filter(w.keywords)).distinct()
-            if w.countries:
-                q = q.where(EUListing.market_country.in_(w.countries))
-            pids += [p for p in db.scalars(q).all() if p]
-        for pid in set(pids):
-            ls = db.scalars(select(EUListing).where(EUListing.product_id == pid)).all()
-            series = price_series(db, [l.id for l in ls], now - timedelta(days=90), fx)
-            for l in ls:
-                pts = series.get(l.id) or []
-                if len(pts) >= 2 and rules.get("price_drop_pct"):
-                    a, b = pts[-2]["price"], pts[-1]["price"]
-                    if a and (a - b) / a * 100 >= float(rules["price_drop_pct"]):
-                        made += _alert(db, "EU_PRICE_DROP", f"Giá giảm {round((a - b) / a * 100, 1)}%: {l.title[:80]}",
-                                       f"{l.source} {l.market_country}: {a} → {b} {l.currency}", w, l, pts[-1]["captured_at"])
-                st = price_stats(pts)
-                if rules.get("consecutive_rises") and st.get("consecutive_rises", 0) >= int(rules["consecutive_rises"]):
-                    made += _alert(db, "EU_PRICE_RISING", f"Giá tăng {st['consecutive_rises']} lần liên tiếp: {l.title[:80]}",
-                                   f"{l.source} {l.market_country}: {st['first']} → {st['last']} {l.currency}", w, l, pts[-1]["captured_at"])
-            if rules.get("source_gap_pct"):
-                gap = (compare_offers(ls, fx).get("retail_incl_vat") or {}).get("gap_pct")
-                if gap is not None and gap >= float(rules["source_gap_pct"]):
-                    made += _alert(db, "EU_SOURCE_GAP", f"Chênh giá giữa nguồn {gap}%", f"product #{pid}: {len(ls)} offers", w, None,
-                                   now.date())
-    db.commit()
-    return {"alerts": made}
-
-
-def _alert(db: Session, typ: str, title: str, msg: str, w: EUWatchlist, l: EUListing | None, stamp) -> int:
-    key = f"{typ}:{w.id}:{l.id if l else ''}:{stamp}"[:128]
-    if db.scalar(select(Alert.id).where(Alert.dedupe_key == key)):
-        return 0
-    db.add(Alert(type=typ, severity="warn", title=title[:255], message=msg, dedupe_key=key,
-                 data={"eu_watchlist_id": w.id, "eu_listing_id": l.id if l else None, "eu_product_id": l.product_id if l else None}))
-    return 1
 

@@ -37,9 +37,8 @@ def saturation_score(f: dict) -> tuple[float, str, dict]:
     parts = {
         "advertiser_density": (0.25, adv_bell),
         "creative_duplication": (0.15, lin(f["creative_duplication"], 0, 0.45)),
-        "ad_volume": (0.15, lin(f["active_ads"], 2, 12)),
+        "ad_volume": (0.15, lin(f.get("unique_ads", f["active_ads"]), 2, 12)),
         "store_count": (0.15, lin(f["store_count"], 1, 4)),
-        "keyword_competition": (0.0, (f.get("keyword_competition") or 0.5) * 100),  # ponytail: no source fills this yet
         "price_compression": (0.0, lin(-(f.get("price_trend") or 0), 0, 0.25)),  # ponytail: no source fills this yet
         "growth_deceleration": (0.10, lin(-accel_ratio, 0, 0.6) if f["new_ads_prev_7d"] >= 3 else 0),
     }
@@ -63,17 +62,15 @@ def saturation_score(f: dict) -> tuple[float, str, dict]:
 def external_win_score(f: dict, saturation: float) -> tuple[float, dict]:
     sentiment = lin(f["positive_comment_rate"] - f["negative_comment_rate"], -0.5, 0.7) if f["comments"] >= 5 else 50
     parts = {
-        "ad_longevity": (0.15, 0.4 * lin(f.get("force_top", 0), 15, 70) + 0.3 * lin(f["ads_running_30d"] / max(1, f["active_ads"]), 0, 0.4)
+        "ad_longevity": (0.15, 0.4 * lin(f.get("force_top", 0), 15, 70) + 0.3 * lin(f["ads_running_30d"] / max(1, f.get("unique_ads", f["active_ads"])), 0, 0.4)
                          + 0.3 * lin(f["ads_running_30d"], 0, 20)),
         "creative_velocity": (0.15, 0.5 * lin(f["new_ads_7d"], 0, 30) + 0.5 * lin(f["creative_growth_7d"], 0, 0.8)),
         "advertiser_growth": (0.10, 0.6 * lin(f["advertiser_growth"], 0, 0.4) + 0.4 * lin(f["new_advertisers_7d"], 0, 6)),
         "advertiser_diversity": (0.10, lin(1 - f["advertiser_hhi"], 0, 0.85)),
         "geographic_expansion": (0.10, 0.7 * lin(f["market_count"], 1, 5) + 0.3 * lin(len(f["new_markets_7d"]), 0, 2)),
-        "traffic_momentum": (0.0, lin(f["traffic_growth"], -20, 50) if f["store_count"] else 40),  # ponytail: no source fills this yet
         "engagement_quality": (0.10, lin(f["engagement_per_ad"], 0, 400)),  # purchase_intent_rate dropped: no comments source yet
         "store_momentum": (0.10, 0.5 * lin(f["store_count"], 0, 12) + 0.5 * lin(f["new_stores_30d"], 0, 5)),
         "comment_sentiment": (0.0, sentiment),  # ponytail: no source fills this yet
-        "search_trend": (0.0, lin(f["search_trend"], -30, 60)),  # ponytail: no source fills this yet
     }
     xp = cross_platform_signal(f)
     if xp is not None:  # only when the product really shows up elsewhere — absence of evidence is not a penalty
@@ -100,9 +97,8 @@ def rarity_score(f: dict) -> tuple[float, dict]:
     # same DB percentiles as saturation_score: p99 advertiser_count 3 · active_ads 12 · store_count 2
     parts = {
         "low_advertiser_density": (0.35, 100 - lin(f["advertiser_count"], 1, 4)),
-        "low_ad_density": (0.25, 100 - lin(f["active_ads"], 1, 12)),
+        "low_ad_density": (0.25, 100 - lin(f.get("unique_ads", f["active_ads"]), 1, 12)),
         "low_store_density": (0.20, 100 - lin(f["store_count"], 1, 4)),
-        "low_keyword_competition": (0.0, 100 - (f.get("keyword_competition") or 0.5) * 100),  # ponytail: no source fills this yet
     }
     return round(_weighted(parts), 1), _breakdown(parts)
 

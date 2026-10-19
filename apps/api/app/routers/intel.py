@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import and_, func, not_, or_, select
+from sqlalchemy import and_, case, func, literal, not_, or_, select
 from sqlalchemy.orm import Session
 
 from .. import events, media, realtime
@@ -22,10 +22,12 @@ from ..collector.factory import PUSH_SOURCES, ConnectorFactory
 from ..db import get_db, ingest_lock
 from ..ingest import ingest_ads
 from ..markets import REGION_LABEL, REGIONS, ad_scope_filter, product_in_scope, targets
-from ..models import (Ad, AdSource, Advertiser, Connector, Creative, Event, Product, SearchJob,
+from ..models import (Ad, AdSource, Advertiser, Connector, Creative, Event, Product, ProductAlias, SearchJob,
                       TrackedQuery, Vote)
+from ..services import lexicon, naming, query_intent
 from ..services.discovery import VOTE_REASONS, VOTE_VALUE, market_dna
 from ..storage import BACKEND, DATA_DIR, store
+from ..workspace.filters import ad_filter, has_ad_filter
 
 router = APIRouter()
 INGEST_TOKEN = os.getenv("INGEST_TOKEN", "")
@@ -104,19 +106,24 @@ def ad_brief(a: Ad, adv_name: str | None = None) -> dict:
             "variants": a.variants, "hook": a.hook, "angle": a.angle, "offer": a.offer, "snapshot_url": a.snapshot_url,
             "source": a.source, "force_score": a.force_score, "force_tier": a.force_tier, "last_verified": a.last_verified_at,
             "inactive_at": a.inactive_at, "reactivated_at": a.reactivated_at, "impressions_text": a.impressions_text,
-            "spend_text": a.spend_text, "reach": a.reach, "markets": ad_markets_(a)}
+            "spend_text": a.spend_text, "reach": a.reach, "markets": ad_markets_(a),
+            # None = the source never reported it → the card shows N/A (never 0). Post-scope numbers: GET /api/engagement.
+            "engagement": {"likes": a.likes, "comments": a.comments_count, "shares": a.shares, "views": a.views, "scope": "ad"}}
 
 
 def product_card(p: Product, cover: Creative | None = None) -> dict:
+    from ..services.engine import is_hidden_winner
     f = p.features or {}
     v = (p.potential or {}).get("vector", {})
     return {
-        "id": p.id, "product_code": p.product_code, "name": p.canonical_name, "category": p.category, "country": p.country,
-        "markets": f.get("markets", []), "price": f.get("avg_price") or p.price, "currency": p.currency,
+        "id": p.id, "product_code": p.product_code, **naming.card_fields(p), "category": p.category, "country": p.country,
+        "markets": f.get("markets", []), "price": p.price if p.price and p.currency else f.get("avg_price"),
+        "currency": p.currency if p.price and p.currency else "USD" if f.get("avg_price") else None,
         "recommendation": p.recommendation, "reasons": p.recommendation_reasons, "classification": p.classification,
+        "hidden_winner": is_hidden_winner(p),
         "lifecycle": p.lifecycle_status, "opportunity": v.get("opportunity", p.opportunity_score),
-        "vector": v, "win_score": p.win_score, "saturation_score": p.saturation_score, "confidence_score": p.confidence_score,
-        "advertisers": f.get("advertiser_count", 0), "active_ads": f.get("active_ads", 0), "total_ads": f.get("total_ads", 0),
+        "vector": v, "saturation_score": p.saturation_score, "confidence_score": p.confidence_score,
+        "advertisers": f.get("advertiser_count", 0), "active_ads": f.get("active_ads", 0), "unique_ads": f.get("unique_ads", f.get("active_ads", 0)), "total_ads": f.get("total_ads", 0),
         "new_ads_7d": f.get("new_ads_7d", 0), "growth_7d": f.get("creative_growth_7d", 0),
         "funnel_mix": p.funnel_mix or {}, "first_seen_at": p.first_seen_at, "last_seen_at": p.last_seen_at,
         "cover": creative_dict(cover) if cover else None, **platform_signals(f),
@@ -138,31 +145,44 @@ def landing_links(db: Session, products: list[Product]) -> dict[int, str]:
         return {}
     best: dict[int, tuple] = {}
     for pid, url, funnel, active, aid in db.execute(select(Ad.product_id, Ad.landing_url, Ad.funnel, Ad.is_active, Ad.id)
-                                                    .where(Ad.product_id.in_(ids), Ad.landing_url.is_not(None), Ad.landing_url != "")):
+                                                    .where(Ad.product_id.in_(ids), ad_filter(db), Ad.landing_url.is_not(None), Ad.landing_url != "")):
         rank = (funnel == "ladi", bool(active), aid)
         if pid not in best or rank > best[pid][0]:
             best[pid] = (rank, url)
     return {pid: v[1] for pid, v in best.items()}
 
 
+def top_advertisers(db: Session, pids: list[int]) -> dict[int, str]:
+    """Product → the advertiser running most of its ads (shown next to the name, never as it)."""
+    if not pids:
+        return {}
+    out: dict[int, tuple[int, str]] = {}
+    for pid, name, n in db.execute(select(Ad.product_id, Advertiser.name, func.count(Ad.id)).join(Advertiser, Advertiser.id == Ad.advertiser_id)
+                                   .where(Ad.product_id.in_(pids), ad_filter(db)).group_by(Ad.product_id, Advertiser.name)):
+        if pid not in out or n > out[pid][0]:
+            out[pid] = (n, name)
+    return {pid: v[1] for pid, v in out.items()}
+
+
 def covers(db: Session, products: list[Product], nets: list[str] | None = None) -> dict[int, Creative]:
     """Product → card media. `nets` (source filter) = only creatives from those networks (NULL network = old Meta rows)."""
+    allowed_ads = select(Ad.id).where(ad_filter(db))
     in_nets = (lambda c: c.network in nets or (c.network is None and "meta" in nets)) if nets else (lambda c: True)
     ids = [p.cover_creative_id for p in products if p.cover_creative_id]
-    out = {c.id: c for c in db.scalars(select(Creative).where(Creative.id.in_(ids)))} if ids else {}
+    out = {c.id: c for c in db.scalars(select(Creative).where(Creative.ad_id.in_(allowed_ads), Creative.id.in_(ids)))} if ids else {}
     res = {p.id: out.get(p.cover_creative_id) for p in products}
     # the stored cover can be archived / expired later, or be an image while a video still plays from its source
     bad = [pid for pid, c in res.items() if c is None or c.status != "stored" or c.type != "video" or not in_nets(c)]
     if bad:
         best: dict[int, Creative] = {}
-        for c in db.scalars(select(Creative).where(Creative.product_id.in_(bad), Creative.status == "stored")
+        for c in db.scalars(select(Creative).where(Creative.ad_id.in_(allowed_ads), Creative.product_id.in_(bad), Creative.status == "stored")
                             .order_by(Creative.type.desc(), Creative.id)):  # "video" sorts before "image" when descending
             if in_nets(c):
                 best.setdefault(c.product_id, c)
         still = [pid for pid in bad if pid not in best or best[pid].type != "video"]
         dead: dict[int, Creative] = {}  # last resort: a video whose link expired — the card says so + links the ad page
         if still:  # nothing stored (or only images; videos aren't downloaded by default) → a creative whose original link still works
-            for c in db.scalars(select(Creative).where(Creative.product_id.in_(still), Creative.status.in_(["pending", "skipped", "failed", "archived", "expired"]))
+            for c in db.scalars(select(Creative).where(Creative.ad_id.in_(allowed_ads), Creative.product_id.in_(still), Creative.status.in_(["pending", "skipped", "failed", "archived", "expired"]))
                                 .order_by(Creative.type.desc(), Creative.id.desc())):
                 cur = best.get(c.product_id)
                 if (cur is None or (cur.type != "video" and c.type == "video")) and in_nets(c) and source_alive(c.source_url):
@@ -174,6 +194,18 @@ def covers(db: Session, products: list[Product], nets: list[str] | None = None) 
                 res[pid] = best[pid]
             elif res[pid] is None or not in_nets(res[pid]):
                 res[pid] = dead.get(pid)  # never another network's media under a source filter
+    # a card must never be an empty "media pending / link expired" box while the product HAS a saved thumbnail: the picked
+    # cover has none and its source is gone → another creative of the same product that does (videos first)
+    blank = [pid for pid, c in res.items() if c is None or (not c.thumb_key and c.status != "stored" and not source_alive(
+        c.preview_source_url if c.type == "video" else c.source_url))]
+    if blank:
+        best_thumb: dict[int, Creative] = {}
+        for c in db.scalars(select(Creative).where(Creative.ad_id.in_(allowed_ads), Creative.product_id.in_(blank), Creative.thumb_key.is_not(None))
+                            .order_by(Creative.type.desc(), Creative.id.desc())):
+            if in_nets(c):
+                best_thumb.setdefault(c.product_id, c)
+        for pid, c in best_thumb.items():
+            res[pid] = c
     return res
 
 
@@ -194,6 +226,11 @@ async def stream(request: Request):
                     break
                 try:
                     payload = await asyncio.wait_for(q.get(), timeout=20)
+                    if getattr(request.state, "user", {}).get("role") == "MKT":
+                        # Global bus is shared: never disclose another user's queries, votes, or activity.
+                        if payload.get("type") not in ("CREATIVE_STORED", "PRODUCT_SCORED", "AD_ADDED"):
+                            continue
+                        payload = {**payload, "data": {k: v for k, v in (payload.get("data") or {}).items() if k in ("ad_id", "creative_id", "product_id")}}
                     yield events.sse_format(payload)
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
@@ -206,6 +243,8 @@ async def stream(request: Request):
 
 @router.get("/api/events")
 def recent_events(limit: int = Query(50, le=500), type: str | None = None, db: Session = Depends(get_db)):
+    if db.info.get("role") == "MKT":
+        return []  # personal activity lives at /workspace/activity
     q = select(Event).order_by(Event.id.desc()).limit(limit)
     if type:
         q = q.where(Event.type == type)
@@ -305,21 +344,103 @@ def _ad_has(term: str):
                func.coalesce(Ad.ad_text, "").ilike(f"%{term}%"))
 
 
-@router.get("/api/search")
-def search(q: str | None = None, country: str | None = None, funnel: str | None = None, platform: str | None = None,
+def _variant_has(term: str):
+    """Expanded term, on search_text only (it already holds name + title + copy + advertiser + link, lower-cased: one
+    column instead of three keeps 40 variants cheap). Short Latin words must start a word ("ring" ≠ "spring")."""
+    if term.isascii() and len(term) <= 4:
+        return (literal(" ") + func.coalesce(Ad.search_text, "")).contains(" " + term)
+    return func.coalesce(Ad.search_text, "").contains(term)
+
+
+_VI_TONE = re.compile(r"[ăâđêôơưàáạảãằắặẳẵầấậẩẫèéẹẻẽềếệểễìíịỉĩòóọỏõồốộổỗờớợởỡùúụủũừứựửữỳýỵỷỹ]", re.I)
+
+
+def _exact(kw: str):
+    """Words of a keyword anywhere (AND) — except Vietnamese, whose words are syllables: "nước hoa" (perfume) is not
+    "nước" + "hoa" anywhere in the copy. (English stays words-anywhere: "whiten your teeth" is a teeth-whitening ad.)"""
+    if len(kw.split()) > 1 and _VI_TONE.search(kw):
+        return _ad_has(kw)
+    return and_(*[_ad_has(t) for t in kw.split()])
+
+
+TIERS = ("exact", "synonym", "related")
+RELATED_MIN = 30  # related concepts join only when exact + synonym found fewer products / ads than this (limited expansion)
+
+
+def _like(col, v: str):
+    """col holds v — short Latin words only at a word start ("ring" ≠ "Spring")."""
+    if v.isascii() and len(v) <= 4:
+        return (literal(" ") + func.lower(func.coalesce(col, ""))).contains(" " + v)
+    return col.ilike(f"%{v}%")
+
+
+def _name_has(variants: list[str]):
+    """Product side of a synonym group: canonical / Vietnamese name or any alias (original names) holds a variant."""
+    return or_(*[or_(_like(Product.canonical_name, v), _like(Product.name_vi, v)) for v in variants],
+               Product.id.in_(select(ProductAlias.product_id).where(or_(*[_like(ProductAlias.name, v) for v in variants]))))
+
+
+def keyword_tiers(kw: str, e: dict | None = None) -> list:
+    """Ad filters for one keyword, best first: exact words (AND) → same concept in any language (lexicon.py: vi / en /
+    tl / ar / zh) → related concepts ("vòng tay phong thủy" → lucky / pixiu bracelets). Semantic (text embeddings) is not
+    a tier: the image model has no text tower — use image search for look-alikes."""
+    exact = _exact(kw)
+    e = e or lexicon.expand(kw)   # callers pass query_intent.expand(db, kw): lexicon, else the cached model meaning of the keyword
+    if not e["groups"]:
+        return [exact]
+    rest = [_ad_has(w) for w in e["rest"] if len(w) > 2]
+    avoid = [or_(*[_variant_has(v) for v in a]) for a in e.get("avoid") or [] if a]   # "sunglasses" ads are not "eyeglasses" ads
+    syn = and_(*[or_(*[_variant_has(v) for v in g]) for g in e["groups"]], *rest, *[not_(a) for a in avoid])
+    rel = and_(*[or_(*[_variant_has(v) for v in g]) for g in e["related"]], *rest)
+    return [exact, syn, rel]
+
+
+def _search_all(q: str | None = None, country: str | None = None, funnel: str | None = None, platform: str | None = None,
            media_type: str | None = None, category: str | None = None, min_days: int | None = None,
            max_advertisers: int | None = None, decision: str | None = None, quadrant: str | None = None,
-           active_only: bool = True, has_video: bool = False, sort: str = "opportunity", limit: int = Query(60, le=200),
+           active_only: bool = True, has_video: bool = False, sort: str = "opportunity", limit: int = 60,
            offset: int = 0, ids: str | None = None, network: str | None = None, min_networks: int | None = None,
-           exclude: str | None = None, db: Session = Depends(get_db)):
+           exclude: str | None = None, name_status: str | None = None, expand: bool = True, relevant: bool = True,
+           only_off: bool = False, mode: str | None = None, language: str | None = None, similar_to: int | None = None,
+           min_fit: float | None = None, min_demand: float | None = None, min_engagement: float | None = None,
+           db: Session = Depends(get_db)):
     """Search products by keyword over product names, aliases, ad copy, titles, advertisers and landing pages.
     `q` = several keywords split by | , or newline: OR between keywords, AND between the words of one keyword.
     `exclude` = keywords (same separators) whose ads / products are dropped.
-    `ids` (comma list, e.g. a live-search job's products) restricts to those products and skips keyword/market matching."""
-    aq = select(Ad.product_id).where(Ad.product_id.is_not(None))
+    `ids` (comma list, e.g. a live-search job's products) restricts to those products and skips market scope. The keyword still
+    applies (exact + same-meaning in any language): a source's fuzzy hits ("kính mắt" → window-glass ads) are dropped and counted in
+    `off_topic`; `relevant=false` shows them all.
+    `only_off=true` (with `ids`): the opposite list — just the products `relevant` hides, paged like any other list.
+    `expand` (default on): a keyword also matches its translations / synonyms / related concepts, ranked below exact hits.
+    `name_status` = UNKNOWN / SUGGESTED / AUTO_CONFIRMED / VERIFIED (comma list): the "Chưa xác định" queue for MKT.
+    Personalized (Phase 7, app/personal_search.py): `mode` = for_me | claimable | followed | similar (`similar_to` = seed
+    product; empty = similar to the MKT's history). Every mode is an exclusive-opportunity view: products another MKT
+    owns are never listed. `language` (ad language), `min_fit` (personal fit 0–100), `min_demand` (market demand 0–1),
+    `min_engagement` (only products with real likes/comments/shares data, engagement per ad ≥ value), sort=fit.
+    Search never claims anything."""
+    from .. import personal_search as PS
+    uid = db.info.get("user_id")
+    if (mode or min_fit is not None or sort == "fit") and not uid:
+        raise HTTPException(401, "Chế độ cá nhân hóa cần đăng nhập")
+    personal = PS.candidates(db, uid, mode, similar_to) if mode else None
+    aq = select(Ad.product_id).where(Ad.product_id.is_not(None), ad_filter(db))
+    if personal is not None and personal.restrict is not None:
+        aq = aq.where(Ad.product_id.in_(personal.restrict or [0]))
+    if personal is not None and personal.advertisers is not None:
+        aq = aq.where(Ad.advertiser_id.in_(personal.advertisers or [0]))
+    if language:
+        aq = aq.where(func.lower(func.coalesce(Ad.language, "")).like(f"{language.lower()[:8]}%"))
     id_list = [int(i) for i in (ids or "").split(",") if i.strip().isdigit()]
+    if only_off and id_list and split_keywords(q):  # ponytail: second scan of the job's ids, only paid when the user opens the off-topic section
+        ok = {r["id"] for r in search(q=q, ids=ids, expand=expand, relevant=True, limit=200, db=db)["rows"]}
+        id_list, relevant, q = [i for i in id_list if i not in ok], False, None
+        if not id_list:
+            return {"cards": [], "products": [], "cov": {}, "nets": [], "has_video": has_video,
+                    "meta": {"funnels": {}, "keywords": [], "exclude": [], "off_topic": 0, "understood": {}}}
     if id_list:  # a live-search job's products: no market scope / active filter — foreign-market results must show
-        aq, q, country = aq.where(Ad.product_id.in_(id_list)), None, None
+        aq, country = aq.where(Ad.product_id.in_(id_list)), None
+        if not relevant:
+            q = None
     kws, exs = split_keywords(q), split_keywords(exclude)
     for x in exs:
         aq = aq.where(not_(_ad_has(x)))
@@ -337,29 +458,48 @@ def search(q: str | None = None, country: str | None = None, funnel: str | None 
         aq = aq.where(Ad.media_type == media_type)
     if active_only and not id_list:
         aq = aq.where(Ad.is_active.is_(True))
-    kw_hit = lambda kw: and_(*[_ad_has(t) for t in kw.split()])
-    if kws:
-        aq = aq.where(or_(*[kw_hit(k) for k in kws]))  # OR between keywords, AND between the words of one keyword
+    exp = {kw: query_intent.expand(db, kw) for kw in kws} if expand else {}
+    tiers = {kw: keyword_tiers(kw, exp[kw]) if expand else [_exact(kw)] for kw in kws}
+    if kws:  # live-job products too: only ads whose own text / name says the keyword (or what it means); a source's fuzzy hit is off-topic
+        aq = aq.where(or_(*[c for kw in kws for c in tiers[kw]]))  # OR between keywords, AND between the words of one keyword
+    # one scan: every matched ad with, per keyword, the best tier it reached (0 exact · 1 synonym · 2 related · NULL)
+    cols = [case(*[(t, i) for i, t in enumerate(tiers[kw])], else_=None) for kw in kws]
+    span: dict[int, list] = {}
+    kw_tier: dict[int, dict[str, int]] = {}
+    funnels: Counter = Counter()  # ponytail: funnel facet counts every matched ad; min_days only trims the product list
+    for pid, first, last, fn, *ts in db.execute(aq.with_only_columns(Ad.product_id, Ad.first_seen_at, Ad.last_seen_at, Ad.funnel, *cols)):
+        sp = span.setdefault(pid, [0, first, last])
+        sp[0] += 1
+        sp[1], sp[2] = min(sp[1] or first, first or sp[1]), max(sp[2] or last, last or sp[2])
+        funnels[fn] += 1
+        for kw, t in zip(kws, ts):
+            if t is not None and t < kw_tier.setdefault(pid, {}).get(kw, 9):
+                kw_tier[pid][kw] = t
     # product → matched ads (seeded so id products with no ad still show — not under a source filter)
-    matches: dict[int, int] = dict.fromkeys([] if nets else id_list, 0)
+    filtered_advertisers = has_ad_filter(db)
+    matches: dict[int, int] = dict.fromkeys([] if nets or kws or filtered_advertisers else id_list, 0)
     now = datetime.utcnow()
-    for pid, n, first, last in db.execute(aq.with_only_columns(Ad.product_id, func.count(Ad.id), func.min(Ad.first_seen_at),
-                                                                func.max(Ad.last_seen_at)).group_by(Ad.product_id)):
+    for pid, (n, first, last) in span.items():
         if min_days and first and ((last or now) - first).days < min_days:  # longest span of the product's matched ads
             continue
         matches[pid] = n
-    # ponytail: funnel facet counts every matched ad; min_days only trims the product list
-    funnels = Counter({fn: n for fn, n in db.execute(aq.with_only_columns(Ad.funnel, func.count(Ad.id)).group_by(Ad.funnel)) if fn})
-    matched_kw: dict[int, list[str]] = {pid: [kws[0]] for pid in matches} if len(kws) == 1 else {}
-    for kw in kws:
-        if len(kws) > 1:  # which keywords hit each product (relevance = hit count)
-            for (pid,) in db.execute(aq.with_only_columns(Ad.product_id).where(kw_hit(kw)).distinct()):
-                matched_kw.setdefault(pid, []).append(kw)
-        for p in db.scalars(select(Product).where(Product.canonical_name.ilike(f"%{kw}%"))):  # also canonical names
-            if product_in_scope(p, country) and (not nets or p.id in matches):
-                matches.setdefault(p.id, 0)
-                if kw not in matched_kw.setdefault(p.id, []):
-                    matched_kw[p.id].append(kw)
+    named = or_(Product.name_status.is_(None), Product.name_status != "UNKNOWN")
+    for kw in kws:  # product names, Vietnamese names and aliases: the keyword itself = exact, a translation = synonym
+        hits = [(0, _name_has([kw]))]
+        if expand and (e := exp[kw])["groups"]:
+            hits.append((1, and_(*[_name_has(g) for g in e["groups"]])))
+        for tier, cond in hits:
+            visible = [Product.id.in_(select(Ad.product_id).where(ad_filter(db)))] if filtered_advertisers else []
+            for p in db.scalars(select(Product).where(cond, named, *visible, *([Product.id.in_(id_list)] if id_list else []))):
+                # an ad-level filter (source, language, mode's advertisers) must hold for name hits too
+                ad_level = nets or language or (personal is not None and personal.advertisers is not None)
+                if product_in_scope(p, country) and (not ad_level or p.id in matches):
+                    matches.setdefault(p.id, 0)
+                    t = kw_tier.setdefault(p.id, {})
+                    t[kw] = min(t.get(kw, 9), tier)
+    if kws and sum(1 for pid in matches if min(kw_tier.get(pid, {}).values(), default=2) <= 1) >= RELATED_MIN:
+        matches = {pid: n for pid, n in matches.items() if min(kw_tier.get(pid, {}).values(), default=2) <= 1}
+    off_topic = len(set(id_list) - set(matches)) if id_list and kws else 0
     products = list(db.scalars(select(Product).where(Product.id.in_(list(matches)))))
     if exs:
         products = [p for p in products if not any(x in (p.canonical_name or "").lower() for x in exs)]
@@ -370,28 +510,122 @@ def search(q: str | None = None, country: str | None = None, funnel: str | None 
         products = [p for p in products if p.recommendation == decision]
     if quadrant:
         products = [p for p in products if p.classification == quadrant]
+    if name_status:
+        want = set(name_status.upper().split(","))
+        products = [p for p in products if (p.name_status or "SUGGESTED") in want]
     if min_networks:  # cross-platform validated: seen on ≥ N networks (ads, marketplaces, viral)
         products = [p for p in products if len((p.features or {}).get("networks") or []) >= min_networks]
-    cov = covers(db, products, nets)
+    cov = covers(db, products, nets) if has_video else {}  # every product's cover only when filtering on it: ~100k rows
     if has_video:
         products = [p for p in products if cov.get(p.id) and cov[p.id].type == "video"]
-    cards = [product_card(p, cov.get(p.id)) | {"matched_ads": matches.get(p.id, 0),
-                                               "matched_keywords": matched_kw.get(p.id, [])} for p in products]
-    key = SORTS.get(sort, SORTS["opportunity"])
-    if len(kws) > 1:  # ponytail: plain hit count as relevance; weights / semantic score come with phase 2
-        cards.sort(key=lambda c: (len(c["matched_keywords"]), key(c)), reverse=True)
+    if personal is not None and personal.restrict is not None:  # name matches bypass the ad scan: keep the mode's set
+        allowed = set(personal.restrict)
+        products = [p for p in products if p.id in allowed]
+    products = PS.filter_signals(db, products, min_demand, min_engagement)
+    fit, alloc, extra = PS.annotate(db, uid, products, personal, need_fit=bool(mode or min_fit is not None or sort == "fit"))
+    if mode:  # exclusive-opportunity views: someone else's product is not an opportunity
+        products = [p for p in products if alloc.get(p.id) != "taken" and (mode != "claimable" or alloc.get(p.id) == "available")]
+    if min_fit is not None:
+        products = [p for p in products if fit.get(p.id, {}).get("score", 0) >= min_fit]
+    hit = lambda pid: kw_tier.get(pid, {})
+    cards = [product_card(p, cov.get(p.id)) | {"matched_ads": matches.get(p.id, 0), "matched_keywords": [k for k in kws if k in hit(p.id)],
+                                               "match_tier": TIERS[min(hit(p.id).values(), default=2)] if kws else None,
+                                               "fit": fit.get(p.id), "allocation": alloc.get(p.id), **extra.get(p.id, {})}
+             for p in products]
+    key = (lambda c: (c["fit"] or {}).get("score", -1)) if sort == "fit" else SORTS.get(sort, SORTS["opportunity"])
+    cards.sort(key=key, reverse=True)
+    if kws:  # relevance (stable sort, the chosen sort inside): keywords hit by exact / synonym — a loose related match
+        # ("money back" ~ wealth) must not outrank a real one — then the best tier, identified products before unknown
+        strong = lambda c: sum(1 for t in hit(c["id"]).values() if t <= 1)
+        cards.sort(key=lambda c: (-strong(c), TIERS.index(c["match_tier"]), c["name_status"] == "UNKNOWN"))
+    return {"cards": cards, "products": products, "cov": cov, "nets": nets, "has_video": has_video,
+            "meta": {"funnels": {k: v for k, v in funnels.items() if k and v}, "keywords": kws, "exclude": exs,
+                     "off_topic": off_topic, "mode": mode, "mode_info": personal.info if personal is not None else None,
+                     "understood": {kw: {"source": e["source"], "variants": (e["groups"][0] if e["groups"] else [])[:12]}
+                                    for kw, e in exp.items()}}}
+
+
+_SEARCH_CACHE: dict = {}  # key → (time, full sorted result); pages of one query ("Tải thêm") skip the 1–4 s scan
+SEARCH_CACHE_S = 60
+
+
+def _cache_key(db, params):
+    """User, every filter except paging, and what can change the answer for this user: claims / releases (allocation
+    audit), the MKT's advertiser filters, and — for personal views — the profile / seeds / follows signature."""
+    from sqlalchemy import func as F
+
+    from ..allocation import AllocationAudit
+    from ..workspace.models import AdvertiserFilter, Profile
+    uid = db.info.get("user_id")
+    alloc_v = db.scalar(select(F.max(AllocationAudit.id))) or 0
+    from ..workspace.models import AdInteraction
+    interest_v = tuple(db.execute(select(F.count(), F.max(AdInteraction.updated_at))).one())  # soft-dedup signals
+    filt = None
+    if uid:
+        prof = db.get(Profile, uid)
+        filt = (prof.advertiser_mode if prof else "all",
+                tuple(db.execute(select(AdvertiserFilter.advertiser_id, AdvertiserFilter.mode).where(AdvertiserFilter.user_id == uid)
+                                 .order_by(AdvertiserFilter.advertiser_id)).all()))
+    sig = None
+    if uid and (params["mode"] or params["min_fit"] is not None or params["sort"] == "fit"):
+        from .. import recommend as R
+        sig = R.context(db, uid)["signature"]
+    return (uid, tuple(sorted(params.items())), alloc_v, interest_v, filt, sig)
+
+
+@router.get("/api/search")
+def search(q: str | None = None, country: str | None = None, funnel: str | None = None, platform: str | None = None,
+           media_type: str | None = None, category: str | None = None, min_days: int | None = None,
+           max_advertisers: int | None = None, decision: str | None = None, quadrant: str | None = None,
+           active_only: bool = True, has_video: bool = False, sort: str = "opportunity", limit: int = Query(60, le=200),
+           offset: int = 0, ids: str | None = None, network: str | None = None, min_networks: int | None = None,
+           exclude: str | None = None, name_status: str | None = None, expand: bool = True, relevant: bool = True,
+           only_off: bool = False, mode: str | None = None, language: str | None = None, similar_to: int | None = None,
+           min_fit: float | None = None, min_demand: float | None = None, min_engagement: float | None = None,
+           db: Session = Depends(get_db)):
+    """Search products by keyword / filters / personal mode — see _search_all. The full sorted list is cached per user and
+    filters for 60 s, so paging only renders the page. A live-search job's id list (`ids`) is never cached: it changes
+    while the job runs."""
+    params = dict(q=q, country=country, funnel=funnel, platform=platform, media_type=media_type, category=category,
+                  min_days=min_days, max_advertisers=max_advertisers, decision=decision, quadrant=quadrant,
+                  active_only=active_only, has_video=has_video, sort=sort, ids=ids, network=network, min_networks=min_networks,
+                  exclude=exclude, name_status=name_status, expand=expand, relevant=relevant, only_off=only_off, mode=mode,
+                  language=language, similar_to=similar_to, min_fit=min_fit, min_demand=min_demand, min_engagement=min_engagement)
+    limit = limit if isinstance(limit, int) else 60  # direct (non-HTTP) callers may pass nothing
+    key = None if ids else _cache_key(db, params)
+    hit = _SEARCH_CACHE.get(key) if key else None
+    if hit and time.time() - hit[0] < SEARCH_CACHE_S:
+        res = hit[1]
     else:
-        cards.sort(key=key, reverse=True)
-    page = cards[offset: offset + limit]
-    lp = landing_links(db, [p for p in products if p.id in {c["id"] for c in page}])
+        res = _search_all(db=db, **params)
+        if key:
+            if len(_SEARCH_CACHE) > 64:  # ponytail: tiny per-process cache, oldest out; Redis if several API processes need to share it
+                _SEARCH_CACHE.pop(min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0]))
+            _SEARCH_CACHE[key] = (time.time(), res)
+    cards, products, cov, nets, has_video = res["cards"], res["products"], res["cov"], res["nets"], res["has_video"]
+    cards = [dict(c) for c in cards[offset: offset + limit]]  # page rows are decorated below: never mutate the cache
+    page = cards
+    page_products = [p for p in products if p.id in {c["id"] for c in page}]
+    if not has_video:  # covers for the shown page only (sorting never reads them)
+        cov = covers(db, page_products, nets)
+        for c in page:
+            c["cover"] = creative_dict(cov[c["id"]]) if cov.get(c["id"]) else None
+    lp = landing_links(db, page_products)
+    top_adv = top_advertisers(db, [c["id"] for c in page])
+    advertiser_ids = {}
+    for pid, aid in db.execute(select(Ad.product_id, Ad.advertiser_id).where(Ad.product_id.in_([c["id"] for c in page]),
+                              Ad.advertiser_id.is_not(None), ad_filter(db)).order_by(Ad.id.desc())):
+        advertiser_ids.setdefault(pid, aid)
+    names = dict(db.execute(select(Advertiser.id, Advertiser.name).where(Advertiser.id.in_(advertiser_ids.values()))).all())
     aids = [c["cover"]["ad_id"] for c in page if c["cover"] and c["cover"]["ad_id"]]
     snaps = dict(db.execute(select(Ad.id, Ad.snapshot_url).where(Ad.id.in_(aids))).all()) if aids else {}
     for c in page:
         c["landing_url"] = lp.get(c["id"])
+        c["advertiser_id"] = advertiser_ids.get(c["id"])
+        c["advertiser"] = names.get(c["advertiser_id"]) or top_adv.get(c["id"])
         if c["cover"]:  # the ad's own page (Ad Library / TikTok Creative Center): where to watch once the CDN link died
             c["cover"]["ad"] = {"snapshot_url": snaps.get(c["cover"]["ad_id"])}
-    return {"total": len(cards), "rows": page, "funnels": {k: v for k, v in funnels.items() if k and v},
-            "keywords": kws, "exclude": exs}
+    return {"total": len(res["cards"]), "rows": page, **res["meta"]}
 
 
 class LiveSearch(BaseModel):
@@ -405,13 +639,23 @@ class LiveSearch(BaseModel):
     limit: int = 50  # ads per country for one results page (≈10 per source page); next page = POST /jobs/{id}/more
     media_type: str | None = None  # video | image
     reuse_hours: int = 0  # > 0: the same query + sources still running or done within N hours → return that job, no new crawl
+    expand: bool = False  # also crawl the English source keywords of a vi / tl / ar / zh query (≤ 2 extra per keyword)
 
 
 @router.post("/api/search/live")
 def live_search(body: LiveSearch, db: Session = Depends(get_db)):
     """Search the sources right now (Meta Ad Library, Apify, providers…). Progress via SSE SEARCH_PROGRESS/SEARCH_DONE."""
-    countries = [c.strip().upper() for c in body.countries if c.strip()] or ["ALL"]
-    kws = split_keywords(body.query)[:10]  # ponytail: hard cap — every keyword is a full scan of every source
+    if db.info.get("user_id"):
+        from ..workspace.auth import rate_limit
+        rate_limit(f"live-search:{db.info['user_id']}", 30, 3600)
+        body.user = str(db.info["user_id"])
+        if body.track:  # system-wide crawl schedules are internal (service token / CLI), never per account
+            raise HTTPException(403, "Lịch crawl từ khóa toàn hệ thống do dịch vụ nội bộ quản lý; dùng lưu bộ lọc hoặc Follow đối thủ")
+    countries = [c.strip().upper() for c in body.countries if c.strip()][:10] or ["ALL"]
+    kws = split_keywords(body.query)
+    if body.expand:  # opt-in: each extra keyword is another scan of every (paid / rate-limited) source
+        kws = list(dict.fromkeys(kws + [x for k in kws for x in query_intent.source_queries(db, k, countries, 2)]))
+    kws = kws[:10]  # ponytail: hard cap — every keyword is a full scan of every source
     if not kws:
         raise HTTPException(400, "nhập ít nhất 1 từ khoá")
     adapters = body.adapters
@@ -424,14 +668,14 @@ def live_search(body: LiveSearch, db: Session = Depends(get_db)):
             raise HTTPException(400, "không có nguồn miễn phí nào được bật — chọn adapters hoặc paid=true")
     if body.reuse_hours > 0 and not body.track:  # TTL + job dedupe (1688 "Tìm mới"): don't re-crawl / re-bill a search we already have
         since = datetime.utcnow() - timedelta(hours=body.reuse_hours)
-        for old in db.scalars(select(SearchJob).where(SearchJob.query == " | ".join(kws), SearchJob.created_at >= since)
+        for old in db.scalars(select(SearchJob).where(SearchJob.query == " | ".join(kws), SearchJob.created_at >= since, SearchJob.user_id == db.info.get("user_id"))
                               .order_by(SearchJob.id.desc())):
             got = old.found + sum(s.get("listings", 0) for s in (old.sources or {}).values())
             same = (sorted(old.adapters or []) == sorted(adapters) and sorted(old.countries or []) == sorted(countries)
                     and old.media_type == (body.media_type or None) and old.limit >= max(10, min(body.limit, 1000)))
             if same and ((old.status == "running" and old.id in realtime.LIVE_JOBS) or (old.status == "done" and got)):
                 return {"job_id": old.id, "reused": True}
-    job = SearchJob(query=" | ".join(kws), countries=countries, adapters=adapters, created_by=body.user,
+    job = SearchJob(query=" | ".join(kws), countries=countries, adapters=adapters, created_by=body.user, user_id=db.info.get("user_id"),
                     limit=max(10, min(body.limit, 1000)), media_type=body.media_type or None)
     db.add(job)
     if body.track:
@@ -450,7 +694,7 @@ def live_search(body: LiveSearch, db: Session = Depends(get_db)):
 @router.get("/api/search/jobs/{jid}")
 def search_job(jid: int, db: Session = Depends(get_db)):
     j = db.get(SearchJob, jid)
-    if not j:
+    if not j or (db.info.get("user_id") and j.user_id != db.info["user_id"]):
         raise HTTPException(404)
     if j.status == "running" and jid not in realtime.LIVE_JOBS:  # its thread died (server restart) — don't leave it running forever
         j.status, j.error, j.finished_at = "error", j.error or "Tìm kiếm bị ngắt (server khởi động lại) — chạy lại", datetime.utcnow()
@@ -484,7 +728,7 @@ def search_more(jid: int, body: MoreIn, db: Session = Depends(get_db)):
 
 @router.get("/api/search/jobs")
 def search_jobs(db: Session = Depends(get_db)):
-    return [search_job(j.id, db) for j in db.scalars(select(SearchJob).order_by(SearchJob.id.desc()).limit(20))]
+    return [search_job(j.id, db) for j in db.scalars(select(SearchJob).where(SearchJob.user_id == db.info.get("user_id")).order_by(SearchJob.id.desc()).limit(20))]
 
 
 # ============================================================ Creative Vault
@@ -590,7 +834,7 @@ def product_discovery(pid: int, db: Session = Depends(get_db)):
     creatives = db.scalars(select(Creative).where(Creative.product_id == pid).order_by(Creative.type.desc(), Creative.id)).all()
     ads = {a.id: a for a in db.scalars(select(Ad).where(Ad.product_id == pid))}
     advs = {a.id: a.name for a in db.scalars(select(Advertiser).where(Advertiser.id.in_({a.advertiser_id for a in ads.values()})))}
-    votes = db.scalars(select(Vote).where(Vote.product_id == pid).order_by(Vote.id.desc())).all()
+    votes = db.scalars(select(Vote).where(Vote.product_id == pid, Vote.user_id == db.info.get("user_id")).order_by(Vote.id.desc())).all()
     prov = Counter(s for (s,) in db.execute(select(AdSource.source).join(Ad, Ad.id == AdSource.ad_id).where(Ad.product_id == pid)))
     fams = Counter(c.family_id for c in creatives if c.family_id)
     return {
@@ -620,19 +864,18 @@ def vote(pid: int, body: VoteIn, db: Session = Depends(get_db)):
         raise HTTPException(400, f"decision ∈ {list(VOTE_VALUE)}")
     if not db.get(Product, pid):
         raise HTTPException(404)
-    old = db.scalar(select(Vote).where(Vote.product_id == pid, Vote.user == body.user, Vote.market == body.market))
+    body.user = str(db.info.get("user_id") or "admin-integration")
+    old = db.scalar(select(Vote).where(Vote.product_id == pid, Vote.user_id == db.info.get("user_id"), Vote.market == body.market))
     if old:
         old.decision, old.reasons, old.note, old.team, old.created_at = body.decision, body.reasons, body.note, body.team, datetime.utcnow()
     else:
-        db.add(Vote(product_id=pid, **body.model_dump()))
+        db.add(Vote(product_id=pid, user_id=db.info.get("user_id"), **body.model_dump()))
     db.flush()
     from ..services.engine import ScoreContext, rescore_products
 
     ScoreContext.invalidate()  # taste model learns from the new vote
     rescore_products(db, [pid])
     db.commit()
-    events.publish("ALERT", {"type": "vote", "title": f"{body.user}: {body.decision}", "message": ", ".join(body.reasons)},
-                   product_id=pid, persist=False)
     return {"ok": True}
 
 
@@ -670,8 +913,9 @@ def _discovery_tab(tab: str, country: str | None, funnel: str | None, limit: int
     products = [p for p in products if product_in_scope(p, country)]
     vec = lambda p, k: ((p.potential or {}).get("vector") or {}).get(k) or 0
     now = datetime.utcnow()
-    loved = {pid for (pid,) in db.execute(select(Vote.product_id).where(Vote.decision.in_(["LOVE", "TEST"])))}
-    saved = {pid for (pid,) in db.execute(select(Ad.product_id).where(Ad.saved_by.is_not(None)))}
+    from ..workspace.models import AdInteraction
+    loved = {pid for (pid,) in db.execute(select(Vote.product_id).where(Vote.user_id == db.info.get("user_id"), Vote.decision.in_(["LOVE", "TEST"])))}
+    saved = set(db.scalars(select(Ad.product_id).join(AdInteraction, Ad.id == AdInteraction.ad_id).where(AdInteraction.user_id == db.info.get("user_id"), AdInteraction.saved.is_(True))))
     fx = {
         "new": (lambda p: p.first_seen_at and p.first_seen_at > now - timedelta(days=7), lambda p: p.first_seen_at),
         "hidden": (lambda p: (p.features or {}).get("advertiser_count", 99) <= 10 and vec(p, "wave_potential") >= 45, lambda p: vec(p, "opportunity")),
@@ -721,6 +965,7 @@ def dna(db: Session = Depends(get_db)):
 
 # ============================================================ Unified Collector admin (§21)
 from ..platforms import connector_network
+from ..connector_identity import identity as connector_identity, source_key
 from ..models import ADS_ONLY
 
 
@@ -739,6 +984,11 @@ def _fresh(ts):
 def collector_overview(db: Session = Depends(get_db)):
     cat = {c["adapter"]: c for c in ConnectorFactory.catalogue()}
     conns = [c for c in db.scalars(select(Connector).where(Connector.adapter.is_not(None)).order_by(Connector.id)) if c.adapter in cat]
+    if db.info.get("role") == "MKT":
+        return {"connectors": [{"id": c.id, "name": c.name, "adapter": c.adapter, "enabled": c.enabled,
+            "supports_search": cat.get(c.adapter, {}).get("supports_search", False), "network": connector_network(c.adapter, c.config),
+            "health": c.health, "kind": c.kind, "brand": connector_identity(c.adapter, c.config)} for c in conns],
+            "catalogue": [], "tracked_queries": [], "sources": []}
     raw_today = sum(1 for _ in store().list("raw/")) if BACKEND == "local" else None
     return {
         "catalogue": list(cat.values()), "push_sources": PUSH_SOURCES,
@@ -750,6 +1000,7 @@ def collector_overview(db: Session = Depends(get_db)):
             "supports_search": cat.get(c.adapter, {}).get("supports_search", False),
             "config_fields": cat.get(c.adapter, {}).get("config_fields", []),
             "network": connector_network(c.adapter, c.config),
+            "brand": connector_identity(c.adapter, c.config),
         } for c in conns],
         "sources": source_summary(db, conns),
         "tracked_queries": [{"id": q.id, "connector_id": q.connector_id, "query": q.query, "countries": q.countries, "page_ids": q.page_ids,
@@ -798,7 +1049,16 @@ def add_connector(body: CollectorIn, db: Session = Depends(get_db)):
     cls = ConnectorFactory.connectors.get(body.adapter)
     if not cls:
         raise HTTPException(400, "unknown adapter")
-    c = Connector(name=body.name or cls.name, provider=body.adapter, adapter=body.adapter, kind=cls.kind, group=cls.group,
+    if body.config.get("source"):
+        try:
+            body.config = dict(body.config) | {"source": source_key(body.config["source"])}
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+    if body.adapter == "export" and any(str((c.config or {}).get("source") or "").strip().lower() == body.config.get("source")
+                                       for c in db.scalars(select(Connector).where(Connector.adapter == "export"))):
+        raise HTTPException(409, "Nguồn này đã có connector nhập file; dùng cấu hình hiện có để tránh đọc trùng thư mục")
+    brand = connector_identity(body.adapter, body.config)
+    c = Connector(name=body.name or (brand["name"] if brand else cls.name), provider=brand["provider"] if brand else body.adapter, adapter=body.adapter, kind=cls.kind, group=cls.group,
                   config=body.config, enabled=body.enabled, every_minutes=body.every_minutes, tier=body.tier, status="ready")
     db.add(c)
     db.commit()
@@ -820,7 +1080,18 @@ def patch_connector(cid: int, body: CollectorPatch, db: Session = Depends(get_db
     if body.config is not None:
         merged = dict(c.config or {})
         merged.update({k: v for k, v in body.config.items() if v != "••••"})
+        if merged.get("source"):
+            try:
+                merged["source"] = source_key(merged["source"])
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from None
+        if c.adapter == "export" and any(str((other.config or {}).get("source") or "").strip().lower() == merged.get("source")
+                                         for other in db.scalars(select(Connector).where(Connector.adapter == "export", Connector.id != cid))):
+            raise HTTPException(409, "Nguồn đã được connector khác theo dõi; không dùng chung thư mục nhập file")
         c.config = merged
+        brand = connector_identity(c.adapter, merged)
+        if brand:
+            c.provider, c.name = brand["provider"], brand["name"]
     if body.enabled is not None:
         c.enabled = body.enabled
     if body.every_minutes is not None:
@@ -927,7 +1198,8 @@ async def export_upload(source: str = Form(...), country: str | None = Form(None
     (folder / re.sub(r"[^\w.-]+", "_", file.filename or "export.csv")).write_bytes(await file.read())
     c = db.scalar(select(Connector).where(Connector.adapter == "export", Connector.config["source"].as_string() == src))
     if not c:
-        c = Connector(name=f"Export · {src}", provider="export", adapter="export", kind="export", group="ad_intel",
+        brand = connector_identity("export", {"source": src})
+        c = Connector(name=brand["name"] if brand else f"Export · {src}", provider=brand["provider"] if brand else "export", adapter="export", kind="export", group="ad_intel",
                       config={"source": src, "country": country}, enabled=True, every_minutes=5, tier=2, status="ready")
         db.add(c)
     db.commit()  # also ends the read transaction when the connector already existed (see run_query)
@@ -940,22 +1212,34 @@ async def export_upload(source: str = Form(...), country: str | None = Form(None
 def list_ads(q: str | None = None, country: str | None = None, funnel: str | None = None, platform: str | None = None,
              media_type: str | None = None, active: bool | None = None, product_id: int | None = None,
              advertiser_id: int | None = None, source: str | None = None, sort: str = "newest",
-             network: str | None = None, channel: str | None = None, strict: bool = False,
-             limit: int = Query(40, le=200), offset: int = 0, db: Session = Depends(get_db)):
+             network: str | None = None, channel: str | None = None, strict: bool = False, expand: bool = True,
+             limit: int = Query(40, le=200), offset: int = 0, ad_id: int | None = None, db: Session = Depends(get_db)):
+    """`q`: keywords split by | , (OR), words of one keyword AND. Not `strict`: a keyword also matches its translations /
+    synonyms / related concepts (lexicon.py), listed after the exact hits."""
     from ..platforms import REMOVED_NETWORKS
 
     shown = or_(Ad.network.is_(None), Ad.network.not_in(REMOVED_NETWORKS))
-    cq = select(Ad).where(Ad.is_internal.is_(False), shown)
-    terms = [t for t in re.split(r"\s+", (q or "").lower().strip()) if t]
+    cq = select(Ad).where(Ad.is_internal.is_(False), shown, ad_filter(db))
+    if ad_id:
+        cq = cq.where(Ad.id == ad_id)
+    kws = split_keywords(q)
 
     def kw_filter(t):
         if strict:  # the product itself: title / product name / landing page — not a word buried in the story of the copy
             return or_(Ad.title.ilike(f"%{t}%"), Ad.raw_product_name.ilike(f"%{t}%"), Ad.landing_url.ilike(f"%{t}%"))
         return or_(Ad.search_text.contains(t), Ad.ad_text.ilike(f"%{t}%"))
 
-    for t in terms:
-        cq = cq.where(kw_filter(t))
-    _f = ad_scope_filter(country)
+    tiers = [keyword_tiers(k, query_intent.expand(db, k)) if expand and not strict else [and_(*[kw_filter(t) for t in k.split()])] for k in kws]
+    kw_cond = or_(*[c for t in tiers for c in t]) if kws else None
+    tier_rank = case(*[(or_(*[t[i] for t in tiers if len(t) > i]), i) for i in range(2) if any(len(t) > i for t in tiers)],
+                     else_=2) if kws else None
+    if any(len(t) > 2 for t in tiers):  # limited expansion: related concepts only when exact + synonym are few
+        strong = or_(*[c for t in tiers for c in t[:2]])
+        if db.scalar(select(func.count()).select_from(select(Ad.id).where(strong, shown).limit(RELATED_MIN).subquery())) >= RELATED_MIN:
+            kw_cond = strong
+    if kw_cond is not None:
+        cq = cq.where(kw_cond)
+    _f = None if ad_id else ad_scope_filter(country)
     if _f is not None:
         cq = cq.where(_f)
     if funnel:
@@ -973,9 +1257,9 @@ def list_ads(q: str | None = None, country: str | None = None, funnel: str | Non
     if source:
         cq = cq.where(Ad.source == source)
     # tab counts per channel (ads / commerce / organic) for the keyword + market filters
-    base = select(Ad.channel).where(Ad.is_internal.is_(False), shown)
-    for t in terms:
-        base = base.where(kw_filter(t))
+    base = select(Ad.channel).where(Ad.is_internal.is_(False), shown, ad_filter(db))
+    if kw_cond is not None:
+        base = base.where(kw_cond)
     if _f is not None:
         base = base.where(_f)
     sub = base.subquery()
@@ -992,7 +1276,7 @@ def list_ads(q: str | None = None, country: str | None = None, funnel: str | Non
              "recent": Ad.id.desc(), "rank": Ad.rank.asc().nullslast(), "reviews": Ad.review_count.desc().nullslast(),
              "sold": Ad.sold_count.desc().nullslast(), "views": Ad.views.desc().nullslast(),
              "price": Ad.price.asc().nullslast()}.get(sort, Ad.first_seen_at.desc())
-    ads = db.scalars(cq.order_by(order, Ad.id.desc()).offset(offset).limit(limit)).all()
+    ads = db.scalars(cq.order_by(*([tier_rank] if tier_rank is not None else []), order, Ad.id.desc()).offset(offset).limit(limit)).all()
     ids = [a.id for a in ads]
     crs: dict[int, list[Creative]] = {}
     if ids:
@@ -1011,12 +1295,13 @@ def list_ads(q: str | None = None, country: str | None = None, funnel: str | Non
             "advertiser_id": a.advertiser_id, "advertiser_url": adv.page_url if adv else None, "page_id": a.page_id,
             "platforms": a.platforms or ([a.platform] if a.platform else []), "countries": a.countries or [],
             "cta_type": a.cta_type, "landing_domain": host, "external_id": a.external_id,
-            "media_type": a.media_type, "saved_by": a.saved_by,
+            "media_type": a.media_type,
             "network": a.network or "meta", "channel": a.channel or "ads", "views": a.views,
             "price": a.price, "currency": a.currency, "original_price": a.original_price, "rating": a.rating,
             "review_count": a.review_count, "sold_count": a.sold_count, "rank": a.rank,
             "snapshot_url": a.snapshot_url,
-            "product": {"id": p.id, "name": p.canonical_name, "code": p.product_code} if p else None,
+            "product": {"id": p.id, "name": naming.display_name(p), "code": p.product_code, "name_status": p.name_status} if p else None,
+            "ad_type": a.ad_type,
             "creatives": [creative_dict(c) for c in crs.get(a.id, [])],
         })
     return {"total": total, "rows": rows, "has_more": offset + len(rows) < total, "facets": facets, "channels": channels}

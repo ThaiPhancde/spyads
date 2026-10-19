@@ -1,0 +1,6 @@
+{
+  "/api/events/stream/route": "app/api/events/stream/route.js",
+  "/login/page": "app/login/page.js",
+  "/workspace/library/page": "app/workspace/library/page.js",
+  "/workspace/page": "app/workspace/page.js"
+}

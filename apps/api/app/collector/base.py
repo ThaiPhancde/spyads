@@ -86,7 +86,9 @@ class BaseConnector:
 
     def __init__(self, config: dict | None = None):
         self.config = config or {}
-        self.bucket = _buckets.setdefault(self.key, TokenBucket(self.rate_limit.requests_per_minute))
+        source = str(self.config.get("source") or "").strip().lower() if self.key in ("http", "export", "apify_actor") else ""
+        bucket_key = f"{self.key}:{source}" if source else self.key
+        self.bucket = _buckets.setdefault(bucket_key, TokenBucket(self.rate_limit.requests_per_minute))
 
     # ---- lifecycle -------------------------------------------------------
     def authenticate(self) -> None:

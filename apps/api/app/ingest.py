@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -24,7 +24,9 @@ from .db import read_only
 from .markets import known_country
 from .models import Ad, AdSource, Creative, Product
 from .platforms import channel_of, network_of
+from .services import content_filter
 from .services import enrichment as E
+from .services import naming, shop_naming, product_identity
 from .services.connectors import _advertiser, _dt, _store
 from .services.entity_resolution import resolve_product
 from .storage import write_raw_batch
@@ -75,46 +77,23 @@ def classify_funnel(cta_type: str | None, link: str | None, text: str | None = N
     return "other"
 
 
-# ------------------------------------------------------------ product name guess
-GENERIC_TITLES = {"shop now", "learn more", "order now", "buy now", "send message", "mua ngay", "xem thêm", "اطلب الآن"}
-GENERIC_CTA = re.compile(r"^(try|shop|buy|order|get|grab|claim|discover|learn|see|watch|limited|sale|free|new)\b|risk.?free|% ?off|"
-                         r"mua ngay|đặt ngay|giảm giá|khuyến mãi|ưu đãi|freeship|^chat (in|with|on)|^send (us )?(a )?message|^message us|^contact us|^unlock|^book now|اطلب|خصم|عرض", re.I)
-SLUG_SKIP = {"products", "product", "p", "collections", "shop", "item", "items", "pages", "dp", "vn", "en", "ar", "sa"}
+# ------------------------------------------------------------ product name (services/naming.py)
+# TikTok Creative Center states what each top ad is for (campaign objective); with no landing page that is the only selling-model signal
+OBJECTIVE_FUNNEL = {"product_sales": "shop", "shop_purchases": "shop", "lead_generation": "form"}
 
 
-def _slug_name(url: str | None) -> str | None:
-    if not url:
-        return None
-    parts = [unquote(p) for p in urlparse(url).path.split("/") if p]
-    for p in reversed(parts):
-        if p.lower() in SLUG_SKIP or p.isdigit() or len(p) < 6:
-            continue
-        words = [w for w in re.split(r"[-_+]+", re.sub(r"\.(html?|php)$", "", p)) if w and not w.isdigit()]
-        if len(words) >= 2:
-            return " ".join(words[:8])
-    return None
+def source_labels(rec: AdRecord) -> tuple[str | None, str | None]:
+    """(industry_key, objective) as the source labelled the ad — TikTok Creative Center only."""
+    raw = rec.raw_source or {}
+    return raw.get("industry_key") or None, (str(raw["objective_key"]).replace("campaign_objective_", "") if raw.get("objective_key") else None)
 
 
-def guess_product_name(rec: AdRecord) -> str:
-    """LLM hint / link title → landing-page slug → advertiser + '(chưa đặt tên)'. Never the ad copy."""
-    url = rec.product_url or rec.landing_page or ""
-    host = urlparse(url).netloc.lower().removeprefix("www.")
-    marketplace = re.search(r"alibaba|aliexpress|amazon\.|noon\.com|shopee|lazada|temu\.|ebay\.", host) or _is_host(host, SOCIAL_HOSTS + MESS_HOSTS)
-    # e-commerce product page → slug is the product (/pages/, /collections/, /sp/ are advertorials / category pages)
-    if re.search(r"/(products?|p|item|dp)/", urlparse(url).path) and not marketplace:
-        slug = _slug_name(url)
-        if slug:
-            return slug
-    t = re.sub(r"[^\w\s&+%'.,!?-]|_", " ", (rec.product_name or rec.title or "")).strip(" -.,")
-    t = re.sub(r"\s+", " ", t)
-    if (len(t.split()) > 9 or t.endswith((".", "!", "?")) or len(t) < 4 or GENERIC_CTA.search(t)):
-        t = ""  # headline sentence / CTA, not a product name
-    if t and t.lower() not in GENERIC_TITLES and not re.fullmatch(r"[\w.-]+\.(com|net|store|shop|sa|vn|ae)", t.lower()):
-        return t[:120]
-    slug = None if marketplace else _slug_name(url)
-    if slug:
-        return slug
-    return f"{rec.advertiser or 'Unknown'} (chưa đặt tên)"
+def naming_input(rec: AdRecord, llm_name: str | None = None, channel: str | None = None) -> dict:
+    return {"channel": channel or channel_of(network_of(rec.platform, rec.source)), "title": rec.title, "ad_text": rec.ad_text,
+            "landing_url": rec.landing_page, "product_url": rec.product_url, "advertiser": rec.advertiser,
+            "product_name": rec.product_name, "matched_query": rec.matched_query, "llm_name": llm_name,
+            "cta_type": rec.cta_type, "cta_text": rec.cta_text, "category": rec.category,
+            "metadata": product_identity.metadata(rec)}
 
 
 # ------------------------------------------------------------ listed price in the copy ("₱189", "199 SAR", "$19.99", "199.000đ", "199k")
@@ -176,10 +155,13 @@ def cross_source_key(rec: AdRecord) -> str | None:
 
 
 # ------------------------------------------------------------ main entry
-def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None) -> dict:
+def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None, allow_llm: bool = True) -> dict:
     stats = {"received": len(records), "new_ads": 0, "updated_ads": 0, "merged_cross_source": 0, "invalid": 0,
-             "new_products": 0, "creatives_queued": 0, "errors": []}
+             "new_products": 0, "creatives_queued": 0, "excluded_entertainment": 0, "errors": []}
+    # short drama / movie / streaming / podcast ads: dropped before the raw batch, the LLM pass and product clustering
+    records, stats["excluded_entertainment"] = content_filter.screen(db, records)
     if not records:
+        db.commit()  # keep the new exclusion rows
         return {**stats, "product_ids": [], "ad_ids": [], "listing_ids": []}
     by_source: dict[str, list[dict]] = {}
     for r in records:
@@ -199,9 +181,9 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
                 known |= {(src, i) for i in db.scalars(select(Ad.external_id).where(Ad.platform == plat, Ad.external_id.in_(ids)))}
     db.commit()
     hints: dict[int, dict] = {}
-    weak = [i for i, r in enumerate(records) if (r.source, r.source_ad_id) not in known
-            and not re.search(r"/(products?|p|item|dp)/", urlparse(r.landing_page or "").path)]
-    if weak:
+    # model pass only for NEW ads the rules cannot name (no listing title / product URL / product noun in the copy)
+    weak = [i for i, r in enumerate(records) if (r.source, r.source_ad_id) not in known and not naming.best(naming_input(r))["name"]]
+    if weak and allow_llm:
         ex = E.extract_products([{"text": records[i].ad_text, "title": records[i].title, "url": records[i].landing_page} for i in weak])
         if ex:
             hints = {i: e for i, e in zip(weak, ex)}
@@ -217,8 +199,6 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
             rec.price, rec.currency, price_source = pc[0], pc[1] or rec.currency, "ad_text"
         h = hints.get(idx)
         if h:
-            if h.get("product_name"):
-                rec.product_name = h["product_name"]
             rec.category = rec.category or ("non_product" if not h.get("is_physical_product", True) or h.get("category") in ("service", "food")
                                             else h.get("category"))
         errs = validate(rec)
@@ -228,10 +208,13 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
             continue
         try:
             with db.begin_nested():
-                ad, created, product_created = _upsert_ad(db, rec, raw_keys.get(rec.source), saved_by, now, stats, price_source)
+                ad, created, product_created = _upsert_ad(db, rec, raw_keys.get(rec.source), saved_by, now, stats, price_source,
+                                                          (h or {}).get("product_name") if (h or {}).get("is_physical_product", True) else None)
                 mq = (rec.matched_query or "").lower().strip()
-                if mq and mq not in (ad.search_text or ""):  # the source matched it for this keyword → our search must too
-                    ad.search_text = f"{mq} {ad.search_text or ''}"[:4000]
+                # No keyword tag on search_text. A source's own matching is loose: Meta matches each word ("kính mắt" → window-glass
+                # ads), AliExpress / 1688 return unrelated listings for a foreign-language keyword. Tagging every hit with the
+                # keyword made it an "exact" match and killed search precision — the ad's own text (and its translations,
+                # services/query_intent.py) decides. matched_query still feeds naming above.
                 ad_ids.append(ad.id)
                 if ad.channel == "commerce":
                     listing_ids.append(ad.id)
@@ -247,6 +230,8 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
     from .services import adsignals
 
     adsignals.refresh(db, ad_ids)
+    from .services.cluster_membership import sync as sync_clusters
+    sync_clusters(db, ad_ids)
     stats["creatives_queued"] = len(new_creatives)
     db.commit()
     from . import media
@@ -256,8 +241,13 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
     return {**stats, "product_ids": sorted(product_ids), "ad_ids": ad_ids, "listing_ids": listing_ids}
 
 
+def _count(v) -> int | None:
+    """Engagement number from a source: None stays None (N/A on the card), a real 0 stays 0."""
+    return None if v is None else max(0, int(v))
+
+
 def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | None, now: datetime, stats: dict,
-               price_source: str | None = None):
+               price_source: str | None = None, llm_name: str | None = None):
     prov = db.scalar(select(AdSource).where(AdSource.source == rec.source, AdSource.source_ad_id == rec.source_ad_id))
     ad = db.get(Ad, prov.ad_id) if prov else None
     if ad is not None and ad.source == rec.source and ad.external_id != rec.source_ad_id:
@@ -276,6 +266,10 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
             stats["merged_cross_source"] += 1
     last = _dt(rec.last_seen, now)
     if ad is not None:  # refresh
+        from .services.product_identity import metadata
+        md = metadata(rec)
+        if md:
+            ad.product_metadata = dict(ad.product_metadata or {}) | md
         new_markets = {c.upper() for c in (rec.countries or []) + ([rec.country] if rec.country else []) if c}
         merged = sorted(set(ad.countries or []) | new_markets | ({ad.country} if ad.country else set()))
         if merged != sorted(ad.countries or []):
@@ -297,6 +291,7 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
         for f in ("impressions_text", "spend_text", "reach", "page_likes"):
             if getattr(rec, f) is not None:
                 setattr(ad, f, getattr(rec, f))
+        before = (ad.likes, ad.comments_count, ad.shares, ad.views)
         for f in ("likes", "views"):
             v = getattr(rec, f)
             if v is not None:
@@ -305,6 +300,10 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
             ad.comments_count = max(int(rec.comments), ad.comments_count or 0)
         if rec.shares is not None:
             ad.shares = max(int(rec.shares), ad.shares or 0)
+        if before != (ad.likes, ad.comments_count, ad.shares, ad.views):  # engagement history: one row per change
+            from .engagement.service import record_ad_scope
+
+            record_ad_scope(db, ad, rec.source)
         if rec.variants:
             ad.variants = rec.variants
         for f in COMMERCE_FIELDS:  # listings: latest rank / price / rating win
@@ -313,9 +312,10 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
         if rec.price and (ad.channel == "commerce" or ad.price is None):  # listings: latest price; ads: first price we ever see
             ad.price, ad.price_source = rec.price, price_source
             ad.currency = rec.currency or ad.currency
-        if rec.advertiser and not ad.advertiser_id:  # listing merged from a provider without the supplier (1688 AK)
-            if adv := _advertiser(db, rec.advertiser, rec.platform, ad.country, rec.advertiser_url):
-                ad.advertiser_id = adv.id
+        if rec.page_id and ad.source == rec.source:
+            from .workspace.identity import resolve
+            ad.advertiser_id = resolve(db, rec).id
+            ad.page_id = str(rec.page_id)
         if prov:
             prov.last_collected_at = now
         else:
@@ -324,13 +324,18 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
         return ad, False, False
 
     country = known_country(rec)  # "ALL" = worldwide search: stays in `countries`, never truncated to "AL" (Albania)
-    name = guess_product_name(rec)
-    category = rec.category or E.classify_category(name, rec.ad_text)
+    net = network_of(rec.platform, rec.source)
+    nd = naming_input(rec, llm_name, channel_of(net))
+    nm = naming.best(nd)
+    name = nm["name"]
+    category = rec.category or E.classify_category(name or "", rec.ad_text)
     product, p_created, _ = resolve_product(db, {
-        "name": name, "advertiser": rec.advertiser, "price": rec.price, "currency": rec.currency, "category": category, "country": country,
-        "landing_url": rec.landing_page, "image_url": next((m.preview_url or m.url for m in rec.media if m.type == "image" or m.preview_url), None),
+        "name": name or "", "naming": nm, "advertiser": rec.advertiser, "fingerprint": xkey, "copy": rec.ad_text, "price": rec.price, "currency": rec.currency, "category": category, "country": country,
+        "landing_url": rec.landing_page, "identity": nd.get("metadata"), "brand": (nd.get("metadata") or {}).get("brand"),
+        "image_url": next((m.preview_url or m.url for m in rec.media if m.type == "image" or m.preview_url), None),
     }, source=rec.source)
-    adv = _advertiser(db, rec.advertiser, rec.platform, country, rec.advertiser_url)
+    from .workspace.identity import resolve
+    adv = resolve(db, rec) if rec.advertiser or rec.page_id else None
     first = _dt(rec.first_seen, now)
     st = _store(db, rec.landing_page, product, adv, country, rec.price, first)
     cr = E.classify_creative(" ".join(filter(None, [rec.title, rec.ad_text])))
@@ -338,14 +343,19 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
     product.currency = product.currency or mk["currency"]
     product.language = product.language or mk["language"]
     funnel = classify_funnel(rec.cta_type, rec.landing_page, rec.ad_text, rec.cta_text)
+    industry, objective = source_labels(rec)
+    if funnel == "other" and objective in OBJECTIVE_FUNNEL:
+        funnel = OBJECTIVE_FUNNEL[objective]
     first_media = rec.media[0] if rec.media else None
     ad = Ad(
         external_id=rec.source_ad_id, source=rec.source, platform=rec.platform or "facebook", product_id=product.id,
         advertiser_id=adv.id if adv else None, store_id=st.id if st else None, country=country, language=mk["language"],
-        raw_product_name=name, ad_text=rec.ad_text, landing_url=rec.landing_page,
+        raw_product_name=name, name_source=nm["source"] or "none", ad_type=naming.ad_type(nd | {"category": category}, nm),
+        product_metadata=nd.get("metadata") or None,
+        ad_text=rec.ad_text, landing_url=rec.landing_page,
         media_type=rec.creative_type or (first_media.type if first_media else None), media_url=first_media.url if first_media else None,
-        price=rec.price, price_source=price_source, likes=int(rec.likes or 0), comments_count=int(rec.comments or 0), shares=int(rec.shares or 0),
-        views=int(rec.views) if rec.views is not None else None,
+        price=rec.price, price_source=price_source, likes=_count(rec.likes), comments_count=_count(rec.comments), shares=_count(rec.shares),
+        views=_count(rec.views),  # None stays None: "the source did not say" is not "0"
         first_seen_at=min(first, now), last_seen_at=min(last, now), is_active=True if rec.active is None else bool(rec.active),
         last_verified_at=now, inactive_at=None if rec.active is not False else min(last, now),
         impressions_text=rec.impressions_text, spend_text=rec.spend_text, reach=rec.reach, page_likes=rec.page_likes,
@@ -354,13 +364,21 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
         variants=rec.variants, countries=rec.countries or ([country] if country else []), snapshot_url=rec.snapshot_url,
         saved_by=rec.saved_by or saved_by, platforms=rec.platforms or ([rec.platform] if rec.platform else []),
         search_text=" ".join(filter(None, [name, rec.title, rec.ad_text, rec.advertiser, rec.landing_page])).lower()[:4000],
-        network=(net := network_of(rec.platform, rec.source)), channel=channel_of(net),
+        network=net, channel=channel_of(net), source_industry=industry, source_objective=objective,
         **{f: getattr(rec, f) for f in COMMERCE_FIELDS},
     )
     db.add(ad)
     db.flush()
+    if any(v is not None for v in (ad.likes, ad.comments_count, ad.shares, ad.views)):
+        from .engagement.service import record_ad_scope
+
+        record_ad_scope(db, ad, rec.source)
     db.add(AdSource(ad_id=ad.id, source=rec.source, source_ad_id=rec.source_ad_id, platform=rec.platform,
                     raw_key=raw_key, saved_by=rec.saved_by or saved_by))
+    if product.name_status == "UNKNOWN":
+        shop_naming.refresh(db, [product.id])  # provisional "Sản phẩm từ <shop>" (display only)
+    if any(e.get("ad_id") is None for e in product.name_evidence or []):  # evidence points at the ad it came from
+        product.name_evidence = [{**e, "ad_id": e.get("ad_id") or ad.id} for e in product.name_evidence]
     if ad.first_seen_at < product.first_seen_at:
         product.first_seen_at = ad.first_seen_at
     if p_created:
@@ -383,6 +401,8 @@ def _attach_creatives(db: Session, ad: Ad, rec: AdRecord) -> list[int]:
             if c.status != "stored" and c.source_url != m.url:
                 c.source_url, c.preview_source_url = m.url, m.preview_url or c.preview_source_url  # fresh signature for a download still pending
                 c.sd_source_url = m.sd_url or c.sd_source_url
+            if not c.thumb_key:  # re-collected ad = fresh signed link: grab the thumbnail now, before it dies again
+                out.append(c.id)
             continue
         c = Creative(ad_id=ad.id, product_id=ad.product_id, type=m.type, position=i, source=rec.source,
                      source_platform=rec.platform, network=ad.network, source_ad_id=rec.source_ad_id, source_url=m.url,

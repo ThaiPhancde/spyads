@@ -1,4 +1,5 @@
 /** @type {import('next').NextConfig} */
+require("@next/env").loadEnvConfig(require("path").join(__dirname, "../.."), process.env.NODE_ENV !== "production", console, true); // shared server environment at repo root
 const API = process.env.API_URL || "http://127.0.0.1:8000";
 const exportMode = process.env.EXPORT === "1";
 
@@ -9,6 +10,7 @@ module.exports = exportMode
   // serves /api/events/stream on the same origin in this mode). All pages/layouts are .tsx so nothing else changes.
   ? { output: "export", trailingSlash: true, images: { unoptimized: true }, pageExtensions: ["tsx", "jsx"] }
   : {
+      distDir: process.env.NEXT_DIST_DIR || ".next",
       trailingSlash: true,
       skipTrailingSlashRedirect: true,
       experimental: { proxyTimeout: 120_000 }, // default 30 s → a slow API call surfaced as "500"

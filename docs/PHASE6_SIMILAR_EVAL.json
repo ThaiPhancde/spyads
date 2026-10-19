@@ -1,0 +1,36 @@
+{
+  "similar_products": {
+    "n": 60,
+    "latency_ms": {
+      "p50": 251.3,
+      "p95": 483.1,
+      "max": 602.9
+    },
+    "candidates": {
+      "p50": 556,
+      "max": 599
+    },
+    "with_results": 50,
+    "category_agreement_at10": 0.961,
+    "concept_agreement_at10": 1.0,
+    "same_cluster_returned_as_similar": 0
+  },
+  "similar_ads": {
+    "n": 60,
+    "latency_ms": {
+      "p50": 186.4,
+      "p95": 410.0,
+      "max": 459.2
+    }
+  },
+  "duplicate_products": {
+    "pairs_checked": 50,
+    "labelled_duplicate": 42,
+    "offered_as_similar": 0
+  },
+  "duplicate_ads": {
+    "pairs_checked": 8,
+    "labelled_duplicate": 8,
+    "offered_as_similar": 0
+  }
+}

@@ -1,13 +1,16 @@
 "use client";
+import { FollowButton } from "@/components/workspace/actions";
 import { NetworkStrip, usePlatforms } from "@/components/platforms";
 import Link from "next/link";
 import { useState } from "react";
-import { Clock, Copy, Download, ExternalLink, ImageOff, Link2, Pin, Play, RotateCw } from "lucide-react";
+import { Clock, Copy, Download, ExternalLink, ImageOff, Link2, Pin, Play, RotateCw, ScanSearch } from "lucide-react";
 import { toast } from "sonner";
 import { api, fmt, useAction } from "@/lib/api";
 import { getUser } from "@/lib/realtime";
 import { RecBadge } from "@/components/ui";
 import { PriceTag } from "@/components/pricing/price-tag";
+import { ProductName } from "@/components/product-name";
+import { visualHref } from "@/components/visual/global-image-search";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -180,14 +183,18 @@ export function ProductMediaCard({ p, onVoted }: { p: any; onVoted?: () => void 
       <div className="p-2 pb-0"><CreativeMedia c={p.cover} height={260} /></div>
       <div className="flex flex-1 flex-col gap-2 p-3">
         <div className="flex items-start justify-between gap-2">
-          <Link href={`/products/${p.id}`} className="line-clamp-2 leading-snug font-semibold hover:underline">{p.name}</Link>
+          <ProductName p={p} href={`/products/${p.id}`} className="flex-1" />
           <RecBadge rec={p.recommendation} />
         </div>
-        <div className="text-[11px] text-muted-foreground">
-          {p.product_code} · {p.category || "—"} · {(p.markets || []).join(", ") || p.country || "—"}
-        </div>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-2 text-[11px]">
+          <dt className="text-muted-foreground">Advertiser</dt><dd className="truncate" title={p.advertiser || ""}>{p.advertiser || "—"}{p.advertisers > 1 ? <span className="text-muted-foreground"> +{p.advertisers - 1}</span> : null}</dd>
+          <dt className="text-muted-foreground">Nguồn</dt><dd className="truncate"><NetworkStrip networks={p.networks} byKey={byKey} /></dd>
+          <dt className="text-muted-foreground">Danh mục</dt><dd className="truncate">{p.category || "—"} · {p.product_code} · {(p.markets || []).join(", ") || p.country || "—"}</dd>
+        </dl>
+        <div className="flex flex-wrap gap-2"><FollowButton id={p.advertiser_id} />{p.advertiser_id && <Link className="self-center text-xs underline" href={`/competitors/${p.advertiser_id}`}>Chi tiết advertiser</Link>}</div>
         <div className="flex flex-wrap items-center gap-1">
           {p.classification && <Badge variant="secondary" className="rounded px-1.5 text-[11px]">{QUADRANT[p.classification] || p.classification}</Badge>}
+          {p.hidden_winner && <Badge variant="outline" className="rounded px-1.5 text-[11px]">💎 Hidden Winner</Badge>}
           <FunnelChips mix={p.funnel_mix} />
         </div>
         <div className="grid grid-cols-4 gap-1 text-center text-[11px]">
@@ -202,7 +209,6 @@ export function ProductMediaCard({ p, onVoted }: { p: any; onVoted?: () => void 
              className="inline-flex min-w-0 items-center gap-1 text-[11px] text-link hover:underline"><Link2 className="size-3 shrink-0" /><span className="truncate">{hostOf(p.landing_url)}</span><ExternalLink className="size-3 shrink-0" /></a>
         )}
         <PriceTag subject={`product:${p.id}`} fallback={{ price: p.price, currency: p.currency }} />
-        <NetworkStrip networks={p.networks} byKey={byKey} />
         {(p.listings > 0 || p.organic_views > 0) && (
           <div className="flex flex-wrap gap-x-2 text-[11px] text-ink2">
             {p.reviews_total ? <span>★ {fmt.n(p.reviews_total)} đánh giá</span> : null}
@@ -215,10 +221,14 @@ export function ProductMediaCard({ p, onVoted }: { p: any; onVoted?: () => void 
           {p.advertisers} advertiser · {p.active_ads} ads active · +{p.new_ads_7d} ads 7d
           {p.matched_ads !== undefined && <> · {p.matched_ads} ads khớp</>}
           {p.matched_keywords?.length > 1 && <> · khớp {p.matched_keywords.length} từ: {p.matched_keywords.join(", ")}</>}
+          {p.match_tier && p.match_tier !== "exact" && <> · <span title="Khớp qua bản dịch / từ đồng nghĩa (synonym) hoặc khái niệm liên quan (related)">khớp {p.match_tier === "synonym" ? "từ đồng nghĩa / bản dịch" : "liên quan"}</span></>}
         </div>
         <div className="mt-auto flex flex-wrap items-center justify-between gap-2">
           <VoteBar productId={p.id} compact onVoted={onVoted} />
-          <DownloadButton c={p.cover} small />
+          <span className="inline-flex items-center gap-1">
+            <Button asChild variant="outline" size="xs" title="Tìm sản phẩm giống bằng ảnh"><Link href={visualHref({ product_id: p.id, mode: "similar_product" })}><ScanSearch /> Tương tự</Link></Button>
+            <DownloadButton c={p.cover} small />
+          </span>
         </div>
       </div>
     </Card>

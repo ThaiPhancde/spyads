@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlparse
 
 import httpx
 
@@ -20,17 +21,17 @@ from ..contract import AdRecord, MediaItem
 
 # Header aliases seen in spy-tool exports (lower-cased, spaces/underscores ignored).
 ALIASES = {
-    "source_ad_id": ["adid", "id", "adarchiveid", "videoid", "postid", "adlibraryid"],
+    "source_ad_id": ["sourceadid", "externalid", "adid", "id", "adarchiveid", "videoid", "postid", "adlibraryid"],
     "advertiser": ["advertiser", "pagename", "shopname", "store", "brand", "author", "nickname", "page"],
     "page_id": ["pageid"],
     "ad_text": ["adtext", "caption", "description", "text", "primarytext", "body", "adcopy", "desc"],
-    "title": ["title", "headline", "productname", "product"],
+    "title": ["title", "adtitle", "headline", "productname", "product"],
     "cta_text": ["cta", "calltoaction", "button", "buttontext"],
     "landing_page": ["landingpage", "landingurl", "url", "link", "storeurl", "producturl", "website", "shopurl"],
     "video": ["videourl", "video", "mediaurl", "videolink", "creativeurl", "playurl"],
     "image": ["imageurl", "image", "thumbnail", "cover", "coverurl", "thumbnailurl"],
     "country": ["country", "region", "countries", "market", "geo"],
-    "platform": ["platform", "network"],
+    "platform": ["platform", "network", "adplatform", "socialnetwork"],
     "first_seen": ["firstseen", "startdate", "createdat", "createtime", "publishdate", "launchdate", "firstshown"],
     "last_seen": ["lastseen", "enddate", "updatedat", "lastshown"],
     "likes": ["likes", "likecount", "diggcount", "reactions"],
@@ -43,8 +44,8 @@ ALIASES = {
     "days_running": ["daysrunning", "days", "runningdays", "duration"],
 }
 
-# exports / APIs without a platform column: the tool tells us the network (else ingest would default to facebook)
-SOURCE_PLATFORM = {"pipiads": "tiktok", "tiktok": "tiktok", "tiktok_cc": "tiktok", "minea": "facebook", "bigspy": "facebook",
+# Only sources restricted to one network may supply a default. Multi-network vendors require row/config evidence.
+SOURCE_PLATFORM = {"tiktok": "tiktok", "tiktok_cc": "tiktok", "bigspy": "facebook",
                    "foreplay": "facebook", "adspy": "facebook", "1688": "1688", "taobao": "taobao"}
 
 
@@ -67,7 +68,8 @@ def _num(v):
         return None
 
 
-def row_to_record(row: dict, source: str, default_country: str | None = None, mapping: dict | None = None) -> AdRecord | None:
+def row_to_record(row: dict, source: str, default_country: str | None = None, mapping: dict | None = None,
+                  default_platform: str | None = None) -> AdRecord | None:
     nrow = {_norm(k): v for k, v in row.items() if k}
     def get(field):
         if mapping and mapping.get(field):
@@ -76,7 +78,7 @@ def row_to_record(row: dict, source: str, default_country: str | None = None, ma
             if nrow.get(a) not in (None, ""):
                 return nrow[a]
         return None
-    ad_id = get("source_ad_id") or get("video") or get("landing_page")
+    ad_id = get("source_ad_id") or get("video") or (get("landing_page") if get("image") or get("ad_text") else None)
     if not ad_id:
         return None
     media = []
@@ -90,8 +92,19 @@ def row_to_record(row: dict, source: str, default_country: str | None = None, ma
     if not first and _num(get("days_running")):
         from datetime import timedelta
         first = (datetime.utcnow() - timedelta(days=_num(get("days_running")))).date().isoformat()
+    explicit_platform = get("platform") or default_platform
+    if not explicit_platform and source in ("pipiads", "minea"):
+        hosts = [urlparse(str(u)).hostname or "" for u in (get("video"), get("image")) if u]
+        if any("tiktok" in h for h in hosts):
+            explicit_platform = "tiktok"
+        elif any(h.endswith("fbcdn.net") or h.endswith("facebook.com") for h in hosts):
+            explicit_platform = "facebook"
+        else:
+            raise ConnectorError(f"{source}: thiếu nền tảng quảng cáo; thêm cột Platform hoặc cấu hình nền tảng mặc định, không suy ra từ tên nhà cung cấp")
+    platform = str(explicit_platform or SOURCE_PLATFORM.get(source) or "").strip().lower()
+    platform = {"meta": "facebook", "facebook ads": "facebook", "tik tok": "tiktok", "tiktok ads": "tiktok", "tt": "tiktok"}.get(platform, platform)
     return AdRecord(
-        source=source, source_ad_id=str(ad_id), platform=(get("platform") or "").lower() or SOURCE_PLATFORM.get(source),
+        source=source, source_ad_id=str(ad_id), platform=platform or None,
         country=country,
         page_id=get("page_id"), advertiser=get("advertiser"), ad_text=get("ad_text"), title=get("title"),
         cta_text=get("cta_text"), creative_type="video" if get("video") else ("image" if get("image") else None),
@@ -107,7 +120,10 @@ def row_to_record(row: dict, source: str, default_country: str | None = None, ma
 def parse_export(content: bytes, filename: str) -> list[dict]:
     if filename.lower().endswith(".json"):
         data = json.loads(content)
-        return data if isinstance(data, list) else data.get("data") or data.get("items") or []
+        rows = data if isinstance(data, list) else next((data[k] for k in ("data", "items", "ads") if k in data), None) if isinstance(data, dict) else None
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+            raise ConnectorError("File JSON phải chứa danh sách bản ghi (hoặc data/items/ads là danh sách)")
+        return rows
     if filename.lower().endswith((".xlsx", ".xls")):
         try:
             import openpyxl
@@ -131,11 +147,24 @@ class ExportFolderConnector(BaseConnector):
     config_fields = [
         {"key": "source", "label": "Tên nguồn (pipiads / minea / bigspy …)", "required": True},
         {"key": "country", "label": "Quốc gia mặc định nếu file không có"},
+        {"key": "platform", "label": "Nền tảng mặc định nếu file không có (tiktok / facebook / instagram)"},
         {"key": "mapping", "label": "Mapping cột tuỳ chọn (JSON: {\"video\": \"Video URL\"})"},
     ]
 
     def folder(self) -> Path:
-        return DATA_DIR / "import" / self.config.get("source", "export")
+        from ...connector_identity import source_key
+        try:
+            source = source_key(self.config.get("source", "export"))
+        except ValueError as e:
+            raise NotConfigured(str(e)) from None
+        return DATA_DIR / "import" / source
+
+    def health_check(self) -> dict:
+        self.authenticate()
+        folder = self.folder()
+        pending = sum(1 for p in folder.glob("*") if p.is_file() and p.suffix.lower() in (".csv", ".xlsx", ".json"))
+        return {"status": "healthy" if pending else "waiting_file", "pending_files": pending,
+                "detail": "Sẵn sàng nhập file" if pending else "Chưa có file chờ nhập; đây không phải API quét trực tiếp"}
 
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
         self.authenticate()
@@ -146,13 +175,23 @@ class ExportFolderConnector(BaseConnector):
         mapping = self.config.get("mapping")
         if isinstance(mapping, str) and mapping.strip():
             mapping = json.loads(mapping)
+        from ...visual.lens import _lock
+        with _lock(f"export_folder:{folder.resolve()}"):
+            yield from self._fetch_folder(folder, done, mapping)
+
+    def _fetch_folder(self, folder, done, mapping):
         for f in sorted(folder.iterdir()):
             if not f.is_file() or f.suffix.lower() not in (".csv", ".json", ".xlsx"):
                 continue
-            for row in parse_export(f.read_bytes(), f.name):
-                rec = row_to_record(row, self.config["source"], self.config.get("country"), mapping or None)
+            rows = parse_export(f.read_bytes(), f.name)
+            usable = 0
+            for row in rows:
+                rec = row_to_record(row, folder.name, self.config.get("country"), mapping or None, self.config.get("platform"))
                 if rec:
+                    usable += 1
                     yield rec
+            if rows and not usable:
+                raise ConnectorError(f"{f.name}: không có bản ghi nhận diện được; kiểm tra cột Ad ID, Video URL, Landing Page hoặc mapping")
             f.rename(done / f"{datetime.utcnow():%Y%m%d%H%M%S}_{f.name}")
 
 
@@ -177,6 +216,7 @@ class GenericHttpConnector(BaseConnector):
     supports_search = True
     config_fields = [
         {"key": "source", "label": "Tên nguồn (pipiads, minea…)", "required": True},
+        {"key": "platform", "label": "Nền tảng mặc định nếu API không cung cấp (tiktok / facebook / instagram)"},
         {"key": "url", "label": "Endpoint URL ({query} {country} sẽ được thay)", "required": True},
         {"key": "method", "label": "GET/POST"},
         {"key": "headers", "label": "Headers JSON (VD {\"Authorization\": \"Bearer …\"})", "secret": True},
@@ -184,6 +224,18 @@ class GenericHttpConnector(BaseConnector):
         {"key": "items_path", "label": "Đường dẫn tới list (VD data.list)"},
         {"key": "mapping", "label": "Mapping JSON field→path (source_ad_id, advertiser, ad_text, title, video, image, landing_page, first_seen, likes…)", "required": True},
     ]
+
+    def health_check(self) -> dict:
+        self.authenticate()
+        mapping = self.config.get("mapping")
+        if isinstance(mapping, str):
+            try:
+                mapping = json.loads(mapping)
+            except ValueError:
+                raise NotConfigured("Mapping API không phải JSON hợp lệ") from None
+        if not isinstance(mapping, dict) or not mapping:
+            raise NotConfigured("Mapping API phải là object có ít nhất một trường")
+        return {"status": "configured", "detail": "Đủ cấu hình; chưa gọi API nhà cung cấp. Chạy tìm kiếm để kiểm tra dữ liệu thực tế."}
 
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
         self.authenticate()
@@ -200,7 +252,7 @@ class GenericHttpConnector(BaseConnector):
             for it in items or []:
                 row = {k: _path(it, p) for k, p in mapping.items()}
                 rec = row_to_record({k: v for k, v in row.items()}, cfg["source"], country if country != "ALL" else None,
-                                    {k: k for k in row})
+                                    {k: k for k in row}, cfg.get("platform"))
                 if rec:
                     rec.raw_source = it
                     yield rec
@@ -217,6 +269,7 @@ class ApifyActorConnector(BaseConnector):
     supports_search = True
     config_fields = [
         {"key": "source", "label": "Tên nguồn (tiktok, pipiads…)", "required": True},
+        {"key": "platform", "label": "Nền tảng mặc định nếu dữ liệu không cung cấp"},
         {"key": "token", "label": "APIFY_TOKEN", "secret": True, "required": True},
         {"key": "actor", "label": "Actor id (vd: user~actor-name)", "required": True},
         {"key": "input", "label": "Input JSON ({query} {country} được thay)", "required": True},
@@ -234,7 +287,7 @@ class ApifyActorConnector(BaseConnector):
             mapping = json.loads(cfg["mapping"]) if isinstance(cfg.get("mapping"), str) and cfg["mapping"].strip() else cfg.get("mapping")
             for item in r.json()[: params.limit]:
                 row = {k: _path(item, p) for k, p in mapping.items()} if mapping else _flatten(item)
-                rec = row_to_record(row, cfg["source"], country if country != "ALL" else None, {k: k for k in row} if mapping else None)
+                rec = row_to_record(row, cfg["source"], country if country != "ALL" else None, {k: k for k in row} if mapping else None, cfg.get("platform"))
                 if rec:
                     rec.raw_source = item
                     yield rec
@@ -350,7 +403,7 @@ class TikTokCommercialConnector(BaseConnector):
     def query(self, query: str, countries: list[str], days: int, active_only: bool, video_only: bool, search_id: str = "") -> dict:
         now = datetime.utcnow()
         filters = {"ad_published_date_range": {"min": (now - timedelta(days=min(days, 365))).strftime("%Y%m%d"),
-                                               "max": now.strftime("%Y%m%d")}}
+                                               "max": (now - timedelta(days=1)).strftime("%Y%m%d")}}  # API: max must be before today
         if countries:
             filters["country_code_list"] = countries
         if active_only:

@@ -1,13 +1,22 @@
 import {
-  Activity, BadgeEuro, Bell, Bot, Camera, Database, Euro, Eye, Gauge, Gem, Globe, LayoutGrid, type LucideIcon, Megaphone,
-  PlaySquare, PlugZap, Radar, Search, ShoppingCart, Sparkles, Store, Table2, TrendingUp, Truck, Users, Zap,
+  Activity, BadgeEuro, Bot, Camera, Database, Euro, Eye, Gauge, Gem, GitMerge, Globe, LayoutGrid, type LucideIcon, Megaphone,
+  PlaySquare, PlugZap, Radar, Search, ShoppingCart, Sparkles, Store, Table2, Tag, TrendingUp, Truck, Users, Zap,
 } from "lucide-react";
 
-export type NavItem = { href: string; label: string; icon: LucideIcon; hint?: string; children?: NavItem[] };
-export type NavGroup = { group: string; items: NavItem[] };
+export type NavItem = { href: string; label: string; icon: LucideIcon; hint?: string; children?: NavItem[]; admin?: boolean };  // admin = internal system page: never in the MKT sidebar (no ADMIN accounts)
+export type NavGroup = { group: string; items: NavItem[]; hidden?: boolean };
 
 /** Single source of truth for the sidebar + the header title. Routes are unchanged from the pre-shadcn app. */
 export const NAV: NavGroup[] = [
+  { group: "Không gian của tôi", items: [
+    { href: "/workspace", label: "Dashboard cá nhân", icon: Gauge },
+    { href: "/competitors", label: "Đối thủ của tôi", icon: Users },
+    { href: "/workspace/library", label: "Ads của tôi", icon: LayoutGrid },
+    { href: "/workspace/notifications", label: "Thông báo", icon: Activity },
+    { href: "/workspace/searches", label: "Bộ lọc đã lưu", icon: Search },
+    { href: "/workspace/filters", label: "Whitelist / Blacklist", icon: Eye },
+    { href: "/account", label: "Hồ sơ của tôi", icon: Users },
+  ]},
   { group: "Khám phá sản phẩm", items: [
     { href: "/search", label: "Tìm sản phẩm", icon: Search, hint: "Tìm trong kho hoặc quét trực tiếp mọi nguồn" },
     { href: "/visual", label: "Tìm bằng ảnh", icon: Camera, hint: "Ảnh trùng, sản phẩm giống, quảng cáo, nguồn hàng, so sánh giá từ một tấm ảnh" },
@@ -24,9 +33,12 @@ export const NAV: NavGroup[] = [
     { href: "/", label: "Daily Pulse", icon: Activity },
     { href: "/markets", label: "Market Radar", icon: Globe },
     { href: "/products", label: "Xếp hạng sản phẩm", icon: Table2 },
-    { href: "/competitors", label: "Competitor Radar", icon: Users },
+    { href: "/naming", label: "Đặt tên sản phẩm", icon: Tag, hint: "Tên theo bằng chứng + AI miễn phí (Groq / Cerebras / Cloudflare), quota từng provider" },
+    { href: "/clusters", label: "Gom cụm sản phẩm", icon: GitMerge, hint: "Sản phẩm trùng: tự động gộp, MKT xác nhận, hoàn tác" },
+    { href: "/competitor-radar", label: "Competitor Radar", icon: Users },
   ]},
-  { group: "EU Market", items: [
+  // Temporarily hidden from the sidebar until the user requests re-enabling it.
+  { group: "EU Market", hidden: true, items: [
     { href: "/eu-market", label: "EU Market", icon: Euro, hint: "Mua bán, xu hướng, giá, hàng hiếm, nguồn hàng châu Âu", children: [
       { href: "/eu-market", label: "Overview", icon: Gauge },
       { href: "/eu-market/products", label: "Product Explorer", icon: Search },
@@ -36,19 +48,18 @@ export const NAV: NavGroup[] = [
       { href: "/eu-market/suppliers", label: "Wholesale & Suppliers", icon: Truck },
       { href: "/eu-market/shops", label: "Competitor Shops", icon: Store },
       { href: "/eu-market/ad-matches", label: "Ad Matches", icon: Megaphone },
-      { href: "/eu-market/watchlists", label: "Watchlists & Alerts", icon: Eye },
+      { href: "/eu-market/watchlists", label: "Watchlists", icon: Eye },
       { href: "/eu-market/sources", label: "Data Sources", icon: PlugZap },
     ]},
   ]},
   { group: "Hệ thống", items: [
-    { href: "/alerts", label: "Alerts", icon: Bell },
-    { href: "/agent", label: "AI Agent", icon: Bot },
-    { href: "/data", label: "Data & Connectors", icon: Database, hint: "Nguồn crawl, API, lịch đồng bộ, dung lượng" },
+    { href: "/agent", label: "AI Agent", icon: Bot, admin: true },
+    { href: "/data", label: "Data & Connectors", icon: Database, admin: true, hint: "Nguồn crawl, API, lịch đồng bộ, dung lượng" },
   ]},
 ];
 
 const strip = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") : p);  // trailingSlash: true → "/eu-market/"
-export const isActive = (href: string, path: string) => (href === "/" ? path === "/" : strip(path).startsWith(href));
+export const isActive = (href: string, path: string) => (href === "/" ? path === "/" : href === "/workspace" ? strip(path) === href : strip(path).startsWith(href));
 /** Sub-items: the section root ("/eu-market" = Overview) only matches exactly, the rest by prefix. */
 export const isSubActive = (href: string, parent: string, path: string) =>
   href === parent ? strip(path) === href : isActive(href, path);

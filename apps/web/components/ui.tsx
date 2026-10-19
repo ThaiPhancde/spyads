@@ -150,12 +150,7 @@ export function Empty({ children, title }: { children: ReactNode; title?: ReactN
   );
 }
 
-export function SeverityIcon({ s }: { s: string }) {
-  const m: Record<string, string> = { critical: "bg-critical", warn: "bg-serious", info: "bg-series-1" };
-  return <span className={cn("mt-1.5 inline-block size-2 shrink-0 rounded-full", m[s] || m.info)} title={s} />;
-}
-
-export function ProductTable({ rows, compact }: { rows: any[]; compact?: boolean }) {
+export function ProductTable({ rows, compact, renderActions }: { rows: any[]; compact?: boolean; renderActions?: (r: any) => React.ReactNode }) {
   return (
     <div className="overflow-x-auto">
       <Table>
@@ -163,16 +158,16 @@ export function ProductTable({ rows, compact }: { rows: any[]; compact?: boolean
           <TableRow>
             <TableHead>Product</TableHead>
             {!compact && <TableHead>Market</TableHead>}
-            <TableHead className="text-right">Advertisers</TableHead>
-            <TableHead className="text-right">Active ads</TableHead>
+            <TableHead className="text-right" title="Số nhà quảng cáo khác nhau (đã gộp theo page)">Nhà QC</TableHead>
+            <TableHead className="text-right" title="Số quảng cáo khác nhau đang chạy; số nhỏ = số dòng ad (cùng nội dung ở nhiều nước)">Quảng cáo</TableHead>
             <TableHead className="text-right">Growth 7d</TableHead>
-            <TableHead>Win</TableHead>
             {!compact && <TableHead>Rarity</TableHead>}
             <TableHead>Saturation</TableHead>
             <TableHead>Confidence</TableHead>
             <TableHead>Opportunity</TableHead>
             <TableHead>Action</TableHead>
             {!compact && <TableHead>Lifecycle</TableHead>}
+            {renderActions && <TableHead className="w-24">Gộp / Tách</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -181,15 +176,15 @@ export function ProductTable({ rows, compact }: { rows: any[]; compact?: boolean
               <TableCell className="min-w-[200px]"><ProductLink id={r.id} name={r.name} code={`${r.product_code} · ${r.category || ""}`} /></TableCell>
               {!compact && <TableCell className="text-xs">{(r.markets || []).join(", ") || r.country}</TableCell>}
               <TableCell className="tnum text-right">{r.advertisers}</TableCell>
-              <TableCell className="tnum text-right">{r.active_ads}</TableCell>
+              <TableCell className="tnum text-right">{r.unique_ads ?? r.active_ads}{r.unique_ads != null && r.unique_ads !== r.active_ads && <span className="ml-1 text-[10px] text-muted-foreground" title="dòng ad (trùng nội dung/nước)">/{r.active_ads}</span>}</TableCell>
               <TableCell className={cn("tnum text-right", r.growth_7d >= 0.5 && "text-good-text")}>{fmt.signedPct(r.growth_7d)}</TableCell>
-              <TableCell><ScoreBar value={r.win_score} width={44} /></TableCell>
               {!compact && <TableCell><ScoreBar value={r.rarity_score} width={44} /></TableCell>}
               <TableCell className="text-xs whitespace-nowrap"><ScoreBar value={r.saturation_score} width={44} /><div className="text-muted-foreground">{r.saturation_state}</div></TableCell>
               <TableCell className="text-xs whitespace-nowrap">{fmt.n(r.confidence_score)}% <span className="text-muted-foreground">{r.confidence_label}</span></TableCell>
               <TableCell><ScoreBar value={r.opportunity_score} width={44} /></TableCell>
               <TableCell><RecBadge rec={r.recommendation} /></TableCell>
               {!compact && <TableCell><Pill tone={LIFECYCLE_TONE[r.lifecycle]}>{r.lifecycle}</Pill></TableCell>}
+              {renderActions && <TableCell>{renderActions(r)}</TableCell>}
             </TableRow>
           ))}
         </TableBody>

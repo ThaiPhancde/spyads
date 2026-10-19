@@ -8,6 +8,7 @@ from contextvars import ContextVar
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from starlette.requests import Request
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./market_intel.db")
 
@@ -120,8 +121,11 @@ class Base(DeclarativeBase):
     pass
 
 
-def get_db():
+def get_db(request: Request = None):
     db = SessionLocal()
+    if request is not None and getattr(request.state, "user", None):
+        db.info["user_id"] = request.state.user["id"]
+        db.info["role"] = request.state.user["role"]
     try:
         yield db
     finally:
@@ -132,11 +136,11 @@ def auto_migrate():
     """Create missing tables, then add columns that exist in the models but not yet in the database (additive only, nullable).
     Keeps an existing SQLite/Postgres DB usable after upgrades; use Alembic for anything destructive."""
     from sqlalchemy import inspect, text
+    from .workspace import models as workspace_models  # register additive account / tracker tables
 
     with engine.begin() as conn:  # one connection for both reading the schema and altering it (no self-lock)
         if not IS_SQLITE:  # API and worker start together: one migrates, the other waits (concurrent DDL collides)
             conn.execute(text("SELECT pg_advisory_xact_lock(727002)"))
-        Base.metadata.create_all(conn)
         insp = inspect(conn)
         existing_tables = set(insp.get_table_names())
         for table in Base.metadata.sorted_tables:
@@ -150,6 +154,10 @@ def auto_migrate():
                 conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {coltype}'))
             for idx in table.indexes:  # index=True columns added above (or by an older upgrade) never got their index
                 idx.create(conn, checkfirst=True)
+        Base.metadata.create_all(conn)
+        if not IS_SQLITE and "ads" in existing_tables:  # engagement columns became nullable (NULL = never reported, not 0)
+            for col in ("likes", "comments_count", "shares"):
+                conn.execute(text(f'ALTER TABLE ads ALTER COLUMN "{col}" DROP NOT NULL'))
         for ddl in ("ix_ads_active_last_seen ON ads (is_active, last_seen_at)", "ix_ads_product_active ON ads (product_id, is_active)",
                     "ix_creatives_status_type_collected ON creatives (status, type, collected_at)",
                     "ix_alerts_read_created ON alerts (is_read, created_at)"):

@@ -149,7 +149,7 @@ class EUWatchlist(Base):
     # {"price_drop_pct": 10, "source_gap_pct": 30, "consecutive_rises": 3}
     rules: Mapped[dict] = mapped_column(JSON, default=dict)
     # product cluster watched by picture (image search §8): [{"phash", "dhash", "thumb", "label"}] — new indexed images
-    # within IMAGE_SIMILAR_DIST of any of them raise an IMAGE_MATCH_NEW alert (visual.service.evaluate_image_watchlists)
+    # within IMAGE_SIMILAR_DIST of any of them mark the watchlist
     images: Mapped[list | None] = mapped_column(JSON, default=list)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

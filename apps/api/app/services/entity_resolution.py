@@ -95,6 +95,14 @@ def _extra_similarity(candidate: dict, product: Product) -> float | None:
 
 
 def match_score(candidate: dict, product: Product, alias_names: list[str]) -> float:
+    from .product_identity import identity_match, compatible_titles
+    ident = identity_match(candidate.get("identity"), getattr(product, "product_identity", None))
+    if ident is False:
+        return 0.0
+    if ident is True:
+        return 1.0
+    if not compatible_titles(candidate["name"], product.canonical_name):
+        return 0.0
     names = [product.canonical_name, *alias_names]
     title = max((title_similarity(candidate["name"], n) for n in names), default=0)
     score = title
@@ -145,8 +153,9 @@ def _index(db: Session) -> dict:
         for t in _toks(name):
             _idx["inv"].setdefault(t, set()).add(pid)
 
-    for pid, name in db.execute(select(Product.id, Product.canonical_name).where(Product.id > _idx["pid"])):
-        add(pid, name)
+    for pid, name, status in db.execute(select(Product.id, Product.canonical_name, Product.name_status).where(Product.id > _idx["pid"])):
+        if status != "UNKNOWN":  # "Chưa xác định sản phẩm" placeholders must never attract real names
+            add(pid, name)
         _idx["pid"] = max(_idx["pid"], pid)
     for aid, pid, name in db.execute(select(ProductAlias.id, ProductAlias.product_id, ProductAlias.name)
                                      .where(ProductAlias.id > _idx["aid"])):
@@ -156,6 +165,15 @@ def _index(db: Session) -> dict:
 
 
 def find_best_match(db: Session, candidate: dict) -> tuple[Product | None, float]:
+    from sqlalchemy import String, cast, or_
+    from .product_identity import identity_match
+    ident = candidate.get("identity") or {}
+    if ident.get("gtin") or ident.get("brand") and ident.get("sku"):
+        values = [ident[k] for k in ("gtin", "sku") if ident.get(k)]
+        hits = [p for p in db.scalars(select(Product).where(or_(*[cast(Product.product_identity, String).contains(v) for v in values])).limit(25))
+                if identity_match(ident, p.product_identity) is True]
+        if len(hits) == 1:
+            return hits[0], 1.0
     toks = set(tokenize(candidate["name"]))
     if not toks:
         return None, 0.0
@@ -167,7 +185,8 @@ def find_best_match(db: Session, candidate: dict) -> tuple[Product | None, float
         return common / len(toks | t) + common / min(len(toks), len(t)) if common else 0.0
 
     pids = set().union(*(idx["inv"].get(t, ()) for t in toks))
-    scored = sorted(((max(pre(n) for n in idx["names"][pid]), pid) for pid in pids), reverse=True)
+    scored = sorted(((max((pre(n) for n in idx["names"].get(pid, ())), default=0.0), pid) for pid in pids), reverse=True)
+    scored = [x for x in scored if x[0] > 0]  # dropped / unindexed products have no names left
     # ponytail: full scoring (difflib) only for the 25 best token matches — a generic word like "bracelet" used to send
     # thousands of products through it (~1 s / ad). Raise the cap if matches get missed.
     cand = [pid for _, pid in scored[:25]]
@@ -176,7 +195,7 @@ def find_best_match(db: Session, candidate: dict) -> tuple[Product | None, float
         alias_map.setdefault(pid, []).append(name)
     best, best_score = None, 0.0
     # light rows (the fields match_score reads) — the full Product with its JSON columns is loaded for the winner only
-    for p in db.execute(select(Product.id, Product.canonical_name, Product.price, Product.category, Product.brand)
+    for p in db.execute(select(Product.id, Product.canonical_name, Product.price, Product.category, Product.brand, Product.product_identity)
                         .where(Product.id.in_(cand))) if cand else []:
         s = match_score(candidate, p, alias_map.get(p.id, []))
         if s > best_score:
@@ -188,7 +207,7 @@ JUNK_NAME = re.compile(r"[₱$€£¥]\s?\d[\d.,]*|\d[\d.,]*\s?(php|sar|aed|usd|
                        r"|\b(sale|discount|promo|free ?shipping|cod|buy now|order now|giảm giá|freeship|only|lang|فقط)\b", re.I)
 
 
-BUCKET_NAME = re.compile(r"\(chưa đặt tên\)\s*$| creative$", re.I)  # ingest.guess_product_name / the fallback above
+BUCKET_NAME = re.compile(r"\(chưa đặt tên\)\s*$| creative$", re.I)  # placeholder names from before services/naming.py
 
 
 def clean_name(name: str | None, advertiser: str | None = None) -> str | None:
@@ -199,62 +218,218 @@ def clean_name(name: str | None, advertiser: str | None = None) -> str | None:
     return n
 
 
-def resolve_product(db: Session, candidate: dict, source: str | None = None) -> tuple[Product, bool, float]:
-    """candidate = {name, price?, category?, brand?, landing_url?, country?, currency?, advertiser?}.
+def _pretty(name: str) -> str:
+    """Title-case lower / UPPER-case names only — "iPhone 16 Case" and "TRON ANC" keep their casing."""
+    return name.title() if name == name.lower() or name == name.upper() else name
 
-    Returns (product, created, score). Existing → attach alias. New → create canonical product.
-    """
+
+def resolve_product(db: Session, candidate: dict, source: str | None = None) -> tuple[Product, bool, float]:
+    """candidate = {name, naming?, price?, category?, brand?, landing_url?, country?, currency?, advertiser?, ad_id?}.
+    `naming` = services.naming.best() of the ad; without it the name is judged as a source-reported one ("adapter").
+
+    UNKNOWN (no evidence) → a product of its own, never matched: grouping unidentified ads by shop mixed unrelated
+    products ("Unknown (chưa đặt tên)" held 938 TikTok ads). Returns (product, created, score)."""
+    from . import naming as N
+
     adv = candidate.get("advertiser")
-    # ponytail: a junk name falls back to one bucket per advertiser (never matched against the catalogue, never an alias);
-    # ingest can pass `advertiser` to enable the equal-to-page-name check
-    name = clean_name(candidate["name"], adv) or (f"{adv} creative" if adv else candidate["name"].strip())
-    candidate = {**candidate, "name": name}
-    if BUCKET_NAME.search(name):  # advertiser bucket: exact page name only — "Beplain Vietnam (chưa đặt tên)" used to
-        product = db.scalar(select(Product).where(func.lower(Product.canonical_name) == name.strip().lower()))  # land in "J&T Express Vietnam (chưa đặt tên)"
-        score = 1.0 if product else 0.0
+    nm = candidate.get("naming")
+    if nm is None:
+        raw = candidate.get("name") or ""
+        name = None if BUCKET_NAME.search(raw) or N.is_bad_name(raw, adv) else clean_name(raw, adv)
+        nm = N.result(name, "adapter") if name else N.result(None, None)
+    name = clean_name(nm["name"], adv) if nm["name"] else None
+    if not name:
+        nm = N.result(None, None)
+    evidence = [{**e, "ad_id": candidate.get("ad_id")} for e in nm.get("evidence") or []]
+    ident = identity_product(db, candidate.get("fingerprint"), candidate.get("landing_url"), candidate.get("copy"), candidate.get("ad_id"))
+    if ident:  # same product page / same creative as an earlier ad: that product, whatever the names say
+        product, score = db.get(Product, ident), 1.0
+        from .product_identity import identity_match
+        if identity_match(candidate.get("identity"), product.product_identity) is False:
+            product, score = None, 0.0
     else:
-        product, score = find_best_match(db, candidate)
+        product, score = (None, 0.0) if not name and not candidate.get("identity") else find_best_match(db, {**candidate, "name": name or ""})
     created = False
     if product is None or score < MATCH_THRESHOLD:
         product = Product(
             product_code=next_product_code(db),
-            canonical_name=candidate["name"].strip().title(),
+            canonical_name=_pretty(name) if name else N.UNKNOWN_LABEL,
             category=candidate.get("category"),
             subcategory=candidate.get("subcategory"),
             brand=candidate.get("brand"),
+            product_identity=candidate.get("identity") or None,
             price=candidate.get("price"),
             currency=candidate.get("currency"),
             market=candidate.get("country"),
             country=candidate.get("country"),
             image_url=candidate.get("image_url"),
+            name_status=nm["status"], name_source=nm["source"], name_confidence=nm["confidence"], name_evidence=evidence[:6],
         )
         db.add(product)
         db.flush()
-        created, score = True, 1.0
-    else:
-        if not product.category and candidate.get("category"):
-            product.category = candidate["category"]
-        if not product.price and candidate.get("price"):
-            product.price = candidate["price"]
-
+        return product, True, 1.0
+    if not product.category and candidate.get("category"):
+        product.category = candidate["category"]
+    if not product.price and candidate.get("price"):
+        product.price = candidate["price"]
+    N.absorb(product, nm, evidence)
+    if candidate.get("identity"):
+        product.product_identity = dict(product.product_identity or {}) | candidate["identity"]
     existing = {a.name.lower() for a in product.aliases}
-    if candidate["name"].lower() not in existing and candidate["name"].lower() != product.canonical_name.lower():
-        db.add(ProductAlias(product_id=product.id, name=candidate["name"], source=source, match_score=round(score, 3)))
+    if name and name.lower() not in existing and name.lower() != product.canonical_name.lower():
+        db.add(ProductAlias(product_id=product.id, name=name, source=source, match_score=round(score, 3)))
     return product, created, score
 
 
-def merge_products(db: Session, source: Product, target: Product):
-    """Manual correction: merge `source` into `target` (all child rows re-pointed)."""
-    from ..models import Ad, Comment, ProductDailySnapshot, Store, Alert, LifecycleEvent
+# ------------------------------------------------------------ identity (not name) signals
+# Same product page, same copy from the same page, same picture = same product, whatever the name says. A shop's home
+# page, a social / chat / app-store link or a collection page is the advertiser, not a product — never grouped on.
+_NO_IDENTITY_HOST = re.compile(r"(^|\.)(facebook\.com|fb\.com|fb\.me|instagram\.com|tiktok\.com|m\.me|wa\.me|whatsapp\.com|"
+                               r"messenger\.com|play\.google\.com|apps\.apple\.com|itunes\.apple\.com|onelink\.me|linktr\.ee|"
+                               r"beacons\.ai|bit\.ly|google\.com|youtube\.com|doubleclick\.net|adjust\.com|app\.link)$", re.I)
+_NO_IDENTITY_PATH = re.compile(r"^/?$|/(collections?|shop|store|category|categories|pages/(contact|about)|search)(/|$)", re.I)
+TRIVIAL_PHASH = {"0000000000000000", "ffffffffffffffff", "8000000000000000"}
 
-    for model in (Ad, Comment, Store, Alert):
+
+def landing_key(url: str | None) -> str | None:
+    """host + path of a product page (query dropped), or None when the link says nothing about which product."""
+    if not url:
+        return None
+    u = urlparse(url if "://" in url else f"https://{url}")
+    host, path = u.netloc.lower().removeprefix("www."), u.path.rstrip("/").lower()
+    if not host or _NO_IDENTITY_HOST.search(host) or _NO_IDENTITY_PATH.search(path or "/"):
+        return None
+    return f"{host}{path}"
+
+
+def identity_product(db: Session, fingerprint: str | None, landing: str | None, copy: str | None,
+                     exclude_ad: int | None = None) -> int | None:
+    """Product of an earlier ad that is evidently the same thing: same product page, or same copy + page + link
+    (ingest.cross_source_key). Named products first. Copy shorter than 20 chars is not an identity ("Shop now")."""
+    from ..models import Ad
+
+    conds = []
+    if fingerprint and len((copy or "").strip()) >= 20:
+        conds.append(Ad.creative_fingerprint == fingerprint)
+    if lk := landing_key(landing):
+        conds.append(func.lower(Ad.landing_url).like(f"%{lk}%"))
+    if not conds:
+        return None
+    from sqlalchemy import or_
+
+    rows = db.execute(select(Ad.product_id, Ad.landing_url, Ad.creative_fingerprint, Product.name_status)
+                      .join(Product, Product.id == Ad.product_id).where(or_(*conds), Ad.id != (exclude_ad or -1)).limit(50)).all()
+    rows = [r for r in rows if (fingerprint and r.creative_fingerprint == fingerprint) or (lk and landing_key(r.landing_url) == lk)]
+    named = {r.product_id for r in rows if r.name_status != "UNKNOWN"}
+    if len(named) == 1:
+        return named.pop()
+    if named:  # the page already maps to several named products: ambiguous, let the name decide
+        return None
+    return min((r.product_id for r in rows), default=None)
+
+
+def unindex(pid: int) -> None:
+    """Forget a product's names (it is being renamed / emptied): it stops attracting matches."""
+    _idx["names"].pop(pid, None)
+
+
+def index_name(pid: int, name: str) -> None:
+    """A product renamed after the index was built (MKT edit, naming upgrade) becomes findable under its new name."""
+    if _idx["names"] or _idx["pid"]:
+        _idx["names"].setdefault(pid, []).append(name)
+        for t in _toks(name):
+            _idx["inv"].setdefault(t, set()).add(pid)
+
+
+def move_ads(db: Session, ad_ids: list[int], target_id: int) -> set[int]:
+    """Re-point ads + their creatives / comments / stores to `target_id`. Returns the products they came from."""
+    from sqlalchemy import update
+
+    from ..models import Ad, Comment, Creative, Store
+
+    if not ad_ids:
+        return set()
+    old = set(db.scalars(select(Ad.product_id).where(Ad.id.in_(ad_ids)).distinct())) - {None, target_id}
+    db.execute(update(Ad).where(Ad.id.in_(ad_ids)).values(product_id=target_id))
+    db.execute(update(Creative).where(Creative.ad_id.in_(ad_ids)).values(product_id=target_id))
+    db.execute(update(Comment).where(Comment.ad_id.in_(ad_ids)).values(product_id=target_id))
+    store_ids = select(Ad.store_id).where(Ad.id.in_(ad_ids), Ad.store_id.is_not(None))
+    db.execute(update(Store).where(Store.id.in_(store_ids), Store.product_id.in_(old)).values(product_id=target_id))
+    db.flush()
+    from . import shop_naming
+
+    shop_naming.refresh(db, [*old, target_id])
+    return old
+
+
+def drop_if_empty(db: Session, pid: int) -> bool:
+    """Delete a product left without ads (and without MKT votes), child rows first — by the live schema, not the models."""
+    from sqlalchemy import inspect, text
+
+    from ..models import Ad, Vote
+    from ..cluster_models import ProductCluster
+
+    # Phase 1 cluster IDs preserve original products and their history. Legacy naming/split
+    # paths must not cascade-delete that history behind the cluster overlay.
+    if db.get(ProductCluster, pid):
+        return False
+
+    if db.scalar(select(Ad.id).where(Ad.product_id == pid).limit(1)) or db.scalar(select(Vote.id).where(Vote.product_id == pid).limit(1)):
+        return False
+    db.flush()
+    if (obj := db.get(Product, pid)) is not None:
+        db.expunge(obj)  # deleted with SQL below: the session must not flush it again
+    insp = inspect(db.connection())
+    for t in insp.get_table_names():
+        for fk in insp.get_foreign_keys(t):
+            if fk["referred_table"] == "products" and t != "products":
+                db.execute(text(f'delete from "{t}" where "{fk["constrained_columns"][0]}" = :pid'), {"pid": pid})
+    db.execute(text("delete from products where id = :pid"), {"pid": pid})
+    _idx["names"].pop(pid, None)
+    return True
+
+
+def merge_products(db: Session, source: Product, target: Product, by: str | None = None):
+    """Manual correction: merge `source` into `target` (all child rows re-pointed). Undo: split_ads with the event's ad ids."""
+    from ..models import Ad, Alert, Event, LifecycleEvent, ProductDailySnapshot, Store, Vote
+
+    ad_ids = list(db.scalars(select(Ad.id).where(Ad.product_id == source.id)))
+    db.add(Event(type="PRODUCT_MERGED", product_id=target.id, data={
+        "source_id": source.id, "source_code": source.product_code, "source_name": source.canonical_name,
+        "source_name_vi": source.name_vi, "source_status": source.name_status, "ad_ids": ad_ids, "by": by}))
+    move_ads(db, ad_ids, target.id)
+    for model in (Store, Alert, Vote):
         for row in db.scalars(select(model).where(model.product_id == source.id)).all():
             row.product_id = target.id
-    for model in (ProductDailySnapshot, LifecycleEvent):
-        for row in db.scalars(select(model).where(model.product_id == source.id)).all():
-            db.delete(row)
-    db.add(ProductAlias(product_id=target.id, name=source.canonical_name, source="manual_merge", match_score=1.0))
+    from ..cluster_models import ProductCluster
+    if not db.get(ProductCluster, source.id):
+        for model in (ProductDailySnapshot, LifecycleEvent):
+            for row in db.scalars(select(model).where(model.product_id == source.id)).all():
+                db.delete(row)
+    if source.name_status != "UNKNOWN":
+        db.add(ProductAlias(product_id=target.id, name=source.canonical_name, source="manual_merge", match_score=1.0))
     for a in list(source.aliases):
         a.product = target
     db.flush()
-    db.delete(source)
+    drop_if_empty(db, source.id)
+
+
+def split_ads(db: Session, product: Product, ad_ids: list[int], name: str | None = None, by: str | None = None,
+              name_vi: str | None = None) -> Product:
+    """Move some ads of `product` to a new product (MKT-named → VERIFIED, else UNKNOWN). Logged for undo."""
+    from ..models import Ad, Event
+    from . import naming as N
+
+    ids = list(db.scalars(select(Ad.id).where(Ad.id.in_(ad_ids), Ad.product_id == product.id)))
+    if not ids:
+        raise ValueError("no ads of this product selected")
+    new = Product(product_code=next_product_code(db), canonical_name=name or N.UNKNOWN_LABEL, category=product.category,
+                  country=product.country, market=product.market, currency=product.currency,
+                  name_status="UNKNOWN", name_evidence=[])
+    db.add(new)
+    db.flush()
+    if name or name_vi:
+        N.set_name(new, name, name_vi, by)
+    move_ads(db, ids, new.id)
+    db.add(Event(type="PRODUCT_SPLIT", product_id=product.id, data={"to_id": new.id, "ad_ids": ids, "by": by}))
+    return new

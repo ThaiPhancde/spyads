@@ -4,7 +4,8 @@ from sqlalchemy.orm import Session
 
 from app.collector.contract import AdRecord, MediaItem
 from app.db import Base
-from app.ingest import _attach_creatives, bare_url, classify_funnel, guess_product_name, parse_price
+from app.ingest import _attach_creatives, bare_url, classify_funnel, naming_input, parse_price
+from app.services import naming
 from app.markets import known_country
 from app.models import Ad, Creative
 
@@ -22,26 +23,29 @@ with Session(eng) as db:
         MediaItem("video", "https://cdn.x/v/a.mp4?oh=NEW"),  # same asset, new signature → no new row
         MediaItem("image", "https://cdn.x/i/b.jpg?oh=1"),  # new asset → one row
     ])
-    new = _attach_creatives(db, ad, rec)
+    pending = _attach_creatives(db, ad, rec)
     rows = db.scalars(select(Creative).where(Creative.ad_id == ad.id)).all()
-    assert len(new) == 1 and len(rows) == 2, (new, rows)
+    # Refreshed signed URLs also re-queue an existing asset whose thumbnail is still missing.
+    assert set(pending) == {c.id for c in rows} and len(rows) == 2, (pending, rows)
     assert db.scalar(select(Creative.source_url).where(Creative.type == "video")) == "https://cdn.x/v/a.mp4?oh=NEW"  # pending row got the fresh URL
-    assert _attach_creatives(db, ad, rec) == []  # idempotent
+    assert _attach_creatives(db, ad, rec) == pending  # no extra DB rows; thumbnails still pending
+    for c in rows:
+        c.thumb_key = f"test-thumb-{c.id}.jpg"
+    db.flush()
+    assert _attach_creatives(db, ad, rec) == []  # idempotent once thumbnails exist
 
-# ---- 2. product name never comes from the ad copy
+# ---- 2. product name never comes from the ad copy sentence, the shop or a CTA (services/naming.py)
+best = lambda r: naming.best(naming_input(r))["name"]
 copy = "Balikan nating muli ang patunay ni Gng. Santos — order now!"
 r = AdRecord(source="x", source_ad_id="1", ad_text=copy, advertiser="Acme PH")
-assert guess_product_name(r) == "Acme PH (chưa đặt tên)", guess_product_name(r)
+assert best(r) is None, best(r)  # no evidence → UNKNOWN, never "Acme PH (chưa đặt tên)"
 r.landing_page = "https://www.facebook.com/acme/"  # social host → no slug
-assert guess_product_name(r) == "Acme PH (chưa đặt tên)"
-r.landing_page = "https://acme-shop.com/pages/magnetic-back-brace"
-assert guess_product_name(r) == "magnetic back brace", guess_product_name(r)
-r.product_name = "Posture Pro Belt"  # LLM hint wins
-assert guess_product_name(r) == "Posture Pro Belt"
+assert best(r) is None
+r.landing_page = "https://acme-shop.com/products/magnetic-back-brace"
+assert best(r) == "Magnetic Back Brace", best(r)
 r2 = AdRecord(source="x", source_ad_id="2", ad_text=copy, title="Shop now", landing_page="https://www.amazon.ae/dp/B08LHSBG3R", advertiser=None)
-assert guess_product_name(r2) == "Unknown (chưa đặt tên)", guess_product_name(r2)
-for rec_ in (r, r2):
-    assert "Balikan" not in guess_product_name(rec_)
+assert best(r2) is None, best(r2)
+assert naming.best(naming_input(r2, llm_name="Posture Pro Belt"))["name"] is None  # model name not in the ad's words → dropped
 
 # ---- 3. CTA → funnel (CTA first, landing host second)
 assert classify_funnel("MESSAGE_PAGE", "https://acme-shop.com/p/x") == "mess"  # CTA beats the external landing

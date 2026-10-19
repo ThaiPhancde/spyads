@@ -140,6 +140,9 @@ def protected_products(db: Session) -> set[int]:
     ids: set[int] = set()
     ids |= {p for (p,) in db.execute(select(Vote.product_id).where(Vote.decision.in_(["LOVE", "TEST", "WATCH"])))}
     ids |= {p for (p,) in db.execute(select(Ad.product_id).where(Ad.saved_by.is_not(None), Ad.product_id.is_not(None)).distinct())}
+    from .workspace.models import AdInteraction
+    ids |= set(db.scalars(select(Ad.product_id).join(AdInteraction, AdInteraction.ad_id == Ad.id).where(
+        Ad.product_id.is_not(None), (AdInteraction.saved.is_(True)) | (AdInteraction.favorite.is_(True)) | (AdInteraction.tested.is_(True)))))
     return ids
 
 

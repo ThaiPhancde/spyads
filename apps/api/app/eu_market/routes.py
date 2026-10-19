@@ -183,7 +183,7 @@ class BotSearchIn(BaseModel):
     keyword: str
     limit: int = Field(20, ge=1, le=50)
     force: bool = False  # skip the cache (a new paid search)
-    provider: str = "serp"  # serp = SpyAds → SerpApi Google Shopping; grok = task for the Grok Bot agent
+    provider: str = "serp"  # serp = SpyAds → SerpApi Google Shopping; grok = task for the Grok Bot agent; bridge = user's Chrome extension reports via /api/imports/allegro
 
 
 def _bot_job_out(db: Session, j: dict) -> dict:

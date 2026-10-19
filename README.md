@@ -74,7 +74,9 @@ Quyết định đi theo thứ tự, dừng ở điều kiện đầu tiên kh�
 
 Sắp xếp mọi danh sách theo **opportunity** = 42% demand + momentum, phần còn lại là market fit, vote của team, novelty, creative, biên lợi nhuận, trừ điểm bão hoà và compliance, cộng 15 điểm nếu chạy ở Philippines. Lý do khuyến nghị ghi rõ số ads, số người bán và số ngày chạy. Self-check: `cd apps/api && .venv\Scripts\python test_scoring_rules.py`.
 
-Hidden Winners là danh sách riêng: ≤5 người bán nhưng có ad mạnh (chạy lâu, nhiều biến thể, nhiều placement).
+Hidden Winner là nhãn bổ trợ cho Opportunity v2: 1–3 nhà quảng cáo duy nhất, có ad đang chạy ≥7 ngày, không thuộc SKIP,
+và có momentum từ lịch sử snapshot quan sát hoặc ít nhất 2 creative khác biệt được xác nhận bằng hash/CLIP và metadata.
+Thiếu bằng chứng → Chưa xác nhận / Cần theo dõi. Chi tiết: [docs/HIDDEN_WINNERS_V3.md](docs/HIDDEN_WINNERS_V3.md).
 
 ## Màn hình
 
@@ -126,11 +128,13 @@ Hai Dockerfile: `apps/api` (kèm ffmpeg) và `apps/web`. Web proxy `/api/*` sang
 
 ## Bảo mật
 
-- Mọi request ghi (POST/PATCH/DELETE) cần `X-Admin-Token` = `ADMIN_TOKEN`; web (`apps/web/middleware.js`) tự gắn phía server. Thiếu `ADMIN_TOKEN` → API trả 503 cho mọi request ghi.
+- Đăng nhập bằng tài khoản ADMIN/MKT: phiên cookie HttpOnly, Argon2id, CSRF và giới hạn request. MKT mới cần ADMIN phê duyệt; tạo ADMIN bằng `.venv\Scripts\python -m app.workspace.cli create-admin` trong `apps/api`.
+- Web không tự gắn admin token. `ADMIN_TOKEN` chỉ giữ cho tích hợp server-to-server cũ và không cho truy cập API tài khoản/workspace riêng.
 - Ingest (`/api/ingest/*`, extension) dùng `INGEST_TOKEN` (header `X-Ingest-Token`), bắt buộc.
 - CORS chỉ cho `WEB_ORIGIN`. Web có Basic Auth tuỳ chọn (`BASIC_AUTH_USER` / `BASIC_AUTH_PASS`).
 - Token Apify bị che khỏi mọi thông báo lỗi; nguồn trả phí chỉ chạy khi bật tay.
 - Audit và nhật ký sửa: [docs/AUDIT_2026-10-07.md](docs/AUDIT_2026-10-07.md).
+- Tài khoản, Workspace MKT và theo dõi đối thủ: [triển khai, migration, kiểm thử và hướng dẫn worker](docs/AUTH_COMPETITOR_TRACKING.md).
 
 ## Tiện ích vận hành
 

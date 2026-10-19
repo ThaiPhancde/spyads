@@ -24,6 +24,8 @@ __pycache__/
 # --- node / next ---
 node_modules/
 .next/
+.next-workspace-test/
+.next-validation/
 out/
 next-env.d.ts
 

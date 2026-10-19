@@ -69,6 +69,8 @@ class ExternalApiCall(Base):
     error_code: Mapped[str | None] = mapped_column(String(48))
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     search_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    tokens: Mapped[int | None] = mapped_column(Integer)  # LLM calls: total tokens the provider reported
+    units: Mapped[float | None] = mapped_column(Float)   # LLM calls: Cloudflare neurons
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 

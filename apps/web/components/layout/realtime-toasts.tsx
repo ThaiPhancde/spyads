@@ -3,7 +3,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { LiveEvent, useEvents } from "@/lib/realtime";
 
-const TOAST_TYPES = new Set(["ALERT", "DECISION_CHANGED", "REFUSAL_SPIKE", "DELIVERY_RATE_DROP", "SEARCH_DONE", "CONNECTOR_FAILED"]);
+const TOAST_TYPES = new Set(["DECISION_CHANGED", "REFUSAL_SPIKE", "DELIVERY_RATE_DROP", "SEARCH_DONE", "CONNECTOR_FAILED"]);
 
 function text(e: LiveEvent): string {
   const d = e.data || {};
@@ -15,12 +15,12 @@ function text(e: LiveEvent): string {
   return d.title || e.type;
 }
 
-/** Realtime (SSE) events → sonner toasts. Click opens the product or the alerts page. */
+/** Realtime (SSE) events → sonner toasts. Click opens the product (or the search page). */
 export function RealtimeToasts() {
   const router = useRouter();
   useEvents((e) => {
     if (!TOAST_TYPES.has(e.type)) return;
-    const href = e.product_id ? `/products/${e.product_id}` : "/alerts";
+    const href = e.product_id ? `/products/${e.product_id}` : "/search";
     const bad = ["CONNECTOR_FAILED", "REFUSAL_SPIKE", "DELIVERY_RATE_DROP"].includes(e.type) || (e.type === "SEARCH_DONE" && e.data?.error && !e.data?.found);
     (bad ? toast.error : toast)(e.type.replace(/_/g, " "), { description: text(e), action: { label: "Mở", onClick: () => router.push(href) } });
   });

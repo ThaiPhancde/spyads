@@ -160,7 +160,7 @@ def _serp(query: str, geo: str | None) -> dict:
     args = {"query": query, "engine": "google"}
     if geo:
         args["geo_location"] = geo
-    text = strip_untrusted(tool_call("search_engine", args))
+    text = strip_untrusted(tool_call("search_engine", args, timeout=float(os.getenv("BRIGHTDATA_SEARCH_TIMEOUT_S", "45"))))  # measured 8-70 s: bounded so "Hiện giá" answers inside the web proxy window
     try:
         j = json.loads(text)
     except ValueError:

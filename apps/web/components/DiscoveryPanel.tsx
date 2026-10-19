@@ -101,6 +101,15 @@ export function DiscoveryPanel({ productId, onChange }: { productId: number; onC
             <>
               <div className="mt-4 mb-1 text-xs text-muted-foreground">Thành phần Wave</div>
               <div className="text-xs text-ink2">{Object.entries(pv.wave_parts).map(([k, x]) => `${k.replace(/_/g, " ")} ${x}`).join(" · ")}</div>
+              {pv.creative_evidence && (
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  Độ tin cậy Wave {v.wave_confidence ?? 0}% — đọc được {pv.creative_evidence.readable_ads}/{pv.creative_evidence.ads} ads
+                  {Object.keys(pv.creative_evidence.sources || {}).length ? ` (nguồn: ${Object.entries(pv.creative_evidence.sources).map(([k, n]) => `${k} ${n}`).join(", ")})` : ""}
+                  {Object.keys(pv.creative_evidence.langs || {}).length ? ` · ngôn ngữ: ${Object.entries(pv.creative_evidence.langs).map(([k, n]) => `${k} ${n}`).join(", ")}` : ""}
+                  {(v.wave_confidence ?? 0) < 50 ? ". Thiếu nội dung nên các thành phần đọc chữ để ở mức trung tính, không suy đoán." : ""}
+                  {pv.creative_evidence.unread_langs?.length ? ` Chưa đọc được: ${pv.creative_evidence.unread_langs.join(", ")}.` : ""}
+                </div>
+              )}
             </>
           )}
         </Card>

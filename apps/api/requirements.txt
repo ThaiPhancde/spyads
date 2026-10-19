@@ -1,4 +1,5 @@
 fastapi>=0.115
+argon2-cffi>=23.1            # Argon2id password hashing
 uvicorn[standard]>=0.30
 sqlalchemy>=2.0
 pydantic>=2.7
@@ -13,3 +14,4 @@ psycopg[binary]>=3.2        # PostgreSQL
 playwright>=1.45            # tiktok_top_ads_headless (drives the installed Edge/Chrome; no browser download)
 ImageHash>=4.3               # pHash / dHash for image search (docs/IMAGE_SEARCH.md)
 numpy>=1.26                  # hash / embedding index in RAM
+pytesseract>=0.3.10          # creative_enrich OCR (needs the Tesseract program: winget install UB-Mannheim.TesseractOCR; scripts/setup_tesseract.py)

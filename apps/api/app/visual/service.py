@@ -528,48 +528,6 @@ def index_one(source: str, source_id: int) -> ProductImage | None:
         return row if row.processing_status == "done" else None
 
 
-# ------------------------------------------------------------------ watchlists by picture (spec §8 Watchlists)
-def evaluate_image_watchlists(db: Session, now: datetime | None = None) -> dict:
-    """For every active EU watchlist with `images`, alert on index rows added since its last check that are within
-    SIMILAR_DIST of a watched picture: a new ad / listing / EU offer for the watched product cluster. Real price
-    changes come from the existing EU rules (the watchlist's product_ids) — nothing is estimated here."""
-    from ..eu_market.models import EUWatchlist
-    from ..models import Alert
-
-    now = now or datetime.utcnow()
-    HASH_INDEX.refresh(db, force=True)
-    made, checked = 0, 0
-    for w in db.scalars(select(EUWatchlist).where(EUWatchlist.active.is_(True))).all():
-        imgs = [i for i in (w.images or []) if i.get("phash")]
-        if not imgs:
-            continue
-        checked += 1
-        since = w.last_synced_at or w.created_at
-        hits: dict[int, int] = {}
-        for i in imgs:
-            for pid, d in HASH_INDEX.near(i["phash"], i.get("dhash") or i["phash"], SIMILAR_DIST).items():
-                hits[pid] = min(hits.get(pid, 99), d)
-        if hits:
-            fresh = db.scalars(select(ProductImage).where(ProductImage.id.in_(list(hits)), ProductImage.indexed_at > since)).all()
-            rows = hydrate(db, {pi.id: {"dist": hits[pi.id]} for pi in fresh}) if fresh else []
-            for r in rows:
-                key = f"IMG:{w.id}:{r['product_image_id']}"[:128]
-                if db.scalar(select(Alert.id).where(Alert.dedupe_key == key)):
-                    continue
-                what = {"ad": "quảng cáo", "listing": "listing nguồn hàng", "eu_listing": "offer EU"}.get(r["kind"], r["kind"])
-                price = f" · {r['price']} {r['currency']}" if r.get("price") is not None else ""
-                db.add(Alert(type="IMAGE_MATCH_NEW", severity="info", product_id=r.get("product_id"),
-                             title=f"[{w.name}] {what} mới khớp ảnh theo dõi ({r['tier']})"[:255],
-                             message=f"{r['source_label']} {r.get('country') or ''}: {(r.get('title') or '')[:120]}{price} · giống {int(r['similarity'] * 100)}%",
-                             dedupe_key=key, data={"eu_watchlist_id": w.id, "product_image_id": r["product_image_id"], "kind": r["kind"],
-                                                   "creative_id": r.get("creative_id"), "ad_id": r.get("ad_id"), "eu_listing_id": r.get("eu_listing_id"),
-                                                   "url": r.get("url"), "thumb": r.get("thumb"), "tier": r["tier"]}))
-                made += 1
-        w.last_synced_at = now
-    db.commit()
-    return {"watchlists": checked, "alerts": made}
-
-
 def status(db: Session) -> dict:
     cre_total = db.scalar(select(func.count(Creative.id)).where(Creative.thumb_key.is_not(None))) or 0
     eu_total = db.scalar(select(func.count(EUListing.id)).where(EUListing.thumbnail_url.is_not(None))) or 0

@@ -48,6 +48,9 @@ REMOVED_NETWORKS = ("google", "microsoft", "amazon", "walmart", "shopify", "tikt
 def connector_network(adapter: str | None, config: dict | None = None) -> str:
     if adapter in ADAPTER_NETWORK:
         return ADAPTER_NETWORK[adapter]
+    from .connector_identity import identity
+    if identity(adapter, config):
+        return network_of((config or {}).get("platform"))  # vendor may supply both Meta and TikTok
     from .collector.adapters.generic import SOURCE_PLATFORM
 
     src = str((config or {}).get("source") or "").lower()

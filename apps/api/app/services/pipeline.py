@@ -1,5 +1,5 @@
 """Product Pipeline (blueprint §25, §27): ingest → normalize → enrich → features → scores →
-decisions → snapshots → alerts. In production each step is a worker behind a queue
+decisions → snapshots. In production each step is a worker behind a queue
 (Temporal/Airflow/n8n); here they run sequentially in one call."""
 import time
 from datetime import datetime
@@ -8,7 +8,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Connector, PipelineRun
-from .alerts import run_alerts
 from .connectors import enrich_comments, normalize_pending
 from .engine import build_snapshots, score_all
 
@@ -42,7 +41,6 @@ def run_pipeline(db: Session, pull_connectors: bool = True) -> PipelineRun:
         step("09 Comment analysis (backlog)", lambda: {"comments": enrich_comments(db)[0]})
         step("10-12 Features · Scores · Opportunity · Decisions · Lifecycle", lambda: {"products": score_all(db)})
         step("Daily snapshot", lambda: {"products": build_snapshots(db)})
-        step("13 Triggers / Alerts", lambda: {"alerts": run_alerts(db)})
         run.status = "ok"
     except Exception:
         db.rollback()

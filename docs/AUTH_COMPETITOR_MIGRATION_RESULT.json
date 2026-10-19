@@ -1,0 +1,36 @@
+{
+  "migration": "20261015_accounts_competitors_v1",
+  "before": {
+    "ads": 15983,
+    "ad_id_sum": 157562639,
+    "products": 11670,
+    "advertisers": 4556
+  },
+  "after": {
+    "ads": 15983,
+    "ad_id_sum": 157562639,
+    "products": 11670,
+    "advertisers": 4576
+  },
+  "identity": {
+    "verified": 3341,
+    "legacy": 1235
+  },
+  "preserved_ads_and_products": true,
+  "identity_v2": {
+    "before": {
+      "ads": 15983,
+      "ad_id_sum": 157562639,
+      "products": 11657,
+      "advertisers": 4576
+    },
+    "after": {
+      "ads": 15983,
+      "ad_id_sum": 157562639,
+      "products": 11657,
+      "advertisers": 4881
+    },
+    "mismatched_owners_remaining": 0,
+    "preserved_ads_and_products": true
+  }
+}

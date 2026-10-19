@@ -9,13 +9,16 @@
 </style></head>
 <body>
  <b>ToolSpy Browser Bridge — Allegro</b>
- <div style="color:#666;font-size:11px">Chỉ đọc trang listing bạn đang mở, khi bạn bấm nút. Không tự mở trang, không tự chuyển trang.</div>
+ <div style="color:#666;font-size:11px">Nút bên dưới chỉ đọc trang listing bạn đang mở. Tìm từ web ToolSpy: extension mở 1 tab listing/1 lần, không phân trang, không giải CAPTCHA.</div>
  <label>Số sản phẩm tối đa (limit)</label><input id="limit" type="number" min="1" max="200" value="5">
  <label>API URL</label><input id="api" value="http://127.0.0.1:8000">
  <label>Token (TOOLSPY_BRIDGE_TOKEN)</label><input id="token" type="password" placeholder="dán token từ D:\ToolSpy\.env">
+ <label>ToolSpy web origin (tuỳ chọn, ngoài localhost:3000)</label><input id="web" placeholder="vd http://192.168.1.10:3000">
+ <button id="saveWeb">Lưu web origin</button><br>
  <button id="run">Extract &amp; send</button><button id="extractOnly">Chỉ extract</button><button id="copy">Copy JSON</button>
  <div id="status"></div>
  <textarea id="preview" readonly></textarea>
+ <script src="lib.js"></script>
  <script src="parser.js"></script>
  <script src="popup.js"></script>
 </body></html>

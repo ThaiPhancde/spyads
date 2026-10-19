@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ToolSpy UI Demo</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--bd:#e3e6ea;--tx:#1b1f24;--mut:#6b7280;--pri:#4f46e5;--ok:#16a34a;--warn:#d97706;--bad:#dc2626;--side:#111827}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b21;--bd:#2a2f38;--tx:#e8eaed;--mut:#9aa3af;--side:#0a0c10}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--tx);display:flex;min-height:100vh}
+aside{width:236px;background:var(--side);color:#cbd5e1;padding:14px 10px;position:sticky;top:0;height:100vh;overflow:auto;flex:none}
+aside h1{font-size:16px;color:#fff;margin:0 8px 10px}
+aside .g{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#6b7280;margin:14px 8px 4px}
+aside a{display:block;padding:6px 10px;border-radius:6px;color:inherit;text-decoration:none;cursor:pointer}
+aside a:hover{background:#1f2937}aside a.on{background:var(--pri);color:#fff}
+.user{margin:8px;padding:8px;background:#1f2937;border-radius:8px;font-size:12px}
+.user b{color:#fff}.user span{display:inline-block;margin-top:4px;padding:1px 8px;border-radius:99px;background:#374151;margin-right:4px;cursor:pointer}.user span.on{background:var(--pri);color:#fff}
+main{flex:1;min-width:0;padding:0 24px 40px}
+.banner{background:#fef3c7;color:#92400e;padding:6px 12px;margin:0 -24px 16px;font-size:12px;text-align:center}
+h2{margin:6px 0 2px;font-size:22px}.sub{color:var(--mut);margin:0 0 16px}
+section{display:none}section.on{display:block}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input,select,button{font:inherit;padding:7px 10px;border:1px solid var(--bd);border-radius:8px;background:var(--card);color:var(--tx)}
+button{cursor:pointer}button.p{background:var(--pri);color:#fff;border-color:var(--pri)}
+.chip{display:inline-block;padding:2px 9px;border-radius:99px;border:1px solid var(--bd);font-size:12px;cursor:pointer;background:var(--card)}
+.chip.on{background:var(--pri);color:#fff;border-color:var(--pri)}
+.tag{display:inline-block;padding:1px 8px;border-radius:6px;font-size:11px;font-weight:600;background:#e0e7ff;color:#3730a3;margin:0 4px 4px 0}
+.tag.g{background:#dcfce7;color:#166534}.tag.o{background:#fef3c7;color:#92400e}.tag.r{background:#fee2e2;color:#991b1b}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+.kpi b{display:block;font-size:24px}.kpi small{color:var(--mut)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+.pc{padding:0;overflow:hidden;cursor:pointer}.pc .img{height:150px;display:flex;align-items:center;justify-content:center;font-size:52px;position:relative}
+.pc .play{position:absolute;bottom:8px;left:8px;background:#000a;color:#fff;font-size:12px;padding:1px 8px;border-radius:99px}
+.pc .act{position:absolute;top:8px;right:8px;background:#fff;color:#111;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px}
+.pc .bd{padding:10px 12px}.pc h4{margin:0 0 2px;font-size:14px}.meta{color:var(--mut);font-size:12px}
+.scores{display:grid;grid-template-columns:repeat(4,1fr);text-align:center;margin:8px 0;border:1px solid var(--bd);border-radius:8px}
+.scores div{padding:4px 0;font-size:11px;color:var(--mut)}.scores b{display:block;font-size:17px;color:var(--tx)}
+.votes{display:flex;justify-content:space-between;margin-top:6px;font-size:16px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--bd);font-size:13px}th{color:var(--mut);font-weight:600;font-size:12px}
+.th{width:34px;height:34px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;margin-right:8px}
+.up{color:var(--ok);font-weight:700}.dn{color:var(--bad);font-weight:700}
+.bar{height:8px;background:var(--bd);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--pri)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}.three{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.drop{border:2px dashed var(--bd);border-radius:12px;padding:40px;text-align:center;color:var(--mut)}
+.chat{display:flex;flex-direction:column;gap:8px}.msg{padding:8px 12px;border-radius:10px;max-width:75%}.me{background:var(--pri);color:#fff;align-self:flex-end}.ai{background:var(--bg);border:1px solid var(--bd)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+svg text{fill:var(--mut);font-size:11px}
+@media(max-width:800px){aside{display:none}.two,.three{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<aside>
+  <h1>🕵️ ToolSpy</h1>
+  <div class="user"><b>Tên:</b> Minh (demo)<br>Team: <span class="on" onclick="team(this)">Mess</span><span onclick="team(this)">Ladi</span></div>
+  <div class="g">Khám phá sản phẩm</div>
+  <a data-s="search" class="on">Tìm sản phẩm</a><a data-s="visual">Tìm bằng ảnh</a><a data-s="radar-pr">Product Radar</a><a data-s="discovery">Product Discovery</a><a data-s="hidden">Hidden Winners</a>
+  <div class="g">Nguồn dữ liệu</div>
+  <a data-s="ads">Thư viện quảng cáo</a><a data-s="market">Nguồn hàng &amp; Store</a>
+  <div class="g">Thị trường</div>
+  <a data-s="pulse">Daily Pulse</a><a data-s="markets">Market Radar</a><a data-s="competitors">Competitor Radar</a>
+  <div class="g">Chi tiết</div>
+  <a data-s="detail">Chi tiết sản phẩm</a>
+  <div class="g">Hệ thống</div>
+  <a data-s="alerts">Alerts</a><a data-s="agent">AI Agent</a><a data-s="data">Data &amp; Connectors</a>
+</aside>
+<main>
+<div class="banner">BẢN DEMO TĨNH — toàn bộ số liệu là dữ liệu giả, chỉ để minh hoạ chức năng và bố cục. Không kết nối API.</div>
+
+<!-- SEARCH -->
+<section id="search" class="on">
+  <h2>Tìm sản phẩm</h2><p class="sub">Tìm theo từ khoá trong kho, hoặc quét trực tiếp mọi nguồn.</p>
+  <div class="card">
+    <div class="row"><input style="flex:2;min-width:220px" value="neck massager, posture corrector" placeholder="Từ khoá (nhiều từ = OR)"><input style="flex:1" placeholder="Loại trừ: kids, replica"><button>📷</button><button>Tìm trong kho</button><button class="p">⚡ Tìm trực tiếp trên nguồn</button></div>
+    <div class="row"><span class="meta">Thị trường:</span><span class="chip on">Philippines</span><span class="chip">Saudi Arabia</span><span class="chip">UAE</span><span class="chip">US</span><span class="chip">EU</span><span class="chip">AU</span>
+      <span class="meta" style="margin-left:12px">Funnel:</span><span class="chip">Tất cả</span><span class="chip on">💬 Mess</span><span class="chip">🧾 Ladi</span><span class="chip">Form</span></div>
+    <div class="row"><span class="meta">Sắp xếp:</span><select><option>Opportunity</option><option>Wave</option><option>Độ mới lạ</option><option>Creative</option><option>Tăng trưởng 7d</option></select>
+      <label><input type="checkbox"> Chỉ video</label><label><input type="checkbox"> ≥ 2 nền tảng</label><label>Chạy ≥ <input type="number" value="14" style="width:64px"> ngày</label><label>≤ <input type="number" value="5" style="width:56px"> người bán</label></div>
+    <div class="row"><span class="meta">Nguồn sẽ quét:</span><span class="chip on">● Meta</span><span class="chip on">● TikTok</span><span class="chip on">● AliExpress</span><span class="chip on">● 1688</span></div>
+  </div>
+  <p class="meta">6.065 sản phẩm · ads theo funnel: mess 1.204 · ladi 3.310 · app 88 · other 1.463</p>
+  <div class="grid" id="g-search"></div>
+</section>
+
+<!-- VISUAL -->
+<section id="visual">
+  <h2>Tìm bằng ảnh</h2><p class="sub">Có một tấm ảnh: ai đang bán / quảng cáo, giá bao nhiêu, nhập ở đâu?</p>
+  <div class="drop">📷 Kéo thả ảnh vào đây, dán ảnh (Ctrl+V) hoặc nhập URL ảnh</div>
+  <div class="row" style="margin-top:12px"><span class="chip on">Trong kho</span><span class="chip">Trên Internet</span><span class="chip">Nguồn hàng</span><span class="chip">So sánh giá</span><span class="chip">Theo dõi</span></div>
+  <div class="three">
+    <div class="card"><b>Ảnh trùng khớp</b><p class="meta">3 ảnh giống 98%</p><div class="grid" style="grid-template-columns:repeat(3,1fr)"><div class="th" style="width:100%;height:70px;background:#fde68a">💆</div><div class="th" style="width:100%;height:70px;background:#fbcfe8">💆</div><div class="th" style="width:100%;height:70px;background:#bfdbfe">💆</div></div></div>
+    <div class="card"><b>Nguồn hàng</b><table><tr><td>AliExpress</td><td>$6.40</td><td class="meta">2.1k bán</td></tr><tr><td>1688</td><td>¥21</td><td class="meta">MOQ 2</td></tr><tr><td>Taobao</td><td>¥34</td><td class="meta">860 bán</td></tr></table></div>
+    <div class="card"><b>So sánh giá</b><table><tr><td>shop-a.ph</td><td>₱1,299</td></tr><tr><td>shop-b.com</td><td>$29</td></tr><tr><td>shopee.ph</td><td>₱990</td></tr></table></div>
+  </div>
+</section>
+
+<!-- PRODUCT RADAR -->
+<section id="radar-pr">
+  <h2>Product Radar</h2><p class="sub">Sản phẩm đang chạy theo nước, tính từ ngày bắt đầu chạy của ad.</p>
+  <div class="row"><select><option>🇵🇭 Philippines</option></select><span class="chip">7 ngày</span><span class="chip on">14 ngày</span><span class="chip">30 ngày</span><select><option>Sắp: Điểm</option><option>Xu hướng</option></select></div>
+  <div class="card"><table><thead><tr><th>Sản phẩm</th><th>Xu hướng</th><th>Ads</th><th>Sellers</th><th>Tuổi</th><th>Điểm</th><th>Ad mạnh nhất</th><th>Biến thể</th></tr></thead><tbody id="t-radar"></tbody></table></div>
+</section>
+
+<!-- DISCOVERY -->
+<section id="discovery">
+  <h2>Product Discovery</h2><p class="sub">Opportunity Radar: demand × momentum, chấm lớn = Opp cao.</p>
+  <div class="card"><svg id="scatter" viewBox="0 0 640 280" width="100%"></svg>
+    <div class="row"><span><i class="dot" style="background:#ef4444"></i>Breakout</span><span><i class="dot" style="background:#8b5cf6"></i>Experimental</span><span><i class="dot" style="background:#10b981"></i>Stable winner</span><span><i class="dot" style="background:#9ca3af"></i>Low signal</span></div></div>
+  <div class="row" style="margin-top:14px"><span class="chip on">Breakout</span><span class="chip">Experimental</span><span class="chip">New Discoveries</span><span class="chip">Hidden</span><span class="chip">High Wave</span><span class="chip">Creative Goldmine</span><span class="chip">Hợp Mess</span><span class="chip">Hợp Ladi</span><span class="chip">MKT Favorites</span><span class="chip">Recently Scaling</span><span class="chip">High Risk</span></div>
+  <div class="grid" id="g-disc"></div>
+</section>
+
+<!-- HIDDEN -->
+<section id="hidden">
+  <h2>Hidden Winners</h2><p class="sub">Ít người bán nhưng ad chạy lâu và mạnh.</p>
+  <div class="row"><span class="tag">🔥 Đang tăng nhanh</span><span class="tag g">⏳ Chạy lâu ≥ 90 ngày</span><span class="tag o">📈 Đang nhân bản</span><span class="tag">💎 Chỉ 1 người bán</span><span class="tag">🌍 Thị trường mới</span></div>
+  <div class="grid" id="g-hid"></div>
+</section>
+
+<!-- ADS -->
+<section id="ads">
+  <h2>Thư viện quảng cáo</h2><p class="sub">Xem từng quảng cáo như Meta Ad Library.</p>
+  <div class="row"><span class="chip on">Quảng cáo</span><span class="chip">Nguồn hàng &amp; store</span><input placeholder="Từ khoá / advertiser / landing" style="flex:1"><button class="p">⚡ Quét nguồn</button><select><option>Mới chạy nhất</option><option>Chạy lâu nhất</option></select></div>
+  <div class="row"><span class="chip on">Meta 412</span><span class="chip">TikTok 188</span><span class="chip">Snapchat 12</span><span class="chip on">Video</span><span class="chip">Ảnh</span><span class="chip on">Đang chạy</span></div>
+  <div class="grid" id="g-ads"></div>
+</section>
+
+<!-- MARKETPLACE -->
+<section id="market">
+  <h2>Nguồn hàng &amp; Store</h2><p class="sub">Listing AliExpress / 1688 / Taobao: giá nhập, đã bán, đánh giá.</p>
+  <div class="row"><span class="chip on">AliExpress</span><span class="chip">1688</span><span class="chip">Taobao</span><button>Tìm mới trên 1688</button><select><option>Bán nhiều nhất</option></select></div>
+  <div class="grid" id="g-mkt"></div>
+</section>
+
+<!-- PULSE -->
+<section id="pulse">
+  <h2>Daily Pulse</h2><p class="sub">Hôm nay có gì mới?</p>
+  <div class="kpis">
+    <div class="card kpi"><small>Sản phẩm theo dõi</small><b>4.715</b></div><div class="card kpi"><small>Sản phẩm mới 24h</small><b>116</b></div><div class="card kpi"><small>Ads mới 24h</small><b>243</b></div>
+    <div class="card kpi"><small>Advertiser mới 24h</small><b>67</b></div><div class="card kpi"><small>Potential winners</small><b>1</b></div><div class="card kpi"><small>Hidden winners</small><b>1.148</b></div><div class="card kpi"><small>Bão hoà</small><b>2</b></div>
+  </div>
+  <div class="two"><div class="card"><b>Theo khuyến nghị</b><p><span class="tag r">TEST NOW 0</span><span class="tag g">TEST 179</span><span class="tag">WATCH 640</span><span class="tag o">REVIEW 93</span><span class="tag">SKIP 3.803</span></p>
+    <div class="bar"><i style="width:4%"></i></div></div>
+    <div class="card"><b>Ads mới 7 ngày</b><svg viewBox="0 0 300 90" width="100%"><polyline fill="none" stroke="#4f46e5" stroke-width="2" points="0,70 50,60 100,64 150,40 200,48 250,22 300,14"/></svg></div></div>
+</section>
+
+<!-- MARKETS -->
+<section id="markets">
+  <h2>Market Radar</h2><p class="sub">Nước nào đang nóng, dữ liệu có tươi không?</p>
+  <div class="card"><table><thead><tr><th>Nước</th><th>Ads đang chạy</th><th>Sellers</th><th>Sản phẩm</th><th>Ads mới</th><th>Xu hướng</th><th>Mess / Ladi</th><th>Độ tươi</th></tr></thead><tbody>
+  <tr><td>★ Philippines</td><td>3.210</td><td>612</td><td>1.480</td><td>402</td><td class="up">↑↑ +48%</td><td>38 / 52</td><td><i class="dot" style="background:var(--ok)"></i>&lt; 1h</td></tr>
+  <tr><td>★ Saudi Arabia</td><td>1.904</td><td>388</td><td>902</td><td>210</td><td class="up">↑ +12%</td><td>61 / 30</td><td><i class="dot" style="background:#3b82f6"></i>&lt; 6h</td></tr>
+  <tr><td>UAE</td><td>1.120</td><td>240</td><td>611</td><td>96</td><td>→</td><td>55 / 35</td><td><i class="dot" style="background:var(--warn)"></i>&lt; 24h</td></tr>
+  <tr><td>United States</td><td>5.402</td><td>1.320</td><td>2.140</td><td>744</td><td class="dn">↓ −14%</td><td>8 / 80</td><td><i class="dot" style="background:var(--bad)"></i>&gt; 24h</td></tr></tbody></table></div>
+</section>
+
+<!-- COMPETITORS -->
+<section id="competitors">
+  <h2>Competitor Radar</h2><p class="sub">Đối thủ nào đang scale?</p>
+  <div class="kpis"><div class="card kpi"><small>Advertiser theo dõi</small><b>2.545</b></div><div class="card kpi"><small>Đang scale nhanh</small><b>8</b></div><div class="card kpi"><small>Bạn đang follow</small><b>12</b></div></div>
+  <div class="card"><table><thead><tr><th></th><th>Advertiser</th><th>Nước</th><th>Active</th><th>Mới 7d</th><th>Tuần trước</th><th>Tăng</th><th>Sản phẩm</th></tr></thead><tbody>
+  <tr><td>⭐</td><td>Luna Store</td><td>PH</td><td>44</td><td>18</td><td>5</td><td class="up">+260%</td><td>3</td></tr>
+  <tr><td>☆</td><td>Gulf Deals</td><td>SA</td><td>71</td><td>22</td><td>11</td><td class="up">+100%</td><td>9</td></tr>
+  <tr><td>☆</td><td>HomePlus</td><td>US</td><td>130</td><td>9</td><td>12</td><td class="dn">−25%</td><td>22</td></tr></tbody></table></div>
+</section>
+
+<!-- ALERTS -->
+<section id="alerts">
+  <h2>Alerts</h2><p class="sub">Cảnh báo tự động.</p>
+  <div class="card"><table><tbody>
+  <tr><td><i class="dot" style="background:var(--bad)"></i>critical</td><td>competitor_scaling</td><td>Luna Store tăng 260% ads trong 7 ngày (PH)</td><td class="meta">2 giờ trước</td></tr>
+  <tr><td><i class="dot" style="background:var(--warn)"></i>warn</td><td>creative_velocity_spike</td><td>Neck Massager: +14 creative mới</td><td class="meta">5 giờ trước</td></tr>
+  <tr><td><i class="dot" style="background:#3b82f6"></i>info</td><td>new_entrant</td><td>Advertiser mới vào sản phẩm Posture Corrector</td><td class="meta">hôm qua</td></tr></tbody></table></div>
+</section>
+
+<!-- AGENT -->
+<section id="agent">
+  <h2>AI Agent</h2><p class="sub">Hỏi đáp bằng ngôn ngữ tự nhiên.</p>
+  <div class="card chat">
+    <div class="msg me">Tìm 20 sản phẩm beauty tại Saudi đang tăng nhanh nhưng dưới 10 advertiser</div>
+    <div class="msg ai">Tìm thấy 14 sản phẩm khớp. Top 3: Ice Roller (Opp 72, 4 sellers), LED Face Mask (Opp 69, 6 sellers), Gua Sha Set (Opp 66, 3 sellers). <a href="#" onclick="go('search');return false">Mở trong Tìm sản phẩm →</a></div>
+    <div class="row" style="margin:0"><input style="flex:1" placeholder="Đặt câu hỏi…"><button class="p">Gửi</button></div>
+    <div><span class="chip">Đối thủ nào đang scale nhanh?</span> <span class="chip">Giải thích vì sao PRD_0000001 có điểm này</span></div>
+  </div>
+</section>
+
+<!-- DATA -->
+<section id="data">
+  <h2>Data &amp; Connectors</h2><p class="sub">Dành cho người vận hành.</p>
+  <div class="row"><span class="chip on">Nguồn &amp; connector</span><span class="chip">Dung lượng</span><span class="chip">Theo dõi &amp; Upload</span><span class="chip">Ingest API</span></div>
+  <div class="card"><table><thead><tr><th>Connector</th><th>Trạng thái</th><th>Lần sync cuối</th><th>Health</th><th></th></tr></thead><tbody>
+  <tr><td>Meta Ad Library</td><td><span class="tag g">Bật</span></td><td>12 phút trước</td><td><i class="dot" style="background:var(--ok)"></i>OK</td><td><button>Đồng bộ ngay</button></td></tr>
+  <tr><td>TikTok CCL</td><td><span class="tag g">Bật</span></td><td>40 phút trước</td><td><i class="dot" style="background:var(--warn)"></i>Chậm</td><td><button>Đồng bộ ngay</button></td></tr>
+  <tr><td>AliExpress</td><td><span class="tag g">Bật</span></td><td>3 giờ trước</td><td><i class="dot" style="background:var(--ok)"></i>OK</td><td><button>Test</button></td></tr>
+  <tr><td>1688</td><td><span class="tag">Tắt</span></td><td>—</td><td>—</td><td><button>Cấu hình</button></td></tr></tbody></table></div>
+</section>
+
+<!-- DETAIL -->
+<section id="detail">
+  <h2>EMS Neck Lifting Massager <span class="tag g">◆ TEST</span><span class="tag">Stable winner</span></h2>
+  <p class="sub">PRD_0000001 · health · PH, SA · giá trung bình trong ad $29 &nbsp; <button>📷 Tìm bằng ảnh</button> <button>€ So sánh giá</button> <button>🚚 Tìm nguồn hàng</button></p>
+  <div class="kpis">
+    <div class="card kpi"><small>Opportunity</small><b>70</b></div><div class="card kpi"><small>Saturation</small><b>Growing</b></div><div class="card kpi"><small>Confidence</small><b>82% High</b></div><div class="card kpi"><small>Wave</small><b>44</b></div>
+  </div>
+  <div class="card"><b>Thông tin cho MKT — giá, tương tác, bằng chứng bán</b>
+    <div class="kpis" style="margin-top:10px">
+      <div><small class="meta">Giá đối thủ bán</small><br><b>$29</b> <span class="meta">38/44 ads có giá</span></div>
+      <div><small class="meta">Giá nhập (AliExpress)</small><br><b>$6.40</b> <span class="meta">landed ≈ ×1.6</span></div>
+      <div><small class="meta">Biên gộp ước tính</small><br><b class="up">65%</b></div>
+      <div><small class="meta">Đã bán (sàn)</small><br><b>2.1k</b> <span class="meta">12 listing</span></div>
+      <div><small class="meta">Ads đang chạy</small><br><b>44</b> <span class="meta">2 advertiser · 337 ngày</span></div>
+    </div><button class="p">Quét giá &amp; review đối thủ</button></div>
+  <div class="row" style="margin-top:14px"><span class="chip on">Video &amp; Discovery</span><span class="chip">Overview</span><span class="chip">Market &amp; Ads</span><span class="chip">Creative Library</span><span class="chip">Comments</span></div>
+  <div class="two">
+    <div class="card"><b>Product Potential Vector</b>
+      <p class="meta">Demand</p><div class="bar"><i style="width:87%"></i></div><p class="meta">Momentum</p><div class="bar"><i style="width:30%"></i></div>
+      <p class="meta">Novelty</p><div class="bar"><i style="width:69%"></i></div><p class="meta">Creative</p><div class="bar"><i style="width:71%"></i></div></div>
+    <div class="card"><b>MKT vote</b><p class="votes"><span>🔥</span><span>👍</span><span>👀</span><span>😐</span><span>👎</span></p>
+      <p><span class="chip">Visual mạnh</span> <span class="chip">Hook dễ</span> <span class="chip">Demo được</span> <span class="chip">Hợp Saudi/GCC</span> <span class="chip">Giá tốt</span> <span class="chip">Khó ship</span></p><input style="width:100%" placeholder="Ghi chú…"></div>
+  </div>
+</section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+function go(id){$$('section').forEach(s=>s.classList.toggle('on',s.id===id));$$('aside a').forEach(a=>a.classList.toggle('on',a.dataset.s===id));scrollTo(0,0)}
+$$('aside a').forEach(a=>a.onclick=()=>go(a.dataset.s));
+function team(e){$$('.user span').forEach(x=>x.classList.remove('on'));e.classList.add('on')}
+$$('.chip').forEach(c=>c.onclick=()=>{ // chip: toggle trong cùng hàng (single-select nếu cả hàng là chip cùng nhóm)
+  const sib=[...c.parentElement.children].filter(x=>x.classList.contains('chip'));
+  if(sib.length<=3||c.parentElement.dataset.single)sib.forEach(x=>x.classList.remove('on'));c.classList.toggle('on')});
+const P=[
+ ['EMS Neck Lifting Massager','💆','health','TEST','Stable winner','Ladi 100%',70,44,69,71,2,44,'#fde68a','£29'],
+ ['LED Light Therapy Face Mask','🎭','beauty','TEST NOW','Breakout','Mess 70%',78,61,72,66,4,31,'#fbcfe8','$34'],
+ ['Posture Corrector Pro','🧍','health','WATCH','Experimental','Mess 40%',58,52,55,60,7,19,'#bfdbfe','₱1,190'],
+ ['Portable Mini Blender','🥤','kitchen','TEST','Breakout','Mess 55%',66,58,48,64,9,27,'#bbf7d0','$18'],
+ ['Ice Roller Face Massager','🧊','beauty','TEST','Experimental','Mess 62%',69,49,70,58,3,22,'#c7d2fe','SAR 79'],
+ ['Pet Hair Remover Roller','🐶','pet','REVIEW','Low signal','Ladi 80%',41,22,35,40,12,8,'#fed7aa','$12'],
+ ['Galaxy Star Projector','🌌','home','WATCH','Stable winner','Ladi 45%',55,30,44,52,15,35,'#ddd6fe','$25'],
+ ['Heated Eye Massager','👁️','health','TEST','Experimental','Mess 50%',64,47,61,63,5,16,'#fecaca','$31']];
+const vid=i=>i%3!=2?'<span class="play">▶ 12s</span>':'';
+const card=p=>`<div class="card pc" onclick="go('detail')"><div class="img" style="background:${p[12]}">${p[1]}${vid(P.indexOf(p))}<span class="act">${p[3]}</span></div><div class="bd"><h4>${p[0]}</h4><div class="meta">${p[2]} · ALL, PH, SA</div>
+<p style="margin:6px 0"><span class="tag">${p[4]}</span><span class="tag o">${p[5]}</span></p>
+<div class="scores"><div><b>${p[6]}</b>Opp</div><div><b>${p[7]}</b>Wave</div><div><b>${p[8]}</b>Novelty</div><div><b>${p[9]}</b>Creative</div></div>
+<div class="meta">✓ ${p[13]} — Shop đối thủ ↗ &nbsp; ● Meta ● TikTok</div><div class="meta">${p[10]} advertiser · ${p[11]} ads active · +${p[11]%9} ads 7d</div>
+<div class="votes"><span>🔥</span><span>👍</span><span>👀</span><span>😐</span><span>👎</span></div></div></div>`;
+$('#g-search').innerHTML=P.map(card).join('');
+$('#g-disc').innerHTML=P.slice(0,4).map(card).join('');
+$('#g-hid').innerHTML=P.slice(2,8).map(p=>card(p)+'').join('');
+$('#t-radar').innerHTML=P.map((p,i)=>`<tr><td><span class="th" style="background:${p[12]}">${p[1]}</span>${p[0]}</td><td class="${i%4==3?'dn':'up'}">${['↑↑↑','↑↑','↑','↓'][i%4]} ${[120,58,22,-18][i%4]}%</td><td>${p[11]}</td><td>${p[10]}</td><td>${20+i*37}d</td><td><b>${p[6]}</b></td><td><span class="tag o">Mạnh ${50+i*4}</span></td><td>×${1+i%4}</td></tr>`).join('');
+$('#g-ads').innerHTML=P.map((p,i)=>`<div class="card pc"><div class="img" style="background:${p[12]}">${p[1]}${vid(i)}</div><div class="bd"><p class="meta"><span class="tag ${i%4==3?'r':'g'}">● ${i%4==3?'Đã dừng':'Đang chạy'}</span><span class="tag">${i%2?'TikTok':'Meta'}</span><span class="tag o">🏆 ${i%2?'Mạnh 51':'Huyền thoại 82'}</span></p>
+<h4>Luna Store · Library ID 1${i}8842${i}</h4><div class="meta">Chạy ${10+i*21} ngày · ✓ xác minh ${i+1} giờ trước ${i%3==0?'· ↺ chạy lại':''}</div><p style="font-size:13px">“${p[0]} — giảm đau cổ vai gáy chỉ sau 10 phút. Nhắn tin để nhận ưu đãi.”</p><div class="meta">🔗 weareluna.store ↗ · 💬 Mess</div></div></div>`).join('');
+$('#g-mkt').innerHTML=P.map((p,i)=>`<div class="card pc"><div class="img" style="background:${p[12]}">${p[1]}</div><div class="bd"><h4>${p[0]} 2024 New</h4><div class="meta">AliExpress · Seller Store${i+1}</div><p style="margin:6px 0"><b>$${(4+i*1.3).toFixed(2)}</b> <s class="meta">$${(9+i*2).toFixed(2)}</s></p><div class="meta">★ ${(4.2+i*.08).toFixed(1)} (${300+i*210}) · 🛒 ${1+i}.${i}k đã bán</div></div></div>`).join('');
+// scatter
+let s='<line x1="40" y1="250" x2="620" y2="250" stroke="#9ca3af"/><line x1="40" y1="10" x2="40" y2="250" stroke="#9ca3af"/><line x1="40" y1="162" x2="620" y2="162" stroke="#d1d5db" stroke-dasharray="4"/><text x="300" y="274">Demand →</text><text x="2" y="16">Momentum</text>';
+let r=7;const rnd=()=>(r=(r*9301+49297)%233280)/233280;
+const col=['#9ca3af','#10b981','#8b5cf6','#ef4444'];
+for(let i=0;i<70;i++){const d=rnd(),m=rnd()*rnd();const q=d>.5?(m>.4?3:1):(m>.4?2:0);s+=`<circle cx="${50+d*560}" cy="${245-m*225}" r="${3+rnd()*7}" fill="${col[q]}" opacity=".7"/>`}
+$('#scatter').innerHTML=s;
+</script>
+</body>
+</html>

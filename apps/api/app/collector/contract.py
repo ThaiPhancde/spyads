@@ -42,6 +42,10 @@ class AdRecord:
     media: list[MediaItem] = field(default_factory=list)
     landing_page: str | None = None
     product_name: str | None = None
+    brand: str | None = None
+    sku: str | None = None
+    gtin: str | None = None
+    model: str | None = None
     product_url: str | None = None
     price: float | None = None
     currency: str | None = None

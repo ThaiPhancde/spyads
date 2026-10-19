@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..markets import priority_boost
 from ..models import Ad, Creative, Product, Vote
+from .creative_text import CURIOSITY, DEMO, EMOTION, TRANSFORM, UGC, ad_text_evidence, summarize
 from .scoring import lin
 
 VOTE_VALUE = {"LOVE": 100, "TEST": 80, "WATCH": 55, "NORMAL": 35, "SKIP": 0}
@@ -54,22 +55,23 @@ def compliance_risk(texts: list[str]) -> tuple[float, list[str]]:
 
 
 # ------------------------------------------------------------ creative signals
-CURIOSITY = re.compile(r"\?|bí mật|secret|bạn có biết|did you know|you won't believe|wait for it|cái gì|what is this|"
-                       r"tiktok made me|viral|nobody|không ai|hack|trick|mẹo|لن تصدق|سر", re.I)
-DEMO = re.compile(r"watch|xem|demo|how (it|to)|cách (dùng|làm)|in \d+ (sec|giây)|chỉ cần|just|step|test|thử", re.I)
-TRANSFORM = re.compile(r"before|after|trước|sau \d+|results?|kết quả|transformation|thay đổi|قبل|بعد", re.I)
-UGC = re.compile(r"\b(i |my |me |tôi |mình |em |chị |anh )|review|unbox|trải nghiệm|testimonial|tried|dùng thử", re.I)
-EMOTION = re.compile(r"mẹ|mom|mother|gift|quà|love|yêu|family|gia đình|baby|bé|con|eid|ramadan|valentine|هدية|أم", re.I)
+NEUTRAL_PART = 30.0  # what a text-derived part is worth when no ad copy could be read (not 0: unknown is not negative)
 
 
 def creative_signals(ads: list[Ad], creatives: list[Creative]) -> dict:
-    texts = [" ".join(filter(None, [a.title, a.ad_text])) for a in ads]
-    n = max(1, len(texts))
+    extra: dict[int, list[str]] = defaultdict(lambda: ["", ""])  # ad id → [ocr, transcript] the creatives already carry
+    for c in creatives:
+        if c.ad_id:
+            extra[c.ad_id][0] += f" {c.ocr_text or ''}"
+            extra[c.ad_id][1] += f" {c.transcript or ''}"
+    evs = [ad_text_evidence(a, *extra[a.id]) for a in ads]
+    texts = [e["text"] for e in evs if e["reliability"] > 0]  # ads with no readable copy are *unknown*, not "no curiosity / no demo"
+    n = max(1, len(ads))
     # Bayesian shrink: with 1-2 ads a single regex hit must not look like 100 % of the creatives
     share = lambda rx: (sum(1 for t in texts if rx.search(t)) + 0.1) / (len(texts) + 2)
     families = {c.family_id or c.id for c in creatives if c.status == "stored"} or {a.creative_fingerprint for a in ads}
-    hooks = Counter(a.hook for a in ads if a.hook)
-    angles = Counter(a.angle for a in ads if a.angle)
+    hooks = Counter(a.hook for a in ads if a.hook and a.hook != "statement")  # classifier defaults are not evidence
+    angles = Counter(a.angle for a in ads if a.angle and a.angle != "general")
     video_share = sum(1 for a in ads if (a.media_type or "") == "video") / n
     likes = sum(a.likes or 0 for a in ads)
     comments = sum(a.comments_count or 0 for a in ads)
@@ -78,7 +80,7 @@ def creative_signals(ads: list[Ad], creatives: list[Creative]) -> dict:
     return {
         "curiosity": share(CURIOSITY), "demo": share(DEMO), "transformation": share(TRANSFORM), "ugc": share(UGC),
         "emotion": share(EMOTION), "families": len(families), "hook_types": len(hooks), "angle_types": len(angles),
-        "video_share": video_share, "variants": variants, "variants_per_ad": variants / n,
+        "text": summarize(evs), "video_share": video_share, "variants": variants, "variants_per_ad": variants / n,
         "commentability": (comments / likes) if likes >= 50 else None, "shareability": (shares / likes) if likes >= 50 else None,
     }
 
@@ -205,7 +207,7 @@ def _sellers(n: int) -> float:
 def market_demand(f: dict) -> float:
     """Proof the product sells: strongest live ad keeps running · the advertiser scales it · several sellers · reach."""
     return (0.35 * _log_lin(f.get("longevity_days"), 7, 120)
-            + 0.30 * max(_log_lin(f.get("active_ads"), 1, 10), lin(f.get("variants") or 1, 1, 5), lin(f.get("strong_ads") or 0, 1, 5))
+            + 0.30 * max(_log_lin(f.get("unique_ads", f.get("active_ads")), 1, 10), lin(f.get("variants") or 1, 1, 5), lin(f.get("strong_ads") or 0, 1, 5))
             + 0.20 * _sellers(f.get("advertiser_count") or 0) + 0.15 * lin(f.get("market_count") or 0, 1, 4))
 
 
@@ -217,10 +219,11 @@ def momentum(f: dict) -> float:
 def evidence(p: Product, f: dict, ads: list[Ad]) -> dict:
     """Raw facts discovery_decision gates on (kept on product.potential so the UI can show them)."""
     mix = Counter(a.funnel for a in ads if a.funnel and a.channel in (None, "ads"))
-    return {"active_ads": f.get("active_ads", 0), "longevity_days": f.get("longevity_days", 0),
+    return {"active_ads": f.get("active_ads", 0), "unique_ads": f.get("unique_ads", f.get("active_ads", 0)), "longevity_days": f.get("longevity_days", 0),
             "advertisers": f.get("advertiser_count", 0), "advertisers_at_primary_market": f.get("advertisers_at_primary_market", 0),
             "variants": f.get("variants", 1), "non_commerce_share": round((mix.get("app", 0) + mix.get("form", 0)) / max(1, sum(mix.values())), 2),
-            "non_product": p.category == "non_product", "unnamed": bool(NO_PRODUCT_NAME.search(p.canonical_name or ""))}
+            "non_product": p.category == "non_product",
+            "unnamed": p.name_status == "UNKNOWN" or (p.name_status is None and bool(NO_PRODUCT_NAME.search(p.canonical_name or "")))}
 
 
 # placeholder names, CTA strings and ad headlines that ended up as a cluster name ("Chat trong Messenger", "Natural Relief In
@@ -243,15 +246,17 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     # keyword_competition dropped (weight 0): no source fills it yet — remaining weights renormalised to 100
     novelty = (0.30 * (100 - lin(f.get("advertiser_count", 0), 2, 15)) + 0.20 * (100 - lin(f.get("store_count", 0), 1, 4))
                + 0.20 * lin(60 - age_days, 0, 60) + 0.15 * (100 - lin(f.get("market_count", 0), 1, 6))) / 0.85
+    cov = cs["text"]["coverage"]  # share of the ad copy the regexes could actually read (creative_text.py)
+    blend = lambda x: cov * x + (1 - cov) * NEUTRAL_PART  # no readable copy → neutral and low confidence, never a guessed 0
     wave_parts = {
-        "scroll_stop_curiosity": lin(cs["curiosity"], 0, 0.5),
-        "demo_strength": lin(cs["demo"], 0, 0.5),
-        "transformation": lin(cs["transformation"], 0, 0.4),
+        "scroll_stop_curiosity": blend(lin(cs["curiosity"], 0, 0.5)),
+        "demo_strength": blend(lin(cs["demo"], 0, 0.5)),
+        "transformation": blend(lin(cs["transformation"], 0, 0.4)),
         # ponytail: no source fills comments / purchase_intent yet — commentability dropped (weight 0)
         "shareability": lin(cs["shareability"], 0, 0.05) if cs["shareability"] is not None else 40.0,
         "velocity": lin(f.get("creative_growth_7d", 0), 0, 1.0),
         "scaling_variants": max(lin(cs["variants_per_ad"], 1, 4), lin(f.get("variation_max_group", 1), 1, 5)),
-        "emotional_trigger": lin(cs["emotion"], 0, 0.4),
+        "emotional_trigger": blend(lin(cs["emotion"], 0, 0.4)),
     }
     wave = sum(wave_parts.values()) / len(wave_parts)
     creative_parts = {
@@ -259,8 +264,8 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
         "angle_diversity": lin(cs["angle_types"], 1, 5),
         "hook_diversity": lin(cs["hook_types"], 1, 5),
         "video": lin(cs["video_share"], 0, 0.8),
-        "demo_or_before_after": lin(max(cs["demo"], cs["transformation"]), 0, 0.4),
-        "ugc_reproducible": lin(cs["ugc"], 0, 0.4),
+        "demo_or_before_after": blend(lin(max(cs["demo"], cs["transformation"]), 0, 0.4)),
+        "ugc_reproducible": blend(lin(cs["ugc"], 0, 0.4)),
     }
     creative = sum(creative_parts.values()) / len(creative_parts)
 
@@ -297,7 +302,7 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     vec = {
         "market_demand": demand, "momentum": mom, "novelty": novelty, "wave_potential": wave, "creative_potential": creative,
         "market_fit": market_fit, "mkt_appeal": mkt_appeal, "competition": competition, "saturation": p.saturation_score,
-        "economics": economics, "compliance_risk": risk, "confidence": conf, "opportunity": opportunity, "opportunity_raw": opportunity_raw, "priority_boost": boost,
+        "economics": economics, "compliance_risk": risk, "confidence": conf, "wave_confidence": round(100 * cov), "opportunity": opportunity, "opportunity_raw": opportunity_raw, "priority_boost": boost,
     }
     vec = {k: (round(v, 1) if isinstance(v, (int, float)) else v) for k, v in vec.items()}
     decision = discovery_decision(vec, quadrant, ev)
@@ -311,7 +316,8 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
         "creative_parts": {k: round(v, 1) for k, v in creative_parts.items()},
         "per_market": {m: {"market_fit": s, "decision": discovery_decision(vec | {"market_fit": s}, quadrant, ev)[0]}
                        for m, s in per_market.items()},
-        "signals": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in cs.items()},
+        "signals": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in cs.items() if k != "text"},
+        "creative_evidence": cs["text"],
         "evidence": ev,
     }
 

@@ -1,0 +1,2091 @@
+[
+ {
+  "intent": "feng shui bracelet",
+  "query": "vòng tay phong thủy",
+  "pool": 211,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 213,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 3501,
+     "name": "Retro 999 Silver Feng Shui Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 609,
+     "name": "Cross Bracelet",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 4303,
+     "name": "The Golden Mantra Pixiu Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4803,
+     "name": "Sino Kayaa? Fyp Bracelet Gift Giftideas",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 11016,
+     "name": "Fortified FengShui BRACELET AND RING",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 3595,
+     "name": "Harmonious Life Lucky Turtle Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 3969,
+     "name": "Fengshui Pixiu Obsidian bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 3454,
+     "name": "Chinese Money Frog believed to attract wealth",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 12312,
+     "name": "Anti-evil eye bracelets",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 11973,
+     "name": "Buy1 Get1 Pi-xiu Lucky Bracelet",
+     "tier": "synonym",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "feng shui bracelet",
+  "query": "feng shui bracelet",
+  "pool": 211,
+  "before": {
+   "total": 211,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 3501,
+     "name": "Retro 999 Silver Feng Shui Bracelet",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 609,
+     "name": "Cross Bracelet",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4303,
+     "name": "The Golden Mantra Pixiu Bracelet",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4803,
+     "name": "Sino Kayaa? Fyp Bracelet Gift Giftideas",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 11016,
+     "name": "Fortified FengShui BRACELET AND RING",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3595,
+     "name": "Harmonious Life Lucky Turtle Bracelet",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3969,
+     "name": "Fengshui Pixiu Obsidian bracelet",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3454,
+     "name": "Chinese Money Frog believed to attract wealth",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 12312,
+     "name": "Anti-evil eye bracelets",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 11973,
+     "name": "Buy1 Get1 Pi-xiu Lucky Bracelet",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  },
+  "after": {
+   "total": 213,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 3501,
+     "name": "Retro 999 Silver Feng Shui Bracelet",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 609,
+     "name": "Cross Bracelet",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4303,
+     "name": "The Golden Mantra Pixiu Bracelet",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4803,
+     "name": "Sino Kayaa? Fyp Bracelet Gift Giftideas",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 11016,
+     "name": "Fortified FengShui BRACELET AND RING",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3595,
+     "name": "Harmonious Life Lucky Turtle Bracelet",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3969,
+     "name": "Fengshui Pixiu Obsidian bracelet",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3454,
+     "name": "Chinese Money Frog believed to attract wealth",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 12312,
+     "name": "Anti-evil eye bracelets",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 11973,
+     "name": "Buy1 Get1 Pi-xiu Lucky Bracelet",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "feng shui bracelet",
+  "query": "pulseras swerte",
+  "pool": 211,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 361,
+   "recall": 0.839,
+   "top10": [
+    {
+     "id": 3501,
+     "name": "Retro 999 Silver Feng Shui Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 609,
+     "name": "Cross Bracelet",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 4303,
+     "name": "The Golden Mantra Pixiu Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 11333,
+     "name": "Red Clover Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 5994,
+     "name": "Lucky Pixiu Bracelet Buy1Take1 - P399",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4803,
+     "name": "Sino Kayaa? Fyp Bracelet Gift Giftideas",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 11016,
+     "name": "Fortified FengShui BRACELET AND RING",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 3595,
+     "name": "Harmonious Life Lucky Turtle Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 225,
+     "name": "Womens Luxury Rhinestone Chain Watch",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 11332,
+     "name": "NEW Red Clover Necklaces",
+     "tier": "synonym",
+     "ok": false
+    }
+   ]
+  }
+ },
+ {
+  "intent": "feng shui bracelet",
+  "query": "سوار حظ",
+  "pool": 211,
+  "before": {
+   "total": 2,
+   "recall": 0.0,
+   "top10": [
+    {
+     "id": 225,
+     "name": "Womens Luxury Rhinestone Chain Watch",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8825,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    }
+   ]
+  },
+  "after": {
+   "total": 361,
+   "recall": 0.839,
+   "top10": [
+    {
+     "id": 225,
+     "name": "Womens Luxury Rhinestone Chain Watch",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8825,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 3501,
+     "name": "Retro 999 Silver Feng Shui Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 609,
+     "name": "Cross Bracelet",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 4303,
+     "name": "The Golden Mantra Pixiu Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 11333,
+     "name": "Red Clover Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 5994,
+     "name": "Lucky Pixiu Bracelet Buy1Take1 - P399",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4803,
+     "name": "Sino Kayaa? Fyp Bracelet Gift Giftideas",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 11016,
+     "name": "Fortified FengShui BRACELET AND RING",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 3595,
+     "name": "Harmonious Life Lucky Turtle Bracelet",
+     "tier": "synonym",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "feng shui bracelet",
+  "query": "风水手链",
+  "pool": 211,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 213,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 3501,
+     "name": "Retro 999 Silver Feng Shui Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 609,
+     "name": "Cross Bracelet",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 4303,
+     "name": "The Golden Mantra Pixiu Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4803,
+     "name": "Sino Kayaa? Fyp Bracelet Gift Giftideas",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 11016,
+     "name": "Fortified FengShui BRACELET AND RING",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 3595,
+     "name": "Harmonious Life Lucky Turtle Bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 3969,
+     "name": "Fengshui Pixiu Obsidian bracelet",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 3454,
+     "name": "Chinese Money Frog believed to attract wealth",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 12312,
+     "name": "Anti-evil eye bracelets",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 11973,
+     "name": "Buy1 Get1 Pi-xiu Lucky Bracelet",
+     "tier": "synonym",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "posture corrector",
+  "query": "đai chống gù",
+  "pool": 142,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 128,
+   "recall": 0.894,
+   "top10": [
+    {
+     "id": 4787,
+     "name": "Posture Corrector Bra Back Support Front Closure Underwear For",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4823,
+     "name": "Posturecue Neck Shoulder Back Posture Trainer",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4809,
+     "name": "Best Posture Support",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4850,
+     "name": "Wirelebra Faf",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 10985,
+     "name": "Brace yourself",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 3846,
+     "name": "Knee Brace Weight Lifting",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 14,
+     "name": "Therapro Neck Massager At Home Relief For Neck",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 3840,
+     "name": "The Indestruct Bed Redefines Back Support",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 4854,
+     "name": "Staidrept™ Corector Inteligent De Postura",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4783,
+     "name": "Adjustable Unisex Posture Corrector Brace",
+     "tier": "synonym",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "posture corrector",
+  "query": "posture corrector",
+  "pool": 142,
+  "before": {
+   "total": 95,
+   "recall": 0.669,
+   "top10": [
+    {
+     "id": 4787,
+     "name": "Posture Corrector Bra Back Support Front Closure Underwear For",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4823,
+     "name": "Posturecue Neck Shoulder Back Posture Trainer",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4809,
+     "name": "Best Posture Support",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4850,
+     "name": "Wirelebra Faf",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 14,
+     "name": "Therapro Neck Massager At Home Relief For Neck",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4854,
+     "name": "Staidrept™ Corector Inteligent De Postura",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4783,
+     "name": "Adjustable Unisex Posture Corrector Brace",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4835,
+     "name": "Fitness Heavy Shoulder Straps Bench Presses",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3786,
+     "name": "Truealign X Back Brace",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 830,
+     "name": "Vitality Devices",
+     "tier": "exact",
+     "ok": false
+    }
+   ]
+  },
+  "after": {
+   "total": 128,
+   "recall": 0.894,
+   "top10": [
+    {
+     "id": 4787,
+     "name": "Posture Corrector Bra Back Support Front Closure Underwear For",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4823,
+     "name": "Posturecue Neck Shoulder Back Posture Trainer",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4809,
+     "name": "Best Posture Support",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4850,
+     "name": "Wirelebra Faf",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 14,
+     "name": "Therapro Neck Massager At Home Relief For Neck",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4854,
+     "name": "Staidrept™ Corector Inteligent De Postura",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4783,
+     "name": "Adjustable Unisex Posture Corrector Brace",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4835,
+     "name": "Fitness Heavy Shoulder Straps Bench Presses",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3786,
+     "name": "Truealign X Back Brace",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 830,
+     "name": "Vitality Devices",
+     "tier": "exact",
+     "ok": false
+    }
+   ]
+  }
+ },
+ {
+  "intent": "posture corrector",
+  "query": "مصحح القوام",
+  "pool": 142,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 128,
+   "recall": 0.894,
+   "top10": [
+    {
+     "id": 4787,
+     "name": "Posture Corrector Bra Back Support Front Closure Underwear For",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4823,
+     "name": "Posturecue Neck Shoulder Back Posture Trainer",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4809,
+     "name": "Best Posture Support",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4850,
+     "name": "Wirelebra Faf",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 10985,
+     "name": "Brace yourself",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 3846,
+     "name": "Knee Brace Weight Lifting",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 14,
+     "name": "Therapro Neck Massager At Home Relief For Neck",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 3840,
+     "name": "The Indestruct Bed Redefines Back Support",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 4854,
+     "name": "Staidrept™ Corector Inteligent De Postura",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4783,
+     "name": "Adjustable Unisex Posture Corrector Brace",
+     "tier": "synonym",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "sunscreen",
+  "query": "kem chống nắng",
+  "pool": 24,
+  "before": {
+   "total": 18,
+   "recall": 0.0,
+   "top10": [
+    {
+     "id": 4008,
+     "name": "Foundation Vs. Kem Chống Nắng",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 12288,
+     "name": "Kem Nền",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8467,
+     "name": "Stick Foundation 3In1",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 3998,
+     "name": "Kem Chống Nắng Tone-Up Tím Torriden",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 120,
+     "name": "Bảo Vệ Da Tối Ưu Cùng Kem",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4018,
+     "name": "Kem Nền 4 In 1 Hải Lynh",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 141,
+     "name": "Glow Hồng Tự Nhiên",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8468,
+     "name": "1 Kem Cừu Đêm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 11042,
+     "name": "Kem Lót",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4027,
+     "name": "Giảm 30 Chỉ Còn _Mua Kem Nền",
+     "tier": "exact",
+     "ok": false
+    }
+   ]
+  },
+  "after": {
+   "total": 44,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 4008,
+     "name": "Foundation Vs. Kem Chống Nắng",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 12288,
+     "name": "Kem Nền",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 3998,
+     "name": "Kem Chống Nắng Tone-Up Tím Torriden",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 120,
+     "name": "Bảo Vệ Da Tối Ưu Cùng Kem",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 141,
+     "name": "Glow Hồng Tự Nhiên",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 11042,
+     "name": "Kem Lót",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8470,
+     "name": "Chọn Đúng Loại Kem Chống Nắng",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 11035,
+     "name": "Bên Da Dùng Foundation",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 132,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4016,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "sunscreen",
+  "query": "sunscreen",
+  "pool": 24,
+  "before": {
+   "total": 23,
+   "recall": 0.958,
+   "top10": [
+    {
+     "id": 102,
+     "name": "Skincare Set C",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4661,
+     "name": "Glow Goodies Collagen Gummies",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 7789,
+     "name": "Tone Up Sunscreen Tiktokmademebuylt Spotlightfinds Sunscreen Skincare Beauty",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8520,
+     "name": "10x Ice Cream Lotion",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 1796,
+     "name": "Feels Like A Moisturizer",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 1792,
+     "name": "Dark Spot Bundle Global",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8459,
+     "name": "1 x Kojic Acid Face Cream",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 7644,
+     "name": "Kitty'S Fave Sunscreen Hikari Fyp",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 10277,
+     "name": "SKINEVER Body Brightening Sunscreen Lotion",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 11033,
+     "name": "Sunscreen Foundation",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  },
+  "after": {
+   "total": 44,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 102,
+     "name": "Skincare Set C",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4661,
+     "name": "Glow Goodies Collagen Gummies",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 7789,
+     "name": "Tone Up Sunscreen Tiktokmademebuylt Spotlightfinds Sunscreen Skincare Beauty",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8520,
+     "name": "10x Ice Cream Lotion",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 1796,
+     "name": "Feels Like A Moisturizer",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 1792,
+     "name": "Dark Spot Bundle Global",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8459,
+     "name": "1 x Kojic Acid Face Cream",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 7644,
+     "name": "Kitty'S Fave Sunscreen Hikari Fyp",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 10277,
+     "name": "SKINEVER Body Brightening Sunscreen Lotion",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 11033,
+     "name": "Sunscreen Foundation",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "sunscreen",
+  "query": "واقي شمس",
+  "pool": 24,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 44,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 8508,
+     "name": "U Cloud Touch Blurring Skin Tint Foundation",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 4008,
+     "name": "Foundation Vs. Kem Chống Nắng",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 102,
+     "name": "Skincare Set C",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 4661,
+     "name": "Glow Goodies Collagen Gummies",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 7789,
+     "name": "Tone Up Sunscreen Tiktokmademebuylt Spotlightfinds Sunscreen Skincare Beauty",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 12288,
+     "name": "Kem Nền",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 1159,
+     "name": "Fondotinta Auto Adattivo",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 3998,
+     "name": "Kem Chống Nắng Tone-Up Tím Torriden",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 120,
+     "name": "Bảo Vệ Da Tối Ưu Cùng Kem",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 8520,
+     "name": "10x Ice Cream Lotion",
+     "tier": "synonym",
+     "ok": false
+    }
+   ]
+  }
+ },
+ {
+  "intent": "massage gun",
+  "query": "súng massage",
+  "pool": 35,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 35,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 11704,
+     "name": "On-The-Go Portable Massager",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 19,
+     "name": "King Smith Neck And Shoulder Massager Heat Function",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 817,
+     "name": "Reliefwave Neckhalo Neck Shoulder Massager",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 830,
+     "name": "Vitality Devices",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 3,
+     "name": "Cuifati Head Massage Gun Deep Tissue Levels Modes",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4878,
+     "name": "Fascia Gun Handle Elbow 3 Modes 6 Gears Adjust",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4876,
+     "name": "Deep Tissue Massage Gun Usb Rechargeable Portable Full Body",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 846,
+     "name": "A 6-Head Massager Typical",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 11656,
+     "name": "LEERCON Mini Muscle Massage Gun Deep Tissue",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4880,
+     "name": "Hot And Cold Fascia Gun",
+     "tier": "synonym",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "massage gun",
+  "query": "massage gun",
+  "pool": 35,
+  "before": {
+   "total": 35,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 11704,
+     "name": "On-The-Go Portable Massager",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 19,
+     "name": "King Smith Neck And Shoulder Massager Heat Function",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 817,
+     "name": "Reliefwave Neckhalo Neck Shoulder Massager",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 830,
+     "name": "Vitality Devices",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 3,
+     "name": "Cuifati Head Massage Gun Deep Tissue Levels Modes",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4878,
+     "name": "Fascia Gun Handle Elbow 3 Modes 6 Gears Adjust",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4876,
+     "name": "Deep Tissue Massage Gun Usb Rechargeable Portable Full Body",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 846,
+     "name": "A 6-Head Massager Typical",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 11656,
+     "name": "LEERCON Mini Muscle Massage Gun Deep Tissue",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4880,
+     "name": "Hot And Cold Fascia Gun",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  },
+  "after": {
+   "total": 35,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 11704,
+     "name": "On-The-Go Portable Massager",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 19,
+     "name": "King Smith Neck And Shoulder Massager Heat Function",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 817,
+     "name": "Reliefwave Neckhalo Neck Shoulder Massager",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 830,
+     "name": "Vitality Devices",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 3,
+     "name": "Cuifati Head Massage Gun Deep Tissue Levels Modes",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4878,
+     "name": "Fascia Gun Handle Elbow 3 Modes 6 Gears Adjust",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4876,
+     "name": "Deep Tissue Massage Gun Usb Rechargeable Portable Full Body",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 846,
+     "name": "A 6-Head Massager Typical",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 11656,
+     "name": "LEERCON Mini Muscle Massage Gun Deep Tissue",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 4880,
+     "name": "Hot And Cold Fascia Gun",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "massage gun",
+  "query": "مسدس مساج",
+  "pool": 35,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 35,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 11704,
+     "name": "On-The-Go Portable Massager",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 19,
+     "name": "King Smith Neck And Shoulder Massager Heat Function",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 817,
+     "name": "Reliefwave Neckhalo Neck Shoulder Massager",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 830,
+     "name": "Vitality Devices",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 3,
+     "name": "Cuifati Head Massage Gun Deep Tissue Levels Modes",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4878,
+     "name": "Fascia Gun Handle Elbow 3 Modes 6 Gears Adjust",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4876,
+     "name": "Deep Tissue Massage Gun Usb Rechargeable Portable Full Body",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 846,
+     "name": "A 6-Head Massager Typical",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 11656,
+     "name": "LEERCON Mini Muscle Massage Gun Deep Tissue",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 4880,
+     "name": "Hot And Cold Fascia Gun",
+     "tier": "synonym",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "perfume",
+  "query": "nước hoa",
+  "pool": 108,
+  "before": {
+   "total": 32,
+   "recall": 0.0,
+   "top10": [
+    {
+     "id": 9483,
+     "name": "Kiệt Tác Ghế Massage Trị Liệu",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 11040,
+     "name": "Ấm Trà Tử",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 135,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 3440,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 142,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 50,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 447,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 1845,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 3186,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 3226,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    }
+   ]
+  },
+  "after": {
+   "total": 157,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 2029,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 1718,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12081,
+     "name": "Silken Flow Shampoo transforms",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 9023,
+     "name": "عطور ماركات عاليمة اصلية",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 1385,
+     "name": "Pachet Family Detergent 3X5L Balsam 5L",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 9227,
+     "name": "كاميرا المراقبة الذكية بشكل لمبة كهرباء",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 8836,
+     "name": "عطور أصلية",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 727,
+     "name": "7 عطور بلمسة عالمية بـ 15 ريال",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 12166,
+     "name": "Date Night Fragrance",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 7598,
+     "name": "Fav Perfume Balm Mira Fall W This Too",
+     "tier": "synonym",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "perfume",
+  "query": "perfume",
+  "pool": 108,
+  "before": {
+   "total": 86,
+   "recall": 0.796,
+   "top10": [
+    {
+     "id": 12081,
+     "name": "Silken Flow Shampoo transforms",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 9023,
+     "name": "عطور ماركات عاليمة اصلية",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8836,
+     "name": "عطور أصلية",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 727,
+     "name": "7 عطور بلمسة عالمية بـ 15 ريال",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12166,
+     "name": "Date Night Fragrance",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 7598,
+     "name": "Fav Perfume Balm Mira Fall W This Too",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12287,
+     "name": "A Perfect Fragrance For Everyday Confidence",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12171,
+     "name": "Perfume Toothpaste",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 1264,
+     "name": "Profumo Con Feromoni Gratis Pheroeli™",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3181,
+     "name": "13011-88600. 13011-88601 Car Parts 2Zz-Ge Piston Ring For Toyota",
+     "tier": "exact",
+     "ok": false
+    }
+   ]
+  },
+  "after": {
+   "total": 157,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 12081,
+     "name": "Silken Flow Shampoo transforms",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 9023,
+     "name": "عطور ماركات عاليمة اصلية",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8836,
+     "name": "عطور أصلية",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 727,
+     "name": "7 عطور بلمسة عالمية بـ 15 ريال",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12166,
+     "name": "Date Night Fragrance",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 7598,
+     "name": "Fav Perfume Balm Mira Fall W This Too",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12287,
+     "name": "A Perfect Fragrance For Everyday Confidence",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12171,
+     "name": "Perfume Toothpaste",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 1264,
+     "name": "Profumo Con Feromoni Gratis Pheroeli™",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 3181,
+     "name": "13011-88600. 13011-88601 Car Parts 2Zz-Ge Piston Ring For Toyota",
+     "tier": "exact",
+     "ok": false
+    }
+   ]
+  }
+ },
+ {
+  "intent": "perfume",
+  "query": "pabango",
+  "pool": 108,
+  "before": {
+   "total": 0,
+   "recall": 0.0,
+   "top10": []
+  },
+  "after": {
+   "total": 157,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 12081,
+     "name": "Silken Flow Shampoo transforms",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 9023,
+     "name": "عطور ماركات عاليمة اصلية",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 1385,
+     "name": "Pachet Family Detergent 3X5L Balsam 5L",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 9227,
+     "name": "كاميرا المراقبة الذكية بشكل لمبة كهرباء",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 8836,
+     "name": "عطور أصلية",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 727,
+     "name": "7 عطور بلمسة عالمية بـ 15 ريال",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 12166,
+     "name": "Date Night Fragrance",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 7598,
+     "name": "Fav Perfume Balm Mira Fall W This Too",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 12287,
+     "name": "A Perfect Fragrance For Everyday Confidence",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 12171,
+     "name": "Perfume Toothpaste",
+     "tier": "synonym",
+     "ok": false
+    }
+   ]
+  }
+ },
+ {
+  "intent": "perfume",
+  "query": "عطر",
+  "pool": 108,
+  "before": {
+   "total": 26,
+   "recall": 0.093,
+   "top10": [
+    {
+     "id": 9227,
+     "name": "كاميرا المراقبة الذكية بشكل لمبة كهرباء",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8836,
+     "name": "عطور أصلية",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 727,
+     "name": "7 عطور بلمسة عالمية بـ 15 ريال",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12287,
+     "name": "A Perfect Fragrance For Everyday Confidence",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 9373,
+     "name": "عطر هيرش كراون",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 552,
+     "name": "المجموعة المميزة 4 باقات ١٢ عطر رجالي",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 6744,
+     "name": "Burberry Gold Eau De Parfum",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8721,
+     "name": "عطور فرنسية فاخرة بالحجم الكبير",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 536,
+     "name": "Moon Perfume Boutique",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 9228,
+     "name": "تدورين على عطر يجمع بين الرقة والثبات العالي",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  },
+  "after": {
+   "total": 157,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 9227,
+     "name": "كاميرا المراقبة الذكية بشكل لمبة كهرباء",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8836,
+     "name": "عطور أصلية",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 727,
+     "name": "7 عطور بلمسة عالمية بـ 15 ريال",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 12287,
+     "name": "A Perfect Fragrance For Everyday Confidence",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 9373,
+     "name": "عطر هيرش كراون",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 552,
+     "name": "المجموعة المميزة 4 باقات ١٢ عطر رجالي",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 6744,
+     "name": "Burberry Gold Eau De Parfum",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8721,
+     "name": "عطور فرنسية فاخرة بالحجم الكبير",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 536,
+     "name": "Moon Perfume Boutique",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 9228,
+     "name": "تدورين على عطر يجمع بين الرقة والثبات العالي",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  }
+ },
+ {
+  "intent": "teeth whitening",
+  "query": "làm trắng răng",
+  "pool": 13,
+  "before": {
+   "total": 1,
+   "recall": 0.0,
+   "top10": [
+    {
+     "id": 10962,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    }
+   ]
+  },
+  "after": {
+   "total": 15,
+   "recall": 0.462,
+   "top10": [
+    {
+     "id": 11705,
+     "name": "Foot Massager",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 12171,
+     "name": "Perfume Toothpaste",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 442,
+     "name": "Kem Đánh Răng Thái Dương Vươn Tầm Quốc Tế",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 396,
+     "name": "Sar 89 - With Free Delivery. Disaar Toothpaste",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 9909,
+     "name": "Whitening Strips & Pen",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 193,
+     "name": "Toothbrush Holder",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 5708,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 8448,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "synonym",
+     "ok": false
+    },
+    {
+     "id": 9552,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "synonym",
+     "ok": true
+    },
+    {
+     "id": 11638,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "synonym",
+     "ok": false
+    }
+   ]
+  }
+ },
+ {
+  "intent": "teeth whitening",
+  "query": "teeth whitening",
+  "pool": 13,
+  "before": {
+   "total": 12,
+   "recall": 0.923,
+   "top10": [
+    {
+     "id": 9909,
+     "name": "Whitening Strips & Pen",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 5708,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8448,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 204,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4423,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 183,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 182,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4425,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8541,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8027,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  },
+  "after": {
+   "total": 22,
+   "recall": 1.0,
+   "top10": [
+    {
+     "id": 9909,
+     "name": "Whitening Strips & Pen",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 5708,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": true
+    },
+    {
+     "id": 8448,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 204,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4423,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 183,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 182,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 4425,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8541,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": false
+    },
+    {
+     "id": 8027,
+     "name": "Chưa xác định sản phẩm",
+     "tier": "exact",
+     "ok": true
+    }
+   ]
+  }
+ }
+]

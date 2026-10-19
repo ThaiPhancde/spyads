@@ -3,7 +3,7 @@
   python -m app.eu_market.jobs sync      # watchlist keywords × countries × configured sources (+ one BigBuy page)
   python -m app.eu_market.jobs snapshot  # re-price watched listings (records a snapshot on change / daily)
   python -m app.eu_market.jobs fx        # ECB reference rates
-  python -m app.eu_market.jobs match     # supplier + ad matching, then watchlist alerts
+  python -m app.eu_market.jobs match     # supplier + ad matching
   python -m app.eu_market.jobs all
 
 Runs from Windows Task Scheduler as is, and from realtime.scheduler_loop every EU_SYNC_EVERY_MIN when a source is
@@ -161,7 +161,6 @@ def fx() -> dict:
 def match() -> dict:
     with SessionLocal() as db:
         res = {"suppliers": analytics.match_suppliers(db), "ads": analytics.match_ads(db)}
-        res["alerts"] = analytics.evaluate_watchlists(db, fx_table(db))
     return res
 
 

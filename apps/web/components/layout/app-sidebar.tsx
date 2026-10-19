@@ -1,23 +1,20 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { ScanSearch } from "lucide-react";
 import { NAV, isActive, isSubActive } from "@/components/layout/nav";
 import { NavUser } from "@/components/layout/nav-user";
+import { useSession } from "@/components/workspace/session";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu,
-  SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, useSidebar,
+  SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, useSidebar,
 } from "@/components/ui/sidebar";
-import { api } from "@/lib/api";
-import { useEvents } from "@/lib/realtime";
 
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const path = usePathname();
+  const { user } = useSession();
   const { isMobile, setOpenMobile } = useSidebar();
-  const [unread, setUnread] = useState(0);
-  useEffect(() => { api("/alerts?limit=1").then((d) => setUnread(d.unread)).catch(() => {}); }, [path]);
-  useEvents((e) => { if (e.type === "ALERT") setUnread((n) => n + 1); });
   useEffect(() => { if (isMobile) setOpenMobile(false); }, [path, isMobile, setOpenMobile]);
 
   return (
@@ -40,12 +37,12 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        {NAV.map((g) => (
+        {NAV.filter((g) => !g.hidden).map((g) => (
           <SidebarGroup key={g.group}>
             <SidebarGroupLabel>{g.group}</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {g.items.map((it) => (
+                {g.items.filter((it) => !it.admin).map((it) => (
                   <SidebarMenuItem key={it.href}>
                     <SidebarMenuButton asChild isActive={isActive(it.href, path)} tooltip={it.hint ? `${it.label} — ${it.hint}` : it.label}>
                       <Link href={it.href}>
@@ -66,9 +63,6 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
                           </SidebarMenuSubItem>
                         ))}
                       </SidebarMenuSub>
-                    )}
-                    {it.href === "/alerts" && unread > 0 && (
-                      <SidebarMenuBadge className="bg-critical text-white">{unread > 99 ? "99+" : unread}</SidebarMenuBadge>
                     )}
                   </SidebarMenuItem>
                 ))}

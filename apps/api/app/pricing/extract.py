@@ -61,6 +61,7 @@ def parse_html(html: str, url: str) -> dict | None:
     if it and it.get("price") is not None:
         return {"price": it["price"], "currency": it.get("currency"), "original_price": None, "title": it.get("title"), "seller": it.get("seller_name"),
                 "method": "jsonld", "confidence": 0.9, "availability": it.get("availability"), "ean": it.get("ean"), "brand": it.get("brand"),
+                "sku": ((it.get("raw") or {}).get("jsonld") or {}).get("sku"),
                 "evidence": {"offer": (it.get("raw") or {}).get("offer")}}
     meta = jsonld.parse_meta(html, url)
     if meta and meta.get("price") is not None:

@@ -403,7 +403,9 @@ def extract_products(items: list[dict]) -> list[dict] | None:
         lines = "\n".join(f"{i}. title={c.get('title')!r} url={c.get('url')!r} text={(c.get('text') or '')[:400]!r}" for i, c in enumerate(chunk))
         data = llm.complete_json(
             system=("You read e-commerce ads (any language) and name the product being sold as a short generic English "
-                    "product name (no brand hype, no prices). is_physical_product=false for services, apps, media, "
+                    "product name (no brand hype, no prices). Use only what the ad itself shows: product_name=null when "
+                    "the ad does not say which product it sells — never a guess, never the shop / page / platform name, "
+                    "never a call to action or slogan. is_physical_product=false for services, apps, media, "
                     "events, real estate, courses, and also for anything that cannot be imported from China as a "
                     "generic product: food, drinks, supplements, medicine, and branded goods sold only by the brand "
                     "(an iPhone is not importable, an iPhone case is). Use the number as i."),

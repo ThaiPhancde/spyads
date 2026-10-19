@@ -54,6 +54,11 @@ def _active_at(ad: Ad, d: date) -> bool:
     return stop is None or stop >= _end(d - timedelta(days=1))
 
 
+def adv_key(a) -> str | None:
+    """Advertiser identity: the page id when the source gave one, else the advertiser row."""
+    return a.page_id or (f"adv{a.advertiser_id}" if a.advertiser_id else None)
+
+
 def _safe_div(a, b, default=0.0):
     return a / b if b else default
 
@@ -80,11 +85,12 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
     removed_7d = [a for a in ext_ads if _stopped_at(a) and d7 < _stopped_at(a) <= end]
     running_30d = [a for a in active if (end - a.first_seen_at).days >= 30]
 
-    adv_first: dict[int, datetime] = {}
+    # one advertiser = one Facebook/TikTok page: the same page filed under two advertiser rows must not count twice
+    adv_first: dict[str, datetime] = {}
     for a in ext_ads:
-        if a.advertiser_id:
-            adv_first[a.advertiser_id] = min(adv_first.get(a.advertiser_id, a.first_seen_at), a.first_seen_at)
-    active_adv = Counter(a.advertiser_id for a in active if a.advertiser_id)
+        if k := adv_key(a):
+            adv_first[k] = min(adv_first.get(k, a.first_seen_at), a.first_seen_at)
+    active_adv = Counter(k for a in active if (k := adv_key(a)))
     advertisers = len(active_adv) or len(adv_first)
     new_adv_7d = sum(1 for t in adv_first.values() if t > d7)
     hhi = sum((c / sum(active_adv.values())) ** 2 for c in active_adv.values()) if active_adv else 1.0
@@ -136,7 +142,8 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
     feats = {
         "as_of": as_of.isoformat(),
         "total_ads": len(ext_ads),
-        "active_ads": len(active),
+        "active_ads": len(active),  # ad rows (a page running one copy in 3 countries = 3)
+        "unique_ads": len({a.variation_key or f"id{a.id}" for a in active}),  # distinct ads: same page + same copy counted once
         "new_ads_7d": len(new_7d),
         "new_ads_prev_7d": len(new_prev7),
         "new_ads_30d": len(new_30d),
@@ -150,7 +157,7 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
         # what marketers trust most: days the strongest ad has run, copies of the same creative, sellers at the priority market
         "longevity_days": max(((end - a.first_seen_at).days for a in active), default=0),
         "variants": max([var["max_group"], *fp_groups.values()]),  # largest group of live ads sharing page+copy or creative
-        "advertisers_at_primary_market": len({a.advertiser_id or a.page_id for a in active if prim & set(ad_markets(a))}),
+        "advertisers_at_primary_market": len({adv_key(a) for a in active if prim & set(ad_markets(a))} - {None}),
         "creative_count": len(set(fps)) or len(active),
         "creative_growth_7d": round(_safe_div(len(new_7d), max(3, len(active))), 3),  # 1 new ad on 1 ad is not +100 %
         "creative_growth_30d": round(_safe_div(len(new_30d), max(1, len(active) - len(new_30d))), 3),

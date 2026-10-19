@@ -244,7 +244,8 @@ def _call(call_id: int, fn):
     ms = int((time.time() - t) * 1000)
     if r.status_code != 200:
         err = _http_fail(r)
-        _finish_call(call_id, False, r.status_code, ms, err.code, counted=False if r.status_code in (401, 403) else None)
+        # 401 / 403 never reached the quota; a 400 / 422 (bad parameters) is rejected before the search runs → not billed either
+        _finish_call(call_id, False, r.status_code, ms, err.code, counted=False if r.status_code in (400, 401, 403, 422) else None)
         raise err
     try:
         j = r.json()
@@ -269,7 +270,13 @@ def serp_upload(data: bytes, call_id: int) -> str:
     return j["image_id"]
 
 
+# SerpApi discontinued type=products (HTTP 400 "The `products` search type has been discontinued", 2026-10): `all` is the default and
+# carries the product / shopping matches. Our own `products` stays a valid request type (cache keys of old searches keep hitting).
+PROVIDER_TYPE = {"products": "all"}
+
+
 def serp_lens(params: dict, call_id: int) -> dict:
+    params = {**params, "type": PROVIDER_TYPE.get(params.get("type"), params.get("type"))}
     p = {"engine": "google_lens", "api_key": api_key(), **{k: v for k, v in params.items() if v not in (None, "")}}
     return _call(call_id, lambda: httpx.get(SEARCH_URL, params=p, timeout=60))
 

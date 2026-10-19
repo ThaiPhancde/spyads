@@ -15,6 +15,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { splitTags as split, TagInput } from "@/components/filters/tag-input";
 import { visualHref } from "@/components/visual/global-image-search";
 import { ZoomThumb } from "@/components/visual/web-results";
+import { PriceTag } from "@/components/pricing/price-tag";
 import { api, fmt } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -137,7 +138,7 @@ export function ProductImageCard({ r, reviewFor, onReviewed }: { r: any; reviewF
       <div className="flex flex-1 flex-col gap-1.5 p-2.5 text-xs">
         <div className="flex flex-wrap items-center gap-1"><TierBadge tier={r.tier} similarity={r.similarity} /><Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{r.source_label || r.source}</Badge><span className="text-muted-foreground">{kind}{r.country ? ` · ${r.country}` : ""}</span>{r.copies > 1 && <Badge variant="outline" className="px-1 py-0 text-[10px]" title="Cùng một ảnh dùng trong nhiều quảng cáo / listing">×{r.copies}</Badge>}</div>
         <div className="line-clamp-2 leading-snug font-medium" title={r.title || ""}>{r.title || <span className="text-muted-foreground">(không có tiêu đề)</span>}</div>
-        <div><PriceCell r={r} compact /></div>
+        <div>{r.ad_id || r.product_id || r.eu_listing_id ? <PriceTag subject={r.ad_id ? `ad:${r.ad_id}` : r.product_id ? `product:${r.product_id}` : `listing:${r.eu_listing_id}`} fallback={{ price: r.price, currency: r.currency }} /> : <PriceCell r={r} compact />}</div>
         {r.seller && <div className="truncate text-muted-foreground" title={r.seller}>{r.seller}</div>}
         <div className={cn("text-muted-foreground", stale(r) && "text-warning")} title={stale(r) ? "Giá / quan sát cũ hơn 14 ngày" : ""}>{fmt.dt(r.observed_at)}{stale(r) ? " · cũ" : ""}{r.active === false ? " · đã dừng" : ""}</div>
         <div className="mt-auto flex flex-wrap items-center gap-1 pt-1">

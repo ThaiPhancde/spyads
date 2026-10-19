@@ -1,7 +1,8 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
-import { ArrowRight, Check, ExternalLink, Eye, Heart, Link2, Maximize2, RotateCcw, Trophy } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowRight, Check, ExternalLink, Link2, Maximize2, RotateCcw, Trophy } from "lucide-react";
+import { EngagementLine } from "@/components/ads/engagement-line";
 import { AdDetailSheet, FUNNEL, PLATFORM, TIER, ago, marketsOf } from "@/components/ads/ad-detail-sheet";
 import { CreativeMedia, DownloadButton } from "@/components/media";
 import { Hint, NetworkBadge, usePlatforms } from "@/components/platforms";
@@ -13,12 +14,16 @@ import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { fmt } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { observeView, track } from "@/lib/track";
+import { AdActions, FollowButton } from "@/components/workspace/actions";
 
 /** One ad from any ad library (or one viral organic post), laid out like an Ad Library card: network, status,
  *  library id, start date, placements, advertiser, copy, media (single / carousel) and the link bar with the CTA. */
 export function AdCard({ ad }: { ad: any }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState(false);
+  const head = useRef<HTMLDivElement>(null);
+  useEffect(() => observeView(head.current, ad.id), [ad.id]);
   const text: string = ad.text || "";
   const long = text.length > 220;
   const media = ad.creatives || [];
@@ -27,7 +32,7 @@ export function AdCard({ ad }: { ad: any }) {
   const organic = ad.channel === "organic";
   return (
     <Card className="gap-0 overflow-hidden py-0">
-      <div className="space-y-1.5 px-3 pt-3 text-xs">
+      <div ref={head} className="space-y-1.5 px-3 pt-3 text-xs">
         <div className="flex items-center justify-between gap-2">
           <span className="inline-flex items-center gap-2">
             <NetworkBadge network={ad.network} byKey={byKey} />
@@ -40,9 +45,7 @@ export function AdCard({ ad }: { ad: any }) {
           </span>
           <span className="tnum max-w-[45%] truncate text-muted-foreground" title={ad.external_id}>ID: {ad.external_id}</span>
         </div>
-        {organic && (ad.views || ad.likes) ? (
-          <div className="flex items-center gap-1 text-ink2"><Eye className="size-3" /> {fmt.n(ad.views)} lượt xem{ad.likes ? <> · <Heart className="size-3" /> {fmt.n(ad.likes)}</> : null}</div>
-        ) : null}
+        {ad.channel !== "commerce" && <EngagementLine ad={ad} />}
         <div className="flex flex-wrap items-center gap-1.5">
           {ad.force_tier && (
             <Hint tip="Độ mạnh: ngày chạy + số phiên bản + số nền tảng">
@@ -89,6 +92,7 @@ export function AdCard({ ad }: { ad: any }) {
           {long && <Button variant="link" size="xs" className="h-auto px-1 text-link" onClick={() => setOpen(!open)}>{open ? "Thu gọn" : "Xem thêm"}</Button>}
         </div>
       )}
+      <div className="flex flex-wrap gap-1 px-3 pt-2"><FollowButton id={ad.advertiser_id} /><AdActions id={ad.id} /></div>
 
       <div className="px-3 pt-2">
         {media.length === 0 ? (
@@ -129,7 +133,7 @@ export function AdCard({ ad }: { ad: any }) {
         {ad.angle && ad.angle !== "general" && <Badge variant="outline" className="font-normal">angle: {ad.angle}</Badge>}
         {ad.product && <Link href={`/products/${ad.product.id}`} className="inline-flex max-w-[160px] items-center gap-1 truncate text-link hover:underline" title={ad.product.name}>Sản phẩm <ArrowRight className="size-3" /></Link>}
         <span className="flex-1" />
-        <Button variant="ghost" size="xs" onClick={() => setDetail(true)} title="Xem đầy đủ nội dung, media và thông tin quảng cáo"><Maximize2 /> Chi tiết</Button>
+        <Button variant="ghost" size="xs" onClick={() => { setDetail(true); track("ad_detail_view", [ad.id]); }} title="Xem đầy đủ nội dung, media và thông tin quảng cáo"><Maximize2 /> Chi tiết</Button>
         {media.filter((c: any) => c.download).slice(0, 3).map((c: any) => (
           <DownloadButton key={c.id} c={{ ...c, size: undefined }} small />
         ))}

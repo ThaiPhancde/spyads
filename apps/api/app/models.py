@@ -1,7 +1,7 @@
 """Data model — Product is the central entity (blueprint §4, §6)."""
 from datetime import date, datetime
 
-from sqlalchemy import and_, or_, JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import and_, or_, JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -21,6 +21,7 @@ class Product(Base):
     category: Mapped[str | None] = mapped_column(String(64))
     subcategory: Mapped[str | None] = mapped_column(String(64))
     brand: Mapped[str | None] = mapped_column(String(128))
+    product_identity: Mapped[dict | None] = mapped_column(JSON)  # grounded brand/model/SKU/GTIN, survives rescoring
     # unused since the demo seed was removed, but existing DBs have it NOT NULL: without it every new product INSERT failed
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     image_url: Mapped[str | None] = mapped_column(String(512))
@@ -67,6 +68,19 @@ class Product(Base):
     cover_creative_id: Mapped[int | None] = mapped_column(Integer)
     in_target: Mapped[bool | None] = mapped_column(Boolean, index=True)
     scored_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # naming (services/naming.py): canonical_name stays the matching key (usually the source's English / original name);
+    # name_vi is what MKT reads. UNKNOWN = no evidence — the card says so instead of showing a shop / CTA.
+    name_vi: Mapped[str | None] = mapped_column(String(255))
+    name_status: Mapped[str | None] = mapped_column(String(16), index=True)  # VERIFIED / AUTO_CONFIRMED / SUGGESTED / UNKNOWN
+    name_source: Mapped[str | None] = mapped_column(String(16))  # manual / listing / slug / adapter / ad_title / llm / legacy
+    name_confidence: Mapped[float | None] = mapped_column(Float)  # measured precision of name_source (naming.SOURCE_PRECISION)
+    name_evidence: Mapped[list | None] = mapped_column(JSON)  # [{source, value, ad_id}] ≤ 6
+    name_history: Mapped[list | None] = mapped_column(JSON)  # previous {name, name_vi, status, source, by, at} — undo
+    shop_service: Mapped[bool | None] = mapped_column(Boolean)  # shop's ads are mostly services → "Quảng cáo từ" not "Sản phẩm từ"
+    shop_name: Mapped[str | None] = mapped_column(String(255))  # provisional label source for UNKNOWN products (services/shop_naming.py): display only
+    manual_override: Mapped[bool | None] = mapped_column(Boolean)  # MKT set the name: crawlers never rename it
+    naming_checked_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)  # naming_ai rules pass done (checkpoint)
+    naming_attempts: Mapped[int | None] = mapped_column(Integer)  # naming_ai model answers / failures seen for this product
 
     aliases: Mapped[list["ProductAlias"]] = relationship(back_populates="product", cascade="all, delete-orphan")
 
@@ -95,7 +109,11 @@ class LifecycleEvent(Base):
 # ---------------------------------------------------------------- Ads side
 class Advertiser(Base):
     __tablename__ = "advertisers"
+    __table_args__ = (Index("uq_advertisers_source_identity", "source", "source_advertiser_id", unique=True),)
     id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str | None] = mapped_column(String(64))
+    source_advertiser_id: Mapped[str | None] = mapped_column(String(128))
+    avatar_url: Mapped[str | None] = mapped_column(Text)
     name: Mapped[str] = mapped_column(String(255), index=True)
     platform: Mapped[str | None] = mapped_column(String(32))
     country: Mapped[str | None] = mapped_column(String(64))
@@ -137,9 +155,11 @@ class Ad(Base):
     price_source: Mapped[str | None] = mapped_column(String(16))  # source (adapter) / ad_text (regex) / landing (fetched page)
     landing_checked_at: Mapped[datetime | None] = mapped_column(DateTime)  # services/spy.py: last landing-page fetch
     reviews_checked_at: Mapped[datetime | None] = mapped_column(DateTime)  # services/spy.py: last marketplace review fetch
-    likes: Mapped[int] = mapped_column(Integer, default=0)
-    comments_count: Mapped[int] = mapped_column(Integer, default=0)
-    shares: Mapped[int] = mapped_column(Integer, default=0)
+    # NULL = the source never reported it (Meta Ad Library has none; TikTok Creative Center sends comment / share for ~8 % of ads): shown as
+    # N/A, never as 0. A real 0 is stored as 0. History + scope (ad vs original post): engagement/models.py.
+    likes: Mapped[int | None] = mapped_column(Integer)
+    comments_count: Mapped[int | None] = mapped_column(Integer)
+    shares: Mapped[int | None] = mapped_column(Integer)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -190,6 +210,13 @@ class Ad(Base):
     rank: Mapped[int | None] = mapped_column(Integer)  # search position at the source
     original_price: Mapped[float | None] = mapped_column(Float)
     currency: Mapped[str | None] = mapped_column(String(8))  # of price / original_price, as the source reported it
+    # naming.ad_type: PRODUCT_AD / MULTI_PRODUCT_AD / SERVICE_AD / CONTENT_AD / BRAND_AD / UNKNOWN
+    ad_type: Mapped[str | None] = mapped_column(String(20), index=True)
+    name_source: Mapped[str | None] = mapped_column(String(16))  # where raw_product_name came from; "none" = no evidence yet
+    product_metadata: Mapped[dict | None] = mapped_column(JSON)
+    # TikTok Creative Center's own labels (raw_source): industry_key "label_14103000000", objective_key "conversion" … — what the ad is for
+    source_industry: Mapped[str | None] = mapped_column(String(24), index=True)
+    source_objective: Mapped[str | None] = mapped_column(String(32))
 
 
 # market aggregates (ad counts, advertisers, new ads…) read ad-library rows only — never marketplace listings or
@@ -288,6 +315,7 @@ class TrackedQuery(Base):
 class SearchJob(Base):
     """Live search started from the Product Search page."""
     __tablename__ = "search_jobs"
+    user_id: Mapped[int | None] = mapped_column(Integer, index=True)
     id: Mapped[int] = mapped_column(primary_key=True)
     query: Mapped[str | None] = mapped_column(String(255))
     countries: Mapped[list] = mapped_column(JSON, default=list)
@@ -312,6 +340,7 @@ class SearchJob(Base):
 class Vote(Base):
     """MKT Appeal votes (discovery §11): LOVE / TEST / WATCH / NORMAL / SKIP."""
     __tablename__ = "votes"
+    user_id: Mapped[int | None] = mapped_column(Integer, index=True)
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     user: Mapped[str] = mapped_column(String(128))
@@ -357,6 +386,8 @@ class ProductDailySnapshot(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     date: Mapped[date] = mapped_column(Date, index=True)
+    # Actual observations only; historical reconstruction must leave this NULL.
+    activity_evidence: Mapped[dict | None] = mapped_column(JSON)
     active_ads: Mapped[int] = mapped_column(Integer, default=0)
     new_ads: Mapped[int] = mapped_column(Integer, default=0)
     removed_ads: Mapped[int] = mapped_column(Integer, default=0)
@@ -419,6 +450,49 @@ class Alert(Base):
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class LlmProviderState(Base):
+    """What each LLM provider told us about its limits (rate-limit headers), shared by API + worker (services/llm_providers.py)."""
+    __tablename__ = "llm_provider_state"
+    provider: Mapped[str] = mapped_column(String(24), primary_key=True)
+    limits: Mapped[dict] = mapped_column(JSON, default=dict)  # {requests_day: {limit, remaining, reset_s}, tokens_minute: {...}}
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class QueryIntent(Base):
+    """What a search keyword means in any language (services/query_intent.py): one model call per new keyword, cached for good.
+    intent = {"product": english name, "variants": [same product in vi / en / tl / ar / zh / es…], "related": [...]}."""
+    __tablename__ = "query_intents"
+    query: Mapped[str] = mapped_column(String(255), primary_key=True)  # lexicon.fold(keyword)
+    intent: Mapped[dict] = mapped_column(JSON, default=dict)
+    source: Mapped[str] = mapped_column(String(16), default="llm")  # llm | none (asked, no answer: not asked again today)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class ProductLink(Base):
+    """Candidate "these two products are one" found by services/clustering.py (landing page, copy, picture hash, CLIP, name).
+    pending = waits for MKT · auto_merged / accepted = merged (event_id is the PRODUCT_MERGED event Hoàn tác reverts) ·
+    rejected = MKT said no, or a split / undo separated them: permanent cannot-link · blocked = strong evidence but a hard
+    guard stopped it (kept to count prevented wrong merges) · stale = one side no longer exists. No FK: merges delete products."""
+    __tablename__ = "product_links"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    a_id: Mapped[int] = mapped_column(Integer, index=True)  # a_id < b_id
+    b_id: Mapped[int] = mapped_column(Integer, index=True)
+    score: Mapped[float] = mapped_column(Float, default=0)
+    relation_kind: Mapped[str | None] = mapped_column(String(32))
+    algorithm_version: Mapped[str | None] = mapped_column(String(32))
+    signals: Mapped[dict] = mapped_column(JSON, default=dict)
+    blockers: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    event_id: Mapped[int | None] = mapped_column(Integer)
+    decided_by: Mapped[str | None] = mapped_column(String(64))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    __table_args__ = (UniqueConstraint("a_id", "b_id"),)
+
+
 class Connector(Base):
     __tablename__ = "connectors"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -463,4 +537,12 @@ class PipelineRun(Base):
 
 from .eu_market import models as eu_models  # noqa: E402,F401 — EU Market tables join the same metadata (auto_migrate)
 from .visual import models as visual_models  # noqa: E402,F401 — image index tables (product_images, product_matches)
+from .engagement import models as engagement_models  # noqa: E402,F401 — engagement history + queue (ad_engagement, engagement_jobs)
 from .pricing import models as pricing_models  # noqa: E402,F401 — price memory + enrichment queue (price_observations, price_jobs)
+from .services import content_filter as content_filter_models  # noqa: E402,F401 — content_exclusions (entertainment ads never re-ingested)
+from . import cluster_models  # noqa: E402,F401 — non-destructive product cluster overlay
+from . import allocation  # noqa: E402,F401 — Phase 2 exclusive product allocation (locks, test results, audit)
+from . import behavior  # noqa: E402,F401 — Phase 3 per-MKT behavior history (mkt_behavior_events)
+from . import preferences  # noqa: E402,F401 — Phase 4 MKT preference profiles
+from . import recommend  # noqa: E402,F401 — Phase 5 personalized recommendation cache
+from . import interest  # noqa: E402,F401 — app_settings (soft-dedup penalty knobs)

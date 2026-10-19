@@ -13,6 +13,7 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -26,6 +27,8 @@ const CHANNEL_ORDER: [string, string][] = [["ads", "Thư viện quảng cáo"], 
 const HEALTH: Record<string, [Tone, string]> = {
   healthy: ["good", "Healthy"], slow: ["warn", "Slow"], auth_expired: ["bad", "Auth expired"], error: ["bad", "Error"],
   degraded: ["warn", "Degraded"], unknown: ["neutral", "Chưa chạy"],
+  waiting_file: ["neutral", "Chờ file"],
+  configured: ["neutral", "Đủ cấu hình"],
 };
 
 function ConnectorRow({ c, onChange, byKey }: { c: any; onChange: () => void; byKey: any }) {
@@ -48,7 +51,8 @@ function ConnectorRow({ c, onChange, byKey }: { c: any; onChange: () => void; by
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-[240px] flex-1">
           <div className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
-            <NetworkBadge network={c.network} byKey={byKey} small />{c.name}
+            {c.brand ? <Badge variant="secondary" className="px-1.5 py-0 text-[10px]"><span className="size-2 rounded-full" style={{ background: c.brand.color }} />{c.brand.label}</Badge>
+              : <NetworkBadge network={c.network} byKey={byKey} small />}{c.name}
             <span className="text-[11px] text-muted-foreground">· {c.adapter} · {c.kind}</span>
           </div>
           <div className="text-[11px] text-muted-foreground">
@@ -56,6 +60,7 @@ function ConnectorRow({ c, onChange, byKey }: { c: any; onChange: () => void; by
             {c.every_minutes ? ` · tự chạy mỗi ${c.every_minutes} phút` : " · chạy khi tìm kiếm / theo dõi từ khoá"}
           </div>
           {c.last_error && <div className="text-[11px] text-critical">{c.last_error}</div>}
+          {c.adapter === "export" && <div className="text-[11px] text-muted-foreground">Nhận file đã xuất từ nhà cung cấp; không tự quét tài khoản. Nền tảng quảng cáo lấy từ từng bản ghi trong file.</div>}
         </div>
         <Pill tone={tone}>{label}</Pill>
         <div className="flex items-center gap-1.5">

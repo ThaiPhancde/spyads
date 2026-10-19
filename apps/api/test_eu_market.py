@@ -180,9 +180,6 @@ with TestClient(app) as client:  # startup = auto_migrate on the temp DB
     w = client.post("/api/eu-market/watchlists", json={"name": "bracelets", "keywords": ["Lucky Bracelet"], "rules": {"price_drop_pct": 5}},
                     headers=H).json()
     assert w["keywords"] == ["lucky bracelet"] and w["rules"] == {"price_drop_pct": 5.0}
-    with SessionLocal() as db:
-        assert analytics.evaluate_watchlists(db, {"EUR": (1.0, None)}, now)["alerts"] == 1  # 19.99 → 17.99 = -10 %
-        assert analytics.evaluate_watchlists(db, {"EUR": (1.0, None)}, now)["alerts"] == 0  # deduped
     assert client.patch(f"/api/eu-market/products/{card['id']}", json={"marketer_tags": ["bogus"]}, headers=H).status_code == 422
     assert client.patch(f"/api/eu-market/products/{card['id']}", json={"marketer_tags": ["novelty"]}, headers=H).json()["marketer_tags"] == ["novelty"]
     assert client.get("/api/eu-market/rare", params={"min_score": 0}).status_code == 200

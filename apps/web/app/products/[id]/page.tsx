@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { Fragment, ReactNode, useState } from "react";
+import { Fragment, ReactNode, useEffect, useState } from "react";
 import { ArrowRight, BadgeEuro, Camera, MessageCircle, RefreshCw, Share2, Sparkles, ThumbsDown, ThumbsUp, Play, Truck } from "lucide-react";
 import { visualHref } from "@/components/visual/global-image-search";
 import { toast } from "sonner";
@@ -17,6 +17,10 @@ import { cn } from "@/lib/utils";
 import { CommentsPanel } from "@/components/CommentsPanel";
 import { DiscoveryPanel } from "@/components/DiscoveryPanel";
 import { NetworkBadge, NetworkStrip, usePlatforms } from "@/components/platforms";
+import { ProductCluster } from "@/components/product-cluster";
+import { ProductName } from "@/components/product-name";
+import { PriceTag } from "@/components/pricing/price-tag";
+import { usePrice } from "@/lib/prices";
 
 /** Where else the product shows up: networks, China-source / store listings (price / reviews / sold) and the
  *  supplier-price margin estimate (AliExpress price × 1.6 ≈ landed cost: shipping + fees not included). */
@@ -73,6 +77,8 @@ function Col({ title, hint, empty, rows, children }: { title: ReactNode; hint?: 
 function MktCard({ m, c, productId, onChange }: { m: any; c: any; productId: number; onChange: () => void }) {
   const { byKey } = usePlatforms();
   const [scan, setScan] = useState<{ busy: boolean; msg: string }>({ busy: false, msg: "" });
+  const price = usePrice(`product:${productId}`, 10);
+  useEffect(() => { if (price?.status === "done" && price.price_type !== "NOT_FOUND") onChange(); }, [price?.observed_at, price?.price_type, price?.status, onChange]);
   if (!m) return null;
   const e = m.engagement || {}, mp = m.marketplace || {}, ads = m.ads || {}, cov = m.price_coverage || {};
   const usd = (v: any) => (v === null || v === undefined ? "—" : `$${fmt.n(v, 2)}`);
@@ -99,16 +105,17 @@ function MktCard({ m, c, productId, onChange }: { m: any; c: any; productId: num
     <Card title="Thông tin cho MKT — giá, tương tác, bằng chứng bán" className="mb-4"
           action={<span className="flex items-center gap-2 text-xs"><span className="max-w-md truncate text-muted-foreground" title={scan.msg}>{scan.msg}</span>
             <Button variant="outline" size="xs" onClick={doScan} disabled={scan.busy}><RefreshCw className={cn(scan.busy && "animate-spin")} />{scan.busy ? "Đang quét…" : "Quét giá & review đối thủ"}</Button></span>}>
+      <div className="mb-3"><PriceTag subject={`product:${productId}`} priority={10} /></div>
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-8">
         <Item l="Giá đối thủ đang bán" v={usd(m.sell_usd)}
               sub={cov.ads ? <span className={covClass}>{cov.priced}/{cov.ads} ads có giá ({Math.round(covPct * 100)}%){m.ad_price_range_usd ? ` · ${usd(m.ad_price_range_usd[0])} – ${usd(m.ad_price_range_usd[1])}` : ""}</span> : "chưa có ad"} />
-        <Item l="Giá nhập (AliExpress)" v={usd(m.supplier_usd)} sub="landed ≈ ×1.6" />
+        <Item l="Giá nguồn hàng" v={usd(m.supplier_usd)} sub="landed ≈ ×1.6" />
         <Item l="Biên gộp ước tính" v={m.margin_est === null || m.margin_est === undefined ? "—" : <span className={cn(m.margin_est > 0.5 && "text-good-text", m.margin_est < 0.3 && "text-critical")}>{Math.round(m.margin_est * 100)}%</span>} sub="giá đối thủ vs nhập ×1.6 · chưa gồm ads, COD, hoàn" />
         <Item l="Giá sàn (thấp nhất trên sàn)" v={usd(m.floor_usd)} sub={m.floor?.[0] && m.floor[0].network !== "aliexpress" ? byKey[m.floor[0].network]?.label : m.retail_usd ? `bán lẻ sàn TB ${usd(m.retail_usd)}` : "chưa thấy trên sàn"} />
         <Item l="Khách nói gì" v={sent ? <span className="inline-flex items-center gap-2"><span className="inline-flex items-center gap-1 text-good-text"><ThumbsUp className="size-4" />{Math.round(sent.positive * 100)}%</span><span className="inline-flex items-center gap-1 text-critical"><ThumbsDown className="size-4" />{Math.round(sent.negative * 100)}%</span></span> : "—"}
               sub={c?.analysed ? `${fmt.n(c.analysed)} review${c.rating_avg ? ` · ★ ${c.rating_avg}` : ""}` : "chưa có review / comment"} />
-        <Item l={<span className="inline-flex items-center gap-1"><ThumbsUp className="size-3" /> Like / <MessageCircle className="size-3" /> Comment (ads)</span>} v={`${fmt.n(e.likes)} / ${fmt.n(e.comments)}`}
-              sub={<span className="inline-flex items-center gap-1"><Share2 className="size-3" />{fmt.n(e.shares)} share{e.views ? <> · <Play className="size-3" />{fmt.n(e.views)} view</> : null}</span>} />
+        <Item l={<span className="inline-flex items-center gap-1"><ThumbsUp className="size-3" /> Like / <MessageCircle className="size-3" /> Comment (ads)</span>} v={`${e.likes == null ? "N/A" : fmt.n(e.likes)} / ${e.comments == null ? "N/A" : fmt.n(e.comments)}`}
+              sub={<span className="inline-flex items-center gap-1"><Share2 className="size-3" />{e.shares == null ? "N/A" : fmt.n(e.shares)} share{e.views ? <> · <Play className="size-3" />{fmt.n(e.views)} view</> : null}</span>} />
         <Item l="Đã bán (sàn)" v={mp.sold ? fmt.n(mp.sold) : "—"} sub={`${fmt.n(mp.listings)} listing${mp.reviews ? ` · ${fmt.n(mp.reviews)} đánh giá${mp.rating ? ` ★ ${mp.rating}` : ""}` : ""}`} />
         <Item l="Ads đang chạy" v={`${fmt.n(ads.active)} / ${fmt.n(ads.total)}`} sub={`${fmt.n(ads.advertisers)} advertiser · lâu nhất ${ads.longest_days ?? "—"} ngày`} />
       </div>
@@ -179,7 +186,8 @@ export default function Product360({ params }: { params: { id: string } }) {
 
   return (
     <div>
-      <PageHeader title={p.name} subtitle={`${p.product_code} · ${p.category || "—"} · Markets: ${p.markets.join(", ") || p.country} · Giá TB ${fmt.n(p.price, 2)} ${p.currency || ""}`}>
+      <PageHeader title={<ProductName key={`${p.id}:${p.name}:${p.name_status}`} p={p} big onChanged={reload} />}
+                  subtitle={`${p.product_code} · ${p.category || "—"} · Advertiser: ${p.advertiser || "—"} · Markets: ${p.markets.join(", ") || p.country} · Giá TB ${fmt.n(p.price, 2)} ${p.currency || ""}`}>
         <span className="text-xs text-muted-foreground">Lifecycle</span><Pill tone={LIFECYCLE_TONE[p.lifecycle]}>{p.lifecycle}</Pill>
         <span className="ml-2 text-xs text-muted-foreground">Action</span><RecBadge rec={p.recommendation} />
         <span className="ml-2 flex flex-wrap gap-1">
@@ -189,15 +197,11 @@ export default function Product360({ params }: { params: { id: string } }) {
         </span>
       </PageHeader>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
-        <Stat label="Win Score" value={fmt.n(p.win_score)} sub={p.win_label} />
-        <Stat label="External / Internal" value={<>{fmt.n(p.external_win_score)}<span className="text-lg text-muted-foreground"> / {p.internal_win_score === null ? "—" : fmt.n(p.internal_win_score)}</span></>}
-              sub={`Blend ${Math.round((b.blend?.external ?? 1) * 100)}/${Math.round((b.blend?.internal ?? 0) * 100)}`} />
-        <Stat label="Rare Winner" value={fmt.n(p.rare_winner_score)} sub={`Rarity ${fmt.n(p.rarity_score)}`} />
+      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+        <Stat label="Opportunity" value={fmt.n(p.opportunity_score)} sub={`Raw ${fmt.n(p.opportunity_raw)} × confidence adj.`} />
+        <Stat label="Action" value={<RecBadge rec={p.recommendation} />} sub={(p.reasons || [])[0]} />
         <Stat label="Saturation" value={fmt.n(p.saturation_score)} sub={p.saturation_state} />
-        <Stat label="Opportunity" value={fmt.n(p.opportunity_score)} sub={`Raw ${fmt.n(data.derived.opportunity_raw)} × confidence adj.`} />
         <Stat label="Confidence" value={`${fmt.n(p.confidence_score)}%`} sub={p.confidence_label} />
-        <Stat label="Customer rejection" value={p.customer_rejection_score === null ? "—" : fmt.n(p.customer_rejection_score)} sub={`Refusal ${fmt.pct(f.refusal_rate)}`} />
       </div>
 
       <MktCard m={data.mkt} c={data.comments} productId={p.id} onChange={reload} />
@@ -214,15 +218,18 @@ export default function Product360({ params }: { params: { id: string } }) {
         <TabsContent value="Overview">
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
             <Card title="Decision engine">
-              <div className="mb-2 flex items-center gap-2"><RecBadge rec={p.recommendation} /><span className="text-sm text-ink2">{p.win_label} · Confidence {p.confidence_label}</span></div>
+              <div className="mb-2 flex items-center gap-2"><RecBadge rec={p.recommendation} /><span className="text-sm text-ink2">Opportunity {fmt.n(p.opportunity_score)} · Confidence {p.confidence_label}</span></div>
               <ul className="mb-4 list-disc space-y-1 pl-5 text-sm">{(p.reasons || []).map((r: string) => <li key={r}>{r}</li>)}</ul>
               <Button className="w-full" onClick={doExplain} disabled={busy}><Sparkles />{busy ? "Đang giải thích…" : "AI giải thích vì sao ra điểm này"}</Button>
               {explain && <div className="mt-3 rounded-md bg-muted p-3 text-sm leading-relaxed whitespace-pre-wrap">{explain}</div>}
               <div className="mt-2 text-[11px] text-muted-foreground">AI chỉ giải thích — điểm số do công thức tính từ database.</div>
             </Card>
-            <Card title="External Win Score — breakdown"><Breakdown parts={b.external} /></Card>
-            <Card title="Internal Win Score — breakdown">{Object.keys(b.internal || {}).length ? <Breakdown parts={b.internal} /> : <Empty>Chưa test nội bộ — Final score = 100% External.</Empty>}</Card>
             <Card title="Saturation — breakdown"><Breakdown parts={b.saturation} /></Card>
+            {f.hidden_verdict && <Card title="Hidden Winner — bằng chứng">
+              <Badge variant="outline">{f.hidden_verdict.status_label}</Badge>
+              <ul className="mt-3 space-y-2 text-xs">{f.hidden_verdict.checks.map((c: any) => <li key={c.key}>{c.passed ? "✓" : "○"} {c.reason}</li>)}</ul>
+              <p className="mt-3 text-[11px] text-muted-foreground">Nhãn bổ trợ; xếp hạng dùng Opportunity.</p>
+            </Card>}
             <Card title="Rarity & Confidence">
               <Breakdown parts={b.rarity} />
               <Separator className="my-3" />
@@ -243,6 +250,7 @@ export default function Product360({ params }: { params: { id: string } }) {
                 </ol>
               </ScrollArea>
             </Card>
+            <ProductCluster p={p} ads={data.cluster_ads || []} onChange={reload} />
             <Card title="Entity resolution — các tên khác của sản phẩm" className="xl:col-span-3">
               {p.aliases.length ? (
                 <div className="flex flex-wrap gap-2">{p.aliases.map((a: any) => <Badge key={a.name} variant="secondary" className="font-normal">{a.name} <span className="text-muted-foreground">· {a.source} · match {fmt.n(a.match_score * 100)}%</span></Badge>)}</div>
@@ -255,7 +263,7 @@ export default function Product360({ params }: { params: { id: string } }) {
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <CrossPlatformCard productId={p.id} f={f} />
             <Card title="Active ads theo ngày"><TrendChart data={data.timeseries} series={[{ key: "active_ads", label: "Active ads" }]} /></Card>
-            <Card title="Scores theo ngày"><TrendChart data={data.timeseries} series={[{ key: "external_win", label: "External Win" }, { key: "saturation", label: "Saturation" }, { key: "opportunity", label: "Opportunity" }]} /></Card>
+            <Card title="Saturation theo ngày"><TrendChart data={data.timeseries} series={[{ key: "saturation", label: "Saturation" }]} /></Card>
             <Card title="Market performance (active ads)">
               <BarList rows={data.market_performance.map((m: any) => ({ label: m.country, value: m.active_ads }))} />
             </Card>
@@ -263,8 +271,7 @@ export default function Product360({ params }: { params: { id: string } }) {
               <div className="grid grid-cols-1 gap-x-6 text-sm sm:grid-cols-2">
                 {[["Advertisers", f.advertiser_count], ["New advertisers 7d", f.new_advertisers_7d], ["Active ads", f.active_ads], ["New ads 7d", f.new_ads_7d],
                   ["Ads running >30d", f.ads_running_30d], ["Creative duplication", fmt.pct(f.creative_duplication)], ["Stores", f.store_count],
-                  ["Traffic (est.)", fmt.n(f.estimated_traffic)], ["Traffic growth", `${fmt.n(f.traffic_growth)}%`], ["Search trend", `${fmt.n(p.search_trend)}%`],
-                  ["Keyword competition", fmt.pct(p.keyword_competition, 0)], ["Price trend 14d", fmt.signedPct(f.price_trend, 1)]].map(([l, v]) => (
+                  ["Price trend 14d", fmt.signedPct(f.price_trend, 1)]].map(([l, v]) => (
                   <div key={l as string}>
                     <div className="flex justify-between py-1.5"><span className="text-muted-foreground">{l}</span><span className="tnum font-medium">{v as any}</span></div>
                     <Separator />
@@ -282,13 +289,12 @@ export default function Product360({ params }: { params: { id: string } }) {
                 </Table>
               </ScrollArea>
             </Card>
-            <Card title={`Stores & traffic (${data.stores.length})`} pad={false}>
+            <Card title={`Cửa hàng (${data.stores.length})`} pad={false}>
               <ScrollArea className="max-h-80 overflow-y-auto">
                 <Table>
-                  <TableHeader><TableRow><TableHead>Domain</TableHead><TableHead>Country</TableHead><TableHead className="text-right">Price</TableHead><TableHead className="text-right">Traffic</TableHead><TableHead className="text-right">Growth</TableHead></TableRow></TableHeader>
+                  <TableHeader><TableRow><TableHead>Domain</TableHead><TableHead>Country</TableHead><TableHead className="text-right">Price</TableHead></TableRow></TableHeader>
                   <TableBody>{data.stores.map((s: any) => (
-                    <TableRow key={s.domain}><TableCell>{s.domain}</TableCell><TableCell>{s.country}</TableCell><TableCell className="tnum text-right">{fmt.n(s.price, 1)}</TableCell><TableCell className="tnum text-right">{fmt.n(s.traffic)}</TableCell>
-                      <TableCell className={cn("tnum text-right", s.traffic_growth > 0 ? "text-good-text" : "text-critical")}>{fmt.n(s.traffic_growth)}%</TableCell></TableRow>
+                    <TableRow key={s.domain}><TableCell>{s.domain}</TableCell><TableCell>{s.country}</TableCell><TableCell className="tnum text-right">{fmt.n(s.price, 1)}</TableCell></TableRow>
                   ))}</TableBody>
                 </Table>
                 {!data.stores.length && <Empty>Chưa có dữ liệu store (Similarweb / store tracking).</Empty>}

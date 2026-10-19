@@ -12,48 +12,34 @@ from sqlalchemy.orm import Session
 
 from .db import ReadOnlyGets, get_db
 from .markets import ad_scope_filter, expand, product_in_scope
-from .models import (ad_in_country, Ad, Advertiser, AdvertiserDailySnapshot, Alert, Comment, Connector, LifecycleEvent,
+from .models import (ad_in_country, Ad, Advertiser, AdvertiserDailySnapshot, Comment, Connector, Event, LifecycleEvent,
                      Product, ProductDailySnapshot, Store)
-from .services import agent, llm
+from .services import agent, llm, naming
 from .services.connectors import (CSV_TEMPLATES, ENTITY_TYPES, ensure_default_connectors, manual_url_record, normalize_pending,
                                   parse_csv, store_raw)
 from .services.decision import LIFECYCLE_STATES, TRANSITIONS, transition
-from .services.engine import is_hidden_winner, is_potential_winner, score_all
+from .services.engine import is_hidden_winner, is_test_candidate, rescore_products, score_all
 from .services.enrichment import ASPECTS
-from .services.entity_resolution import merge_products
+from .services import clustering
+from .services.entity_resolution import MATCH_THRESHOLD, find_best_match, merge_products, split_ads
 from .services.pipeline import run_pipeline
-from .services.scoring import confidence_label, win_label
+from .services.scoring import confidence_label
 
 app = FastAPI(title="Market Intelligence OS", version="0.1.0")
 
 
-class AdminGuard:
-    """ASGI middleware: every write (non GET/HEAD/OPTIONS) needs `X-Admin-Token` = ADMIN_TOKEN (.env). Fails closed when
-    unset. /api/ingest/* uses X-Ingest-Token, the Allegro bot callback its job token + secret, /api/agent/v1/* Bearer GROK_TOOL_TOKEN; /api/health stays open for probes."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
-            path = scope["path"]
-            # Grok Bot paths authenticate in the route: callback = job token + X-Callback-Secret, /api/agent/v1 = Bearer GROK_TOOL_TOKEN
-            if not path.startswith(("/api/ingest/", "/api/eu-market/allegro/callback/", "/api/agent/v1/")) and path not in ("/api/health", "/api/imports/allegro"):  # bridge route checks X-ToolSpy-Token itself
-                want = os.getenv("ADMIN_TOKEN")
-                got = next((v.decode() for k, v in scope["headers"] if k == b"x-admin-token"), None)
-                if not want:
-                    return await JSONResponse({"detail": "ADMIN_TOKEN not configured"}, status_code=503)(scope, receive, send)
-                if got != want:
-                    return await JSONResponse({"detail": "invalid admin token (header X-Admin-Token)"}, status_code=401)(scope, receive, send)
-        await self.app(scope, receive, send)
-
-
 app.add_middleware(ReadOnlyGets)
-app.add_middleware(AdminGuard)
+from .workspace.auth import SessionGuard
+from .workspace.accounts import router as accounts_router
+from .workspace.routes import router as workspace_router
+
+app.add_middleware(SessionGuard)
+app.include_router(accounts_router)
+app.include_router(workspace_router)
 # CORS last = outermost, so 401/503 from the guard still carry CORS headers for the browser
 app.add_middleware(CORSMiddleware, allow_origin_regex=r"chrome-extension://[a-p]{32}",  # Browser Bridge
                    allow_origins=[o.strip() for o in os.getenv("WEB_ORIGIN", "http://localhost:3000").split(",") if o.strip()],
-                   allow_methods=["*"], allow_headers=["*"])
+                   allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 
 from .routers.intel import router as intel_router  # noqa: E402
@@ -63,6 +49,30 @@ app.include_router(intel_router)
 from .visual.routes import router as visual_router  # noqa: E402 — global image search (docs/IMAGE_SEARCH.md)
 
 app.include_router(visual_router)
+from .routers.clusters import router as clusters_router
+
+app.include_router(clusters_router)
+from .routers.allocations import router as allocations_router  # noqa: E402 — Phase 2 exclusive product allocation
+
+app.include_router(allocations_router)
+from .routers.behavior import router as behavior_router  # noqa: E402 — Phase 3 MKT behavior tracking
+
+app.include_router(behavior_router)
+from .routers.preferences import router as preferences_router  # noqa: E402 — Phase 4 MKT preference profile
+
+app.include_router(preferences_router)
+from .routers.recommendations import router as recommendations_router  # noqa: E402 — Phase 5 personalized recommendations
+
+app.include_router(recommendations_router)
+from .routers.similar import router as similar_router  # noqa: E402 — Phase 6 similar ads & products
+
+app.include_router(similar_router)
+from .routers.library import router as library_router  # noqa: E402 — Phase 8 personalized Library
+
+app.include_router(library_router)
+from .engagement.routes import router as engagement_router  # noqa: E402 — likes / comments / shares / views per ad, N/A when unknown
+
+app.include_router(engagement_router)
 
 from .pricing.routes import router as pricing_router  # noqa: E402 — background price enrichment (docs/PRICE_INTELLIGENCE.md)
 
@@ -106,7 +116,14 @@ async def _startup():
     logging.basicConfig(level=logging.INFO)
     for noisy in ("httpx", "httpcore"):  # one INFO line per request, with the full (signed) CDN URL — drowns real logs
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    auto_migrate()
+    from .workspace.migrate import migrate
+    migrate()
+    from .cluster_migrate import migrate as migrate_clusters
+    migrate_clusters()
+    from .similar import migrate as migrate_similar
+    migrate_similar()
+    from .personalization_migrate import migrate as migrate_personalization
+    migrate_personalization()
     with SessionLocal() as db:
         ensure_default_connectors(db)
         from sqlalchemy import update
@@ -134,21 +151,34 @@ async def _startup():
         logging.getLogger(__name__).info("media: %s lost creatives re-queued", requeue_lost())
         enqueue_pending()
         app.state.scheduler = asyncio.create_task(scheduler_loop())
+        from .workspace.worker import tracker_loop
+        app.state.competitor_scheduler = asyncio.create_task(tracker_loop())
+
+
+@app.on_event("shutdown")
+async def _shutdown_workspace():
+    import asyncio
+    tasks = [getattr(app.state, key, None) for key in ("scheduler", "competitor_scheduler")]
+    for task in tasks:
+        if task:
+            task.cancel()
+    await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
 
 
 # ============================================================ serializers
 def product_card(p: Product) -> dict:
     f = p.features or {}
     return {
-        "id": p.id, "product_code": p.product_code, "name": p.canonical_name, "category": p.category,
-        "country": p.country, "markets": f.get("markets", []), "price": f.get("avg_price") or p.price, "currency": p.currency,
+        "id": p.id, "product_code": p.product_code, **naming.card_fields(p), "category": p.category,
+        "country": p.country, "markets": f.get("markets", []),
+        "price": p.price if p.price and p.currency else f.get("avg_price"),
+        "currency": p.currency if p.price and p.currency else "USD" if f.get("avg_price") else None,
         "lifecycle": p.lifecycle_status, "recommendation": p.recommendation, "reasons": p.recommendation_reasons,
-        "win_score": p.win_score, "external_win_score": p.external_win_score,
-        "rarity_score": p.rarity_score, "rare_winner_score": p.rare_winner_score, "saturation_score": p.saturation_score,
+        "rarity_score": p.rarity_score, "saturation_score": p.saturation_score,
         "saturation_state": p.saturation_state, "opportunity_score": p.opportunity_score, "confidence_score": p.confidence_score,
-        "confidence_label": confidence_label(p.confidence_score), "win_label": win_label(p.win_score),
+        "confidence_label": confidence_label(p.confidence_score),
         "sentiment_score": p.sentiment_score,
-        "advertisers": f.get("advertiser_count", 0), "active_ads": f.get("active_ads", 0), "new_ads_7d": f.get("new_ads_7d", 0),
+        "advertisers": f.get("advertiser_count", 0), "active_ads": f.get("active_ads", 0), "unique_ads": f.get("unique_ads", f.get("active_ads", 0)), "new_ads_7d": f.get("new_ads_7d", 0),
         "growth_7d": f.get("creative_growth_7d", 0), "stores": f.get("store_count", 0), "traffic_growth": f.get("traffic_growth"),
         "tags": p.tags or [],
         "first_seen_at": p.first_seen_at, "last_seen_at": p.last_seen_at, "hidden_winner": is_hidden_winner(p),
@@ -162,9 +192,22 @@ from .models import ADS_ONLY
 from .routers.intel import platform_signals
 
 
+def _known_sum(values) -> int | None:
+    """Sum of the numbers a source really reported; None when none did (unknown is not 0)."""
+    vals = [v for v in values if v is not None]
+    return sum(vals) if vals else None
+
+
+@app.get("/api/naming/stats")
+def naming_stats(db: Session = Depends(get_db)):
+    """Naming dashboard: named / unnamed / review / errors, confidence, provider tokens + live quota (naming_ai.py, llm_providers.py)."""
+    from . import naming_ai
+
+    return naming_ai.stats(db)
+
+
 @app.get("/api/meta")
 def meta(db: Session = Depends(get_db)):
-    countries = sorted({c for p in db.scalars(select(Product)).all() for c in (p.features or {}).get("markets", [])})
     cats = sorted({c for c in db.scalars(select(Product.category).distinct()).all() if c})
     from .markets import REGION_LABEL, REGIONS, targets as _targets
 
@@ -200,7 +243,6 @@ def _pulse(country: str | None, db: Session) -> dict:
     from .services import hidden as _hidden
 
     hidden = [r["product"] for r in _hidden.compute(db, country)]
-    alerts = db.scalars(select(Alert).order_by(Alert.created_at.desc(), Alert.id.desc()).limit(8)).all()
     trend = db.execute(select(ProductDailySnapshot.date, func.sum(ProductDailySnapshot.new_ads), func.sum(ProductDailySnapshot.active_ads))
                        .group_by(ProductDailySnapshot.date).order_by(ProductDailySnapshot.date)).all()
     recs = Counter(p.recommendation for p in products)
@@ -208,29 +250,29 @@ def _pulse(country: str | None, db: Session) -> dict:
         "country": country,
         "kpis": {
             "products_monitored": len(products), "new_products": len(new_products), "new_active_ads": len(new_ads),
-            "new_advertisers": len(new_adv_ids), "potential_winners": sum(1 for p in products if is_potential_winner(p)),
+            "new_advertisers": len(new_adv_ids), "test_candidates": sum(1 for p in products if is_test_candidate(p)),
             "hidden_winners": len(hidden), "saturated_products": sum(1 for p in products if p.saturation_state in ("Highly Saturated", "Declining")),
         },
         "recommendations": dict(recs),
         "top_hidden_winners": [product_card(p) for p in hidden[:5]],
         "top_opportunities": [product_card(p) for p in sorted(products, key=lambda p: -p.opportunity_score)[:8]],
-        "alerts": [alert_dict(a, db) for a in alerts],
         "ads_trend": [{"date": d.isoformat(), "new_ads": n or 0, "active_ads": a or 0} for d, n, a in trend],
     }
 
 
 # ============================================================ Product Explorer
+V1_SORTS = {"win_score", "external_win_score", "rare_winner_score"}  # generation-1 scores: stored, never ranked on
 @app.get("/api/products")
 def list_products(q: str | None = None, country: str | None = None, category: str | None = None,
-                  recommendation: str | None = None, lifecycle: str | None = None, min_win: float | None = None,
+                  recommendation: str | None = None, lifecycle: str | None = None,
                   max_advertisers: int | None = None, min_confidence: float | None = None, saturation_state: str | None = None,
-                  hidden_only: bool = False, sort: str = "opportunity_score", order: str = "desc",
+                  hidden_only: bool = False, sort: str = "opportunity_score", order: str = "desc", name_status: str | None = None,
                   limit: int = Query(50, le=500), offset: int = 0, db: Session = Depends(get_db)):
     from .models import ProductAlias
 
     pq = select(Product)
     if q:
-        pq = pq.where(or_(Product.canonical_name.ilike(f"%{q}%"), Product.product_code == q.upper(),
+        pq = pq.where(or_(Product.canonical_name.ilike(f"%{q}%"), Product.name_vi.ilike(f"%{q}%"), Product.product_code == q.upper(),
                           Product.id.in_(select(ProductAlias.product_id).where(ProductAlias.name.ilike(f"%{q}%")))))
     if not country:  # ponytail: in_target NULL (never scored) counts as out of scope
         pq = pq.where(Product.in_target.is_(True))
@@ -240,10 +282,11 @@ def list_products(q: str | None = None, country: str | None = None, category: st
     for col, val in ((Product.recommendation, recommendation), (Product.lifecycle_status, lifecycle), (Product.saturation_state, saturation_state)):
         if val:
             pq = pq.where(col == val)
-    if min_win is not None:
-        pq = pq.where(Product.win_score >= min_win)
+    if name_status:  # "UNKNOWN" = the queue of unidentified products MKT names
+        pq = pq.where(Product.name_status.in_(name_status.upper().split(",")))
     if min_confidence is not None:
         pq = pq.where(Product.confidence_score >= min_confidence)
+    sort = "opportunity_score" if sort in V1_SORTS else sort  # old bookmarks (?sort=win_score) land on the v2 number
     col = Product.__table__.c.get({"name": "canonical_name"}.get(sort, sort))
     if col is not None and not country and max_advertisers is None and not hidden_only:  # fast path: everything in SQL
         total = db.scalar(select(func.count()).select_from(pq.subquery()))
@@ -258,7 +301,7 @@ def list_products(q: str | None = None, country: str | None = None, category: st
 
 
 @app.get("/api/products/hidden-winners")
-def hidden_winners(tag: str | None = None, scope: str | None = None, limit: int = Query(50, le=500), offset: int = 0,
+def hidden_winners(tag: str | None = None, scope: str | None = None, status: str = "CONFIRMED", limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
                    db: Session = Depends(get_db)):
     """Few sellers + real winning signals (long-running / duplicated / multiplying ads), computed live from the ads."""
     from .routers.intel import covers, landing_links
@@ -266,7 +309,11 @@ def hidden_winners(tag: str | None = None, scope: str | None = None, limit: int 
     from .routers.intel import product_card as media_card
     from .services import hidden
 
-    allrows = cached(("hidden", scope), lambda: hidden.compute(db, scope))
+    if status not in hidden.STATUS_LABELS:
+        raise HTTPException(422, "status = CONFIRMED | WATCH | REJECTED")
+    assessed = cached(("hidden-v3", scope), lambda: hidden.compute(db, scope, include_unconfirmed=True))
+    status_counts = Counter(r["status"] for r in assessed)
+    allrows = [r for r in assessed if r["status"] == status]
     tags = Counter(t for r in allrows for t in r["tags"])  # counts before the tag filter → every chip shows its number
     tagged = [r for r in allrows if not tag or tag in r["tags"]]
     rows = tagged[offset: offset + limit]
@@ -274,19 +321,22 @@ def hidden_winners(tag: str | None = None, scope: str | None = None, limit: int 
     cov, lp = covers(db, prods), landing_links(db, prods)
     out = [media_card(r["product"], cov.get(r["product"].id)) | {k: v for k, v in r.items() if k != "product"}
            | {"landing_url": lp.get(r["product"].id)} for r in rows]
-    return {"rows": out, "total": len(allrows), "has_more": offset + len(rows) < len(tagged), "tags": dict(tags), "tag_labels": hidden.TAGS}
+    return {"rows": out, "total": len(tagged), "all_total": len(allrows),
+            "has_more": offset + len(rows) < len(tagged), "tags": dict(tags), "tag_labels": hidden.TAGS,
+            "status_counts": dict(status_counts), "status_labels": hidden.STATUS_LABELS}
 
 
 # ============================================================ Product 360
 from .services.spy import SKIP_HOST as _SKIP_HOST
 
 
-def mkt_summary(ads: list[Ad], advs: dict) -> dict:
+def mkt_summary(ads: list[Ad], advs: dict, observations=()) -> dict:
     """What a marketer checks first: floor price per marketplace, supplier price → margin, engagement on the ads,
     marketplace proof (reviews / sold / rank), how long the ads have run and where they send traffic."""
     from urllib.parse import urlparse
 
-    from .services.enrichment import to_usd
+    from .services.enrichment import to_usd, FX_TO_USD
+    from .pricing.models import VERIFIED_COMPETITOR, VERIFIED_MARKETPLACE
 
     listings = [a for a in ads if a.channel == "commerce"]
     spy = [a for a in ads if a.channel != "commerce" and not a.is_internal]
@@ -305,6 +355,23 @@ def mkt_summary(ads: list[Ad], advs: dict) -> dict:
     supplier = floor.get("aliexpress", {}).get("usd")
     # competitor price = what the ADS sell at (copy or landing page) — never a marketplace median dressed up as one
     sell = ad_prices[len(ad_prices) // 2] if ad_prices else None
+    # Verified router observations feed detail-page margins; snippets/look-alikes never become costs.
+    verified_prices = {}
+    for observation in observations:
+        if (not observation.price_amount or observation.currency not in FX_TO_USD
+            or observation.price_confidence < .7 or observation.match_confidence < .8
+            or not observation.expires_at or observation.expires_at <= datetime.utcnow()):
+            continue
+        key = (observation.price_type, observation.source_url, observation.seller)
+        if key not in verified_prices or observation.observed_at > verified_prices[key].observed_at:
+            verified_prices[key] = observation
+    cached_sell = sorted(to_usd(o.price_amount, o.currency) for o in verified_prices.values() if o.price_type == VERIFIED_COMPETITOR)
+    cached_supplier = [to_usd(o.price_amount, o.currency) for o in verified_prices.values()
+                       if o.price_type == VERIFIED_MARKETPLACE and (o.evidence or {}).get("role") == "supplier"]
+    if sell is None and cached_sell:
+        sell = cached_sell[len(cached_sell) // 2]
+    if cached_supplier:
+        supplier = min(([supplier] if supplier else []) + cached_supplier)
     retail_med = retail[len(retail) // 2] if retail else None
     by_adv: dict = defaultdict(list)
     for a in priced:
@@ -325,6 +392,7 @@ def mkt_summary(ads: list[Ad], advs: dict) -> dict:
         "floor": sorted(floor.values(), key=lambda r: r["usd"]),
         "floor_usd": min((r["usd"] for r in floor.values() if r["network"] != "aliexpress"), default=None),
         "supplier_usd": supplier,
+        "verified_cache_prices": len(cached_sell) + len(cached_supplier),
         "sell_usd": round(sell, 2) if sell else None,  # median of competitor selling prices (ads only)
         "retail_usd": round(retail_med, 2) if retail_med else None,  # Walmart / Amazon listings — shown separately
         "ad_price_range_usd": [round(ad_prices[0], 2), round(ad_prices[-1], 2)] if ad_prices else None,
@@ -334,8 +402,10 @@ def mkt_summary(ads: list[Ad], advs: dict) -> dict:
                            "inbox": sum(1 for a in spy if not a.landing_url or _SKIP_HOST.search(urlparse(a.landing_url).netloc))},
         "sell_by_advertiser": adv_prices[:10],
         "margin_est": round(1 - supplier * 1.6 / sell, 3) if supplier and sell else None,  # landed ≈ supplier × 1.6
-        "engagement": {"likes": sum(a.likes or 0 for a in spy), "comments": sum(a.comments_count or 0 for a in spy),
-                       "shares": sum(a.shares or 0 for a in spy), "views": sum(a.views or 0 for a in ads),
+        # None = no ad of the product reported it (Meta Ad Library never does) → N/A on the card, never a fake 0
+        "engagement": {"likes": _known_sum(a.likes for a in spy), "comments": _known_sum(a.comments_count for a in spy),
+                       "shares": _known_sum(a.shares for a in spy), "views": _known_sum(a.views for a in ads),
+                       "ads_reporting": sum(1 for a in spy if a.likes is not None or a.comments_count is not None or a.shares is not None),
                        "page_likes": max((a.page_likes or 0 for a in spy), default=0) or None},
         "marketplace": {"listings": len(listings), "reviews": sum(a.review_count or 0 for a in listings),
                         "sold": sum(a.sold_count or 0 for a in listings),
@@ -384,7 +454,7 @@ def product_360(pid: int, db: Session = Depends(get_db)):
         c["active"] += 1 if a.is_active else 0
         c["first_seen"] = min(c["first_seen"], a.first_seen_at)
         c["longest_days"] = max(c["longest_days"], (a.last_seen_at - a.first_seen_at).days)
-        c["engagement"] += a.likes + 3 * a.comments_count + 5 * a.shares
+        c["engagement"] += (a.likes or 0) + 3 * (a.comments_count or 0) + 5 * (a.shares or 0)
         c["platforms"].add(a.platform)
         if a.country:
             c["countries"].add(a.country)
@@ -400,13 +470,25 @@ def product_360(pid: int, db: Session = Depends(get_db)):
     offers = Counter(o for a in ads if a.is_active and a.offer for o in a.offer.split(","))
     price_points = sorted([{"date": a.first_seen_at.date().isoformat(), "price": a.price, "country": a.country} for a in ads if a.price],
                           key=lambda x: x["date"])
+    from .pricing.models import PriceObservation
+    price_observations = list(db.scalars(select(PriceObservation).where(
+        or_(PriceObservation.cluster_key == f"product:{pid}", PriceObservation.subject == f"product:{pid}"),
+        PriceObservation.expires_at > datetime.utcnow()).order_by(PriceObservation.observed_at.desc()).limit(100)))
     return {
-        "product": {**product_card(p), "brand": p.brand, "cost": p.cost, "language": p.language,
+        "product": {**product_card(p), "opportunity_raw": ((p.potential or {}).get("vector") or {}).get("opportunity_raw"), "brand": p.brand, "cost": p.cost, "language": p.language,
                     "search_trend": p.search_trend, "keyword_competition": p.keyword_competition,
-                    "aliases": [{"name": a.name, "source": a.source, "match_score": a.match_score} for a in p.aliases]},
+                    "aliases": [{"name": a.name, "source": a.source, "match_score": a.match_score} for a in p.aliases],
+                    "name_evidence": p.name_evidence or [], "name_history": list(reversed(p.name_history or [])),
+                    "advertiser": advertisers[0]["name"] if advertisers else None},
+        # every ad of the cluster, for "Tách cụm" (split) — ad type + the name its own evidence gives
+        "cluster_ads": [{"id": a.id, "advertiser": advs[a.advertiser_id].name if a.advertiser_id in advs else None,
+                         "text": (a.ad_text or a.title or "")[:160], "evidence_name": a.raw_product_name, "name_source": a.name_source,
+                         "ad_type": a.ad_type, "network": a.network, "channel": a.channel, "landing_url": a.landing_url,
+                         "first_seen": a.first_seen_at, "active": a.is_active} for a in ads[:300]],
         "features": {k: v for k, v in f.items() if not k.startswith("_")},
-        "breakdown": f.get("_breakdown", {}), "derived": f.get("_scores", {}),
-        "mkt": mkt_summary(ads, advs),
+        "breakdown": {k: v for k, v in f.get("_breakdown", {}).items() if k != "external"},
+        "derived": {k: v for k, v in f.get("_scores", {}).items() if k != "opportunity_raw"},
+        "mkt": mkt_summary(ads, advs, price_observations),
         "market_performance": [{"country": c, "active_ads": n} for c, n in by_country.most_common()],
         "advertisers": advertisers[:50],
         "creatives": creative_lib,
@@ -416,8 +498,7 @@ def product_360(pid: int, db: Session = Depends(get_db)):
         "pricing": {"points": price_points[-200:], "avg": f.get("avg_price"), "trend": f.get("price_trend")},
         "comments": comment_summary(db, [pid]),
         "timeseries": [{"date": s.date.isoformat(), "active_ads": s.active_ads, "new_ads": s.new_ads, "advertisers": s.advertisers,
-                        "external_win": s.external_win_score, "saturation": s.saturation_score, "opportunity": s.opportunity_score,
-                        "rarity": s.rarity_score, "negative_comments": s.negative_comments, "comments": s.comments} for s in snaps],
+                        "saturation": s.saturation_score, "negative_comments": s.negative_comments, "comments": s.comments} for s in snaps],
         "lifecycle": {"current": p.lifecycle_status, "allowed": sorted(TRANSITIONS.get(p.lifecycle_status, [])),
                       "events": [{"from": e.from_status, "to": e.to_status, "reason": e.reason, "at": e.created_at} for e in events]},
         "recent_ads": [{"id": a.id, "advertiser": advs[a.advertiser_id].name if a.advertiser_id in advs else None, "country": a.country,
@@ -457,6 +538,7 @@ def explain(pid: int, db: Session = Depends(get_db)):
 class MergeIn(BaseModel):
     source_id: int
     target_id: int
+    user: str | None = None
 
 
 @app.post("/api/products/merge")
@@ -464,10 +546,110 @@ def merge(body: MergeIn, db: Session = Depends(get_db)):
     s, t = db.get(Product, body.source_id), db.get(Product, body.target_id)
     if not s or not t or s.id == t.id:
         raise HTTPException(400, "invalid products")
-    merge_products(db, s, t)
-    score_all(db)
+    merge_products(db, s, t, by=body.user)
+    rescore_products(db, {t.id})  # was score_all: minutes of rescoring the whole catalogue for one merge
     db.commit()
     return {"ok": True, "target_id": t.id}
+
+
+# ============================================================ naming (MKT): edit · confirm · undo · split · unmerge
+def _product(db: Session, pid: int) -> Product:
+    p = db.get(Product, pid)
+    if not p:
+        raise HTTPException(404, "Product not found")
+    return p
+
+
+def _duplicate_of(db: Session, p: Product) -> dict | None:
+    """Another product already under this name → the UI offers to merge (never automatic)."""
+    other, score = find_best_match(db, {"name": p.canonical_name, "category": p.category})
+    if other is not None and other.id != p.id and score >= MATCH_THRESHOLD and other.name_status != "UNKNOWN":
+        return {"id": other.id, "name": naming.display_name(other), "product_code": other.product_code, "score": round(score, 2)}
+    return None
+
+
+class NameIn(BaseModel):
+    name: str | None = None  # canonical (matching) name — English / source language
+    name_vi: str | None = None  # what MKT reads; "" clears it
+    user: str | None = None
+
+
+@app.patch("/api/products/{pid}/name")
+def set_product_name(pid: int, body: NameIn, db: Session = Depends(get_db)):
+    p = _product(db, pid)
+    if not (body.name or "").strip() and body.name_vi is None:
+        raise HTTPException(400, "name or name_vi required")
+    if p.name_status == "UNKNOWN" and not (body.name or "").strip() and (body.name_vi or "").strip():
+        body.name = body.name_vi  # an unidentified product named in Vietnamese only: that is its name too
+    naming.set_name(p, body.name, body.name_vi, body.user)
+    db.commit()
+    return {"ok": True, "product": product_card(p), "duplicate": _duplicate_of(db, p)}
+
+
+class ByIn(BaseModel):
+    user: str | None = None
+
+
+@app.post("/api/products/{pid}/name/confirm")
+def confirm_product_name(pid: int, body: ByIn, db: Session = Depends(get_db)):
+    p = _product(db, pid)
+    if p.name_status == "UNKNOWN":
+        raise HTTPException(400, "Chưa có tên để xác nhận — nhập tên sản phẩm")
+    naming.confirm(p, body.user)
+    db.commit()
+    return {"ok": True, "product": product_card(p)}
+
+
+@app.post("/api/products/{pid}/name/undo")
+def undo_product_name(pid: int, db: Session = Depends(get_db)):
+    p = _product(db, pid)
+    if not naming.undo(p):
+        raise HTTPException(400, "Không có thay đổi nào để hoàn tác")
+    db.commit()
+    return {"ok": True, "product": product_card(p)}
+
+
+class SplitIn(BaseModel):
+    ad_ids: list[int]
+    name: str | None = None
+    name_vi: str | None = None
+    user: str | None = None
+
+
+@app.post("/api/products/{pid}/split")
+def split_product(pid: int, body: SplitIn, db: Session = Depends(get_db)):
+    """Selected ads leave this product for a new one (named by MKT, or 'Chưa xác định sản phẩm')."""
+    p = _product(db, pid)
+    try:
+        new = split_ads(db, p, body.ad_ids, (body.name or "").strip() or None, body.user, body.name_vi)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    clustering.record_cannot_link(db, p.id, new.id, body.user)  # MKT separated them: never auto-merge them back
+    rescore_products(db, {p.id, new.id})
+    db.commit()
+    return {"ok": True, "new_id": new.id, "duplicate": _duplicate_of(db, new) if new.name_status != "UNKNOWN" else None}
+
+
+@app.get("/api/products/{pid}/merges")
+def product_merges(pid: int, db: Session = Depends(get_db)):
+    """Merges into / splits out of this product, newest first — what Hoàn tác can revert."""
+    rows = db.scalars(select(Event).where(Event.product_id == pid, Event.type.in_(["PRODUCT_MERGED", "PRODUCT_SPLIT"]))
+                      .order_by(Event.created_at.desc()).limit(20)).all()
+    return [{"id": e.id, "type": e.type, "at": e.created_at, **{k: v for k, v in (e.data or {}).items() if k != "ad_ids"},
+             "ads": len((e.data or {}).get("ad_ids") or []), "undone": bool((e.data or {}).get("undone"))} for e in rows]
+
+
+@app.post("/api/products/{pid}/merges/{eid}/undo")
+def undo_merge(pid: int, eid: int, body: ByIn, db: Session = Depends(get_db)):
+    """Merge undone = its ads split back out under the old name; split undone = the split product merged back."""
+    _product(db, pid)
+    try:
+        touched = clustering.undo_event(db, pid, eid, body.user)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    rescore_products(db, touched)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/products/{pid}/scan")
@@ -527,7 +709,7 @@ def comment_summary(db: Session, product_ids: list[int] | None = None) -> dict:
 
 
 # ============================================================ Competitor Radar
-@app.get("/api/competitors")
+@app.get("/api/competitor-radar")
 def competitors(country: str | None = None, watched_only: bool = False, offset: int = 0, limit: int = Query(50, le=500),
                 db: Session = Depends(get_db)):
     from .routers.intel import cached
@@ -572,7 +754,7 @@ def _competitor_rows(country: str | None, watched_only: bool, db: Session) -> li
     return rows
 
 
-@app.get("/api/competitors/{aid}")
+@app.get("/api/competitor-radar/{aid}")
 def competitor_detail(aid: int, db: Session = Depends(get_db)):
     adv = db.get(Advertiser, aid)
     if not adv:
@@ -588,49 +770,17 @@ def competitor_detail(aid: int, db: Session = Depends(get_db)):
             "stores": [{"domain": s.domain, "traffic": s.estimated_traffic, "growth": s.traffic_growth} for s in stores]}
 
 
-@app.post("/api/competitors/{aid}/watch")
+@app.post("/api/competitor-radar/{aid}/watch")
 def watch(aid: int, watched: bool = True, db: Session = Depends(get_db)):
     adv = db.get(Advertiser, aid)
     if not adv:
         raise HTTPException(404)
     adv.is_competitor_watched = watched
     db.commit()
-    return {"ok": True}
+    from .routers.intel import _cache
 
-
-# ============================================================ Alerts
-def alert_dict(a: Alert, db: Session | None = None) -> dict:
-    return {"id": a.id, "type": a.type, "severity": a.severity, "title": a.title, "message": a.message, "product_id": a.product_id,
-            "advertiser_id": a.advertiser_id, "data": a.data, "created_at": a.created_at, "is_read": a.is_read}
-
-
-@app.get("/api/alerts")
-def alerts(type: str | None = None, unread: bool = False, limit: int = Query(200, le=500), db: Session = Depends(get_db)):
-    q = select(Alert).order_by(Alert.created_at.desc(), Alert.id.desc())
-    if type:  # "EU_*" = prefix match (EU Market alert family)
-        q = q.where(Alert.type.like(f"{type[:-1]}%") if type.endswith("*") else Alert.type == type)
-    if unread:
-        q = q.where(Alert.is_read.is_(False))
-    rows = db.scalars(q.limit(limit)).all()
-    counts = dict(db.execute(select(Alert.type, func.count(Alert.id)).group_by(Alert.type)).all())
-    return {"rows": [alert_dict(a) for a in rows], "counts": counts,
-            "unread": db.scalar(select(func.count(Alert.id)).where(Alert.is_read.is_(False)))}
-
-
-@app.post("/api/alerts/{aid}/read")
-def read_alert(aid: int, db: Session = Depends(get_db)):
-    a = db.get(Alert, aid)
-    if a:
-        a.is_read = True
-        db.commit()
-    return {"ok": True}
-
-
-@app.post("/api/alerts/read-all")
-def read_all(db: Session = Depends(get_db)):
-    for a in db.scalars(select(Alert).where(Alert.is_read.is_(False))).all():
-        a.is_read = True
-    db.commit()
+    for k in [k for k in _cache if isinstance(k, tuple) and k and k[0] == "competitors"]:  # the list is memoised 60 s: a watch must show at once
+        _cache.pop(k, None)
     return {"ok": True}
 
 

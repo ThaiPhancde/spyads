@@ -1,101 +1,101 @@
-"""Hidden Winners — the ONE definition used everywhere (page, dashboard, product cards, alerts, agent, snapshots).
-What the Ad Library actually shows: few sellers, but ads that keep running / get duplicated / multiply this week.
-No internal sales data or comments needed. engine.score_product stores evaluate()'s result on the product
-(features["hidden_score"], tags); compute() re-evaluates live for a market scope.
-
-  score = 40% strongest ad (force: days running + variants + placements)
-        + 25% rarity (fewer advertisers → higher)
-        + 20% growth (new ads in the last 7 days)
-        + 15% scaling (active duplicated variants)
-"""
+"""Hidden Winner is a supplementary evidence verdict, ranked solely by Opportunity v2."""
 from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from ..markets import ad_scope_filter
-from ..models import ADS_ONLY, Ad, Product
-from ..platforms import REMOVED_NETWORKS
+from ..models import ADS_ONLY, Ad, Creative, Product, ProductDailySnapshot
+from ..visual.models import ProductImage
 from .adsignals import days_running
+from .product_evidence import advertiser_groups, activity_momentum, creative_replication, external_ads
 
-MAX_ADVERTISERS = 5  # "ít người chạy"
-MIN_SCORE = 55       # 0 → everything qualifies (≈ 470 products), 60 → too few; 55 ≈ the top ~40 %
-
-TAGS: dict[str, str] = {
-    "fast_growing": "🔥 Đang tăng nhanh",   # ≥ 2 new ads in 7 days, or creatives +30 % week over week
-    "proven": "⏳ Chạy lâu ≥ 90 ngày",       # an ad still running after 90 days = it pays for itself
-    "scaling": "📈 Đang nhân bản",           # ≥ 5 active duplicated variants
-    "rare": "💎 Chỉ 1 người bán",            # a single advertiser — nobody has copied it yet
-    "new_market": "🌍 Thị trường mới",       # appeared in a new country this week
-    "multi_market": "🗺 Nhiều thị trường",   # running in ≥ 3 countries
-}
+RULE_VERSION = 3
+MAX_ADVERTISERS = 3
+TAGS = {"momentum": "📈 Momentum đã xác nhận", "replication": "🎬 Creative nhân bản đã xác nhận",
+        "rare": "💎 Chỉ 1 nhà quảng cáo", "proven": "⏳ Có ad chạy ≥7 ngày", "multi_market": "🗺 Nhiều thị trường"}
+STATUS_LABELS = {"CONFIRMED": "Hidden Winner đã xác nhận", "WATCH": "Chưa xác nhận / Cần theo dõi",
+                 "REJECTED": "Không đạt điều kiện"}
 
 
-def evaluate(p: Product, ads: list[Ad], f: dict | None = None, now: datetime | None = None) -> dict | None:
-    """One product -> its hidden-winner row, or None. `ads` may be all of the product's rows: listings, viral posts and
-    our own ads are ignored here."""
-    if p.category == "non_product":
-        return None
+def assess(p, ads, *, snapshots=(), creatives=(), images=None, now=None):
     now = now or datetime.utcnow()
-    week = now - timedelta(days=7)
-    ads = [a for a in ads if a.channel in (None, "ads") and not a.is_internal and a.network not in REMOVED_NETWORKS]
+    ads = external_ads(ads)
     active = [a for a in ads if a.is_active]
-    if not active:
-        return None
-    n_adv = len({a.advertiser_id or a.page_id for a in ads})
-    if n_adv > MAX_ADVERTISERS:
-        return None
-    strongest = max(active, key=lambda a: a.force_score or 0)
-    force = strongest.force_score or 0
-    if force < 45:  # needs at least one strong ad (sonda tier "strong" or better)
-        return None
-    max_days = max(days_running(a, now) for a in active)
-    new_7d = sum(1 for a in ads if a.first_seen_at and a.first_seen_at >= week)
-    variants = sum(max((a.variants or 1) - 1, 0) for a in active)
-    countries = {c for a in active for c in (a.countries or [a.country]) if c and c != "ALL"}
-    f = f if f is not None else (p.features or {})
-    rarity = (1 - (n_adv - 1) / MAX_ADVERTISERS) * 100
-    score = round(0.40 * force + 0.25 * rarity + 0.20 * min(new_7d / 5, 1) * 100 + 0.15 * min(variants / 10, 1) * 100, 1)
-    if score < MIN_SCORE:
-        return None
-    tags = []
-    if new_7d >= 2 or f.get("creative_growth_7d", 0) >= 0.3:
-        tags.append("fast_growing")
-    if max_days >= 90:
-        tags.append("proven")
-    if variants >= 5:
-        tags.append("scaling")
-    if n_adv == 1:
+    advertisers, unknown = advertiser_groups(ads)
+    max_days = max((days_running(a, now) for a in active), default=0)
+    mom = activity_momentum(snapshots, ads, now)
+    replication = creative_replication(active, creatives, images)
+    checks = [
+        {"key": "advertisers", "passed": 1 <= len(advertisers) <= MAX_ADVERTISERS and not unknown,
+         "reason": f"{len(advertisers)} nhà quảng cáo duy nhất trong cụm sản phẩm" + ("; còn quảng cáo thiếu danh tính" if unknown else " (yêu cầu 1–3)")},
+        {"key": "longevity", "passed": max_days >= 7, "reason": f"Ad đang chạy lâu nhất: {max_days} ngày (yêu cầu ≥7)"},
+        {"key": "opportunity", "passed": bool(p.recommendation) and p.recommendation != "SKIP" and p.category != "non_product",
+         "reason": f"Khuyến nghị Opportunity v2: {p.recommendation or 'chưa chấm'}"},
+        {"key": "momentum_or_replication", "passed": mom["confirmed"] or replication["confirmed"],
+         "reason": " · ".join([mom["reason"], replication["reason"]])},
+    ]
+    rejected = p.recommendation == "SKIP" or p.category == "non_product" or len(advertisers) > MAX_ADVERTISERS or not active
+    status = "CONFIRMED" if all(c["passed"] for c in checks) else "REJECTED" if rejected else "WATCH"
+    countries = sorted({c for a in active for c in (a.countries or [a.country]) if c and c != "ALL"})
+    tags = (["momentum"] if mom["confirmed"] else []) + (["replication"] if replication["confirmed"] else [])
+    if len(advertisers) == 1 and not unknown:
         tags.append("rare")
-    if f.get("new_markets_7d"):
-        tags.append("new_market")
+    if max_days >= 7:
+        tags.append("proven")
     if len(countries) >= 3:
         tags.append("multi_market")
-    why = [f"{n_adv} người bán", f"ad mạnh nhất {force:.0f}/100 ({strongest.force_tier or '—'})", f"chạy {max_days} ngày"]
-    if new_7d:
-        why.append(f"+{new_7d} ads / 7 ngày")
-    if variants:
-        why.append(f"{variants} biến thể đang chạy")
-    return {"product": p, "score": score, "tags": tags, "why": why, "advertisers": n_adv, "active_ads": len(active),
-            "max_days": max_days, "new_7d": new_7d, "variants": variants, "force": force,
-            "strongest_ad_id": strongest.id, "countries": sorted(countries)}
+    return {"product": p, "rule_version": RULE_VERSION, "status": status, "status_label": STATUS_LABELS[status],
+            "tags": tags, "why": [c["reason"] for c in checks], "checks": checks, "momentum": mom,
+            "replication": replication, "advertisers": len(advertisers), "active_ads": len(active),
+            "max_days": max_days, "countries": countries}
 
 
-def compute(db: Session, scope: str | None = None) -> list[dict]:
-    """Live hidden winners for a market scope (only the ads that reached that scope count)."""
+def evaluate(p, ads, f=None, now=None, *, snapshots=(), creatives=(), images=None):
+    row = assess(p, ads, snapshots=snapshots, creatives=creatives, images=images, now=now)
+    return row if row["status"] == "CONFIRMED" else None
+
+
+def store_verdict(p, row):
+    verdict = {k: v for k, v in row.items() if k != "product"}
+    f = dict(p.features or {})
+    f.pop("hidden_score", None)
+    f["hidden_verdict"] = verdict
+    p.features = f
+    p.tags = row["tags"] if row["status"] == "CONFIRMED" else []
+
+
+def compute(db: Session, scope=None, include_unconfirmed=False):
     now = datetime.utcnow()
-    by_p: dict[int, list[Ad]] = defaultdict(list)
-    q = select(Ad).where(Ad.product_id.is_not(None), ADS_ONLY)
-    if (flt := ad_scope_filter(scope)) is not None:  # "ANY" = no market filter
-        q = q.where(flt)
+    by_p, cs, history, ims = defaultdict(list), defaultdict(list), defaultdict(list), {}
+    q = select(Ad).options(load_only(Ad.id, Ad.product_id, Ad.external_id, Ad.network, Ad.platform, Ad.channel,
+        Ad.is_internal, Ad.is_active, Ad.advertiser_id, Ad.page_id, Ad.first_seen_at, Ad.countries, Ad.country))
+    q = q.where(Ad.product_id.is_not(None), ADS_ONLY, Ad.is_internal.is_(False))
+    if (flt := ad_scope_filter(scope)) is not None:
+        # Scope chooses visible products; advertiser/creative evidence stays on the whole product cluster.
+        scoped_products = select(Ad.product_id).where(ADS_ONLY, Ad.is_internal.is_(False), Ad.is_active.is_(True), flt).correlate(None)
+        q = q.where(Ad.product_id.in_(scoped_products))
     for a in db.scalars(q):
         by_p[a.product_id].append(a)
     if not by_p:
         return []
-    prods = {p.id: p for p in db.scalars(select(Product).where(Product.id.in_(list(by_p))))}
-    out = [r for pid, ads in by_p.items() if pid in prods and (r := evaluate(prods[pid], ads, now=now))]
-    out.sort(key=lambda r: -r["score"])
-    return out
+    products = list(db.scalars(select(Product).where(Product.id.in_(by_p))))
+    eligible = [p.id for p in products if p.recommendation != "SKIP" and p.category != "non_product"]
+    active_ids = [a.id for pid in eligible for a in by_p[pid] if a.is_active]
+    for c in db.scalars(select(Creative).options(load_only(Creative.id, Creative.ad_id, Creative.product_id, Creative.phash,
+                      Creative.sha256, Creative.family_id, Creative.source_url)).where(Creative.product_id.in_(eligible), Creative.ad_id.in_(active_ids))):
+        cs[c.product_id].append(c)
+    cids = [c.id for lst in cs.values() for c in lst]
+    for im in db.scalars(select(ProductImage).options(load_only(ProductImage.source_id, ProductImage.phash, ProductImage.image_sha256,
+                         ProductImage.embedding, ProductImage.emb_model)).where(ProductImage.source == "creative", ProductImage.source_id.in_(cids))):
+        ims[im.source_id] = im
+    for snap in db.scalars(select(ProductDailySnapshot).where(ProductDailySnapshot.product_id.in_(eligible),
+                          ProductDailySnapshot.date >= now.date() - timedelta(days=14))):
+        history[snap.product_id].append(snap)
+    rows = [assess(p, by_p[p.id], snapshots=history[p.id], creatives=cs[p.id], images=ims, now=now) for p in products]
+    rows = [r for r in rows if include_unconfirmed or r["status"] == "CONFIRMED"]
+    rows.sort(key=lambda r: (-(r["product"].opportunity_score or 0), r["product"].id))
+    return rows

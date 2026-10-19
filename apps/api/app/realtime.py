@@ -78,6 +78,8 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                 rescore_products(db, stats["product_ids"])
                 c = db.get(Connector, cid)
                 c.status, c.health, c.last_error = "ok", "healthy", None
+                if not recs and c.adapter == "export":
+                    c.health = "waiting_file"
                 if not recs and c.adapter != "export":  # an empty watch folder is normal; blueprint §7: an empty result never means "no ads" — flag it, keep previous data untouched
                     c.health = "degraded"
                     c.last_error = "Nguồn trả về 0 kết quả — có thể bị chặn / đổi API; dữ liệu cũ được giữ nguyên"
@@ -108,6 +110,7 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
             c.health = "auth_expired" if isinstance(e, AuthExpired) else ("unknown" if isinstance(e, NotConfigured) else "error")
             c.last_error = "adapter removed" if isinstance(e, KeyError) else _redact(f"{type(e).__name__}: {e}")[:500]
             c.last_sync_at = datetime.utcnow()
+            c.last_sync_count, c.last_duration_ms = 0, int((time.perf_counter() - t0) * 1000)
             if query:
                 q = db.get(TrackedQuery, query.id)
                 q.last_run_at, q.last_error = datetime.utcnow(), c.last_error
@@ -329,7 +332,6 @@ _last_daily: datetime | None = None
 _last_cleanup = datetime.min
 _last_liveness = datetime.min
 REFRESH_HOURS = 6  # Tier 3: full re-score + market snapshots
-_last_alerts = datetime.min
 _last_media = datetime.min
 _last_spy = datetime.min
 _last_eu = datetime.min
@@ -341,7 +343,15 @@ EU_SYNC_EVERY_MIN = int(_os.getenv("EU_SYNC_EVERY_MIN", "360"))  # EU Market: wa
 IMAGE_INDEX_EVERY_MIN = float(_os.getenv("IMAGE_INDEX_EVERY_MIN", "1"))  # 0 = never index images in this worker
 SPY_EVERY_MIN = int(_os.getenv("SPY_EVERY_MIN", "10"))      # landing-price / review scan cadence
 SPY_URLS_PER_RUN = int(_os.getenv("SPY_URLS_PER_RUN", "40"))  # ≈ 40 store fetches / 10 min ≈ 5.7k / day — the whole backlog in a day
+ENGAGEMENT_EVERY_S = int(_os.getenv("ENGAGEMENT_EVERY_S", "30"))  # engagement queue (engagement/jobs.py); 0 = off in this worker
 PRICE_EVERY_S = int(_os.getenv("PRICE_EVERY_S", "30"))  # price enrichment queue (pricing/jobs.py); 0 = off in this worker
+NAMING_EVERY_MIN = float(_os.getenv("NAMING_EVERY_MIN", "3"))  # naming_jobs: model pass for unidentified products + Vietnamese names; 0 = off
+_last_naming = datetime.min
+CREATIVE_ENRICH_EVERY_MIN = float(_os.getenv("CREATIVE_ENRICH_EVERY_MIN", "10"))  # creative_enrich: OCR / transcript for unreadable TEST ads; 0 = off
+_last_creative = datetime.min
+CLUSTER_EVERY_MIN = float(_os.getenv("CLUSTER_EVERY_MIN", "180"))  # cluster_jobs: merge certain duplicate products, queue the rest for MKT; 0 = off
+_last_cluster = datetime.min
+_last_engagement = datetime.min
 
 _running: set[str] = set()
 MAX_PARALLEL_JOBS = int(_os.getenv("MAX_PARALLEL_JOBS", "2"))
@@ -353,7 +363,7 @@ _search_slots = threading.BoundedSemaphore(LIVE_SEARCH_SLOTS)
 
 
 async def scheduler_loop():
-    global _last_daily, _last_alerts, _last_media, _last_cleanup, _last_liveness, _last_spy, _last_eu, _last_visual, _last_price
+    global _last_daily, _last_media, _last_cleanup, _last_liveness, _last_spy, _last_eu, _last_visual, _last_price, _last_naming, _last_creative, _last_cluster, _last_engagement
     await asyncio.sleep(5)
     while True:
         try:
@@ -392,13 +402,26 @@ async def scheduler_loop():
                 _last_visual = now  # image index: hash new thumbnails (+ embeddings when embed.py is on), one batch per tick
                 _running.add("visual")
                 asyncio.get_running_loop().run_in_executor(None, _visual_wrapper)
-            if now - _last_alerts > timedelta(minutes=15):
-                await asyncio.to_thread(_alerts_job)
-                _last_alerts = now
+            if ENGAGEMENT_EVERY_S and now - _last_engagement >= timedelta(seconds=ENGAGEMENT_EVERY_S) and "engagement" not in _running:
+                _last_engagement = now
+                _running.add("engagement")
+                asyncio.get_running_loop().run_in_executor(None, _engagement_wrapper)
             if PRICE_EVERY_S and now - _last_price >= timedelta(seconds=PRICE_EVERY_S) and "price" not in _running:
                 _last_price = now  # price enrichment: a few queued subjects per tick, providers' budgets enforced inside
                 _running.add("price")
                 asyncio.get_running_loop().run_in_executor(None, _price_wrapper)
+            if NAMING_EVERY_MIN and now - _last_naming >= timedelta(minutes=NAMING_EVERY_MIN) and "naming" not in _running:
+                _last_naming = now
+                _running.add("naming")
+                asyncio.get_running_loop().run_in_executor(None, _naming_wrapper)
+            if CREATIVE_ENRICH_EVERY_MIN and now - _last_creative >= timedelta(minutes=CREATIVE_ENRICH_EVERY_MIN) and "creative" not in _running:
+                _last_creative = now
+                _running.add("creative")
+                asyncio.get_running_loop().run_in_executor(None, _creative_wrapper)
+            if CLUSTER_EVERY_MIN and now - _last_cluster >= timedelta(minutes=CLUSTER_EVERY_MIN) and "cluster" not in _running:
+                _last_cluster = now
+                _running.add("cluster")
+                asyncio.get_running_loop().run_in_executor(None, _cluster_wrapper)
             if now - _last_spy >= timedelta(minutes=SPY_EVERY_MIN) and "spy" not in _running:
                 _last_spy = now
                 _running.add("spy")
@@ -495,10 +518,6 @@ def _visual_wrapper():
                 r["embed_error"] = str(e)[:200]
             if any(v for v in r.values() if isinstance(v, int)):
                 log.info("image index: %s", r)
-            with SessionLocal() as db:  # watched pictures: alert on new matching ads / listings
-                w = visual.evaluate_image_watchlists(db)
-                if w["alerts"]:
-                    log.info("image watchlists: %s", w)
     except Exception:
         log.exception("image index failed")
     finally:
@@ -520,6 +539,65 @@ def _spy_wrapper():
         _running.discard("spy")
 
 
+def _naming_wrapper():
+    """Model pass for UNKNOWN products + Vietnamese names — naming_jobs.py (free Gemini tier: stops at the first 429)."""
+    from . import naming_jobs
+
+    try:
+        with SessionLocal() as db:
+            r = naming_jobs.tick(db)
+        if r["unknown"].get("asked") or r.get("rules", {}).get("named"):
+            log.info("naming: %s", {k: {x: y for x, y in v.items() if x != "product_ids"} for k, v in r.items()})
+    except Exception:
+        log.exception("naming job failed")
+    finally:
+        _running.discard("naming")
+
+
+def _creative_wrapper():
+    """OCR / transcript for TEST / TEST_NOW ads whose copy is too thin to read — creative_enrich.py (cheap sources first, capped)."""
+    from . import creative_enrich
+
+    try:
+        with SessionLocal() as db:
+            r = creative_enrich.tick(db)
+        if r["ocr"] or r["transcripts"]:
+            log.info("creative_enrich: %s", {k: v for k, v in r.items() if k != "product_ids"})
+    except Exception:
+        log.exception("creative enrich failed")
+    finally:
+        _running.discard("creative")
+
+
+def _cluster_wrapper():
+    """Product clustering — cluster_jobs.py: auto-merge the certain duplicates (logged, undoable), queue the rest for MKT."""
+    from . import cluster_jobs
+
+    try:
+        with SessionLocal() as db:
+            r = cluster_jobs.tick(db)
+        if r.get("merged") or r.get("stored"):
+            log.info("clustering: %s", {k: v for k, v in r.items() if k != "product_ids"})
+    except Exception:
+        log.exception("product clustering failed")
+    finally:
+        _running.discard("cluster")
+
+
+def _engagement_wrapper():
+    """Ad engagement queue — engagement/jobs.py (free pass: ad numbers + post mapping + memory; Bright Data Posts only when opted in)."""
+    from .engagement import jobs as engagement_jobs
+
+    try:
+        r = engagement_jobs.run_pending()
+        if r.get("ran"):
+            log.info("engagement: %s", r)
+    except Exception:
+        log.exception("engagement queue failed")
+    finally:
+        _running.discard("engagement")
+
+
 def _price_wrapper():
     """Background price discovery for subjects the cards asked for — pricing/jobs.py."""
     from .pricing import jobs as price_jobs
@@ -532,14 +610,6 @@ def _price_wrapper():
         log.exception("price enrichment failed")
     finally:
         _running.discard("price")
-
-
-def _alerts_job():
-    from .services.alerts import run_alerts
-
-    with SessionLocal() as db:
-        run_alerts(db)
-        db.commit()
 
 
 def _daily_job():
@@ -562,11 +632,12 @@ LIVENESS_MAX_PAGES = 5       # result pages per advertiser (≈10 ads each); bey
 def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
     """Ask Meta for each stale advertiser's *currently active* ads and reconcile.
 
-    Never infers "stopped" from silence alone: an ad is marked inactive only when the advertiser's full active
-    list was fetched successfully twice in a row without it. Errors / truncated lists change nothing.
+    Absence is only a verification miss, never inactive evidence. Followed advertisers use the durable
+    competitor worker instead, which stores unknown status and preserves source snapshots.
     """
     from .collector.adapters.meta import MetaLibraryConnector
     from .models import Ad, AdSource
+    from .workspace.models import Follow
     from .services.engine import rescore_products
 
     out = {"advertisers": 0, "verified": 0, "stopped": 0, "suspect": 0, "incomplete": 0, "errors": 0}
@@ -579,7 +650,8 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
         rows = db.execute(
             select(Ad.page_id).join(AdSource, AdSource.ad_id == Ad.id)
             .where(Ad.is_active.is_(True), Ad.page_id.is_not(None), AdSource.source == "meta_library",
-                   (Ad.last_verified_at.is_(None)) | (Ad.last_verified_at < stale))
+                   (Ad.last_verified_at.is_(None)) | (Ad.last_verified_at < stale),
+                   Ad.advertiser_id.not_in(select(Follow.advertiser_id)))
             .order_by(Ad.in_target.desc(), Ad.last_verified_at.asc().nullsfirst())
         ).all()
         pages: list[str] = []
@@ -648,13 +720,9 @@ def _reconcile_page(db, pid, recs_all, seen, complete, now, out, touched):
             if src_ids & seen:
                 continue
             ad.verify_misses = (ad.verify_misses or 0) + 1
-            if ad.verify_misses >= 2:
-                ad.is_active, ad.inactive_at = False, now
-                out["stopped"] += 1
-                touched.add(ad.product_id)
-                publish("AD_STOPPED", {"ad_id": ad.id, "page_id": pid}, product_id=ad.product_id, db=db)
-            else:
-                out["suspect"] += 1
+            # Absence (even repeated) is not source-confirmed inactive evidence.
+            # The competitor tracker records "unknown" separately and retains all history.
+            out["suspect"] += 1
         db.commit()
 
 

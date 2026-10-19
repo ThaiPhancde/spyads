@@ -1,0 +1,164 @@
+{
+  "endpoints": {
+    "GET /api/search q=2 keywords": {
+      "cold_ms": 2089.3,
+      "warm_p50_ms": 64.1,
+      "warm_p95_ms": 64.7,
+      "warm_max_ms": 64.7,
+      "sql_per_call_max": 16
+    },
+    "GET /api/search (no keyword, whole catalogue)": {
+      "cold_ms": 4208.1,
+      "warm_p50_ms": 119.0,
+      "warm_p95_ms": 122.2,
+      "warm_max_ms": 122.2,
+      "sql_per_call_max": 15
+    },
+    "GET /api/search mode=for_me": {
+      "cold_ms": 722.1,
+      "warm_p50_ms": 50.9,
+      "warm_p95_ms": 51.5,
+      "warm_max_ms": 51.5,
+      "sql_per_call_max": 25
+    },
+    "GET /api/search mode=claimable": {
+      "cold_ms": 3381.2,
+      "warm_p50_ms": 69.1,
+      "warm_p95_ms": 73.4,
+      "warm_max_ms": 73.4,
+      "sql_per_call_max": 24
+    },
+    "GET /api/search mode=claimable page 2": {
+      "cold_ms": 3060.8,
+      "warm_p50_ms": 62.4,
+      "warm_p95_ms": 64.0,
+      "warm_max_ms": 64.0,
+      "sql_per_call_max": 24
+    },
+    "GET /api/recommendations": {
+      "cold_ms": 354.3,
+      "warm_p50_ms": 14.2,
+      "warm_p95_ms": 15.2,
+      "warm_max_ms": 15.2,
+      "sql_per_call_max": 12
+    },
+    "GET /api/preferences": {
+      "cold_ms": 2.3,
+      "warm_p50_ms": 1.4,
+      "warm_p95_ms": 1.7,
+      "warm_max_ms": 1.7,
+      "sql_per_call_max": 4
+    },
+    "GET /api/library": {
+      "cold_ms": 9.9,
+      "warm_p50_ms": 2.9,
+      "warm_p95_ms": 3.1,
+      "warm_max_ms": 3.1,
+      "sql_per_call_max": 5
+    },
+    "GET /api/library?section=similar": {
+      "cold_ms": 6.6,
+      "warm_p50_ms": 6.9,
+      "warm_p95_ms": 7.2,
+      "warm_max_ms": 7.2,
+      "sql_per_call_max": 14
+    },
+    "GET /api/library/dashboard": {
+      "cold_ms": 535.9,
+      "warm_p50_ms": 27.8,
+      "warm_p95_ms": 29.3,
+      "warm_max_ms": 29.3,
+      "sql_per_call_max": 40
+    },
+    "GET /api/workspace/dashboard": {
+      "cold_ms": 19.5,
+      "warm_p50_ms": 4.2,
+      "warm_p95_ms": 5.1,
+      "warm_max_ms": 5.1,
+      "sql_per_call_max": 6
+    },
+    "GET /api/similar/products/{id}": {
+      "cold_ms": 1256.1,
+      "warm_p50_ms": 507.8,
+      "warm_p95_ms": 914.2,
+      "warm_max_ms": 914.2,
+      "sql_per_call_max": 17
+    },
+    "GET /api/similar/ads/{id}": {
+      "cold_ms": 255.4,
+      "warm_p50_ms": 187.7,
+      "warm_p95_ms": 426.1,
+      "warm_max_ms": 426.1,
+      "sql_per_call_max": 14
+    }
+  },
+  "process": {
+    "wall_s": 22.4,
+    "cpu_s": 12.6,
+    "cpu_share_of_one_core": 0.56,
+    "ram_start_mb": 103.5,
+    "ram_end_mb": 248.3,
+    "ram_peak_mb": 702.3
+  },
+  "sql": {
+    "statements": 1358,
+    "distinct": 62,
+    "slow_threshold_ms": 100,
+    "slow": [
+      {
+        "sql": "SELECT products.id, products.product_code, products.canonical_name, products.category, products.subcategory, products.brand, products.product_identity, products.is_demo, products.image_url, products.market, products.coun",
+        "n": 37,
+        "max_ms": 1549.7,
+        "avg_ms": 107.3
+      },
+      {
+        "sql": "SELECT ads.product_id, ads.first_seen_at, ads.last_seen_at, ads.funnel, CASE WHEN ((coalesce(ads.search_text, %(coalesce_1)s::VARCHAR) LIKE '%%' || %(coalesce_2)s::VARCHAR || '%%') OR coalesce(ads.raw_product_name, %(coa",
+        "n": 1,
+        "max_ms": 602.9,
+        "avg_ms": 602.9
+      },
+      {
+        "sql": "SELECT n.id FROM product_images a CROSS JOIN LATERAL ( SELECT b.id, 1 - (b.embedding_vec <=> a.embedding_vec) AS cos FROM product_images b WHERE b.id <> a.id AND b.embedding_vec IS NOT NULL AND b.processing_status = 'don",
+        "n": 11,
+        "max_ms": 467.9,
+        "avg_ms": 202.0
+      },
+      {
+        "sql": "SELECT anon_1.k, anon_1.img, product_images.embedding, product_images.phash FROM (SELECT creatives.product_id AS k, min(product_images.id) AS img FROM creatives JOIN product_images ON product_images.source = %(source_1)s",
+        "n": 12,
+        "max_ms": 438.3,
+        "avg_ms": 112.4
+      },
+      {
+        "sql": "SELECT creatives.id, creatives.ad_id, creatives.product_id, creatives.type, creatives.position, creatives.source, creatives.source_platform, creatives.network, creatives.source_ad_id, creatives.source_url, creatives.prev",
+        "n": 102,
+        "max_ms": 176.4,
+        "avg_ms": 10.3
+      },
+      {
+        "sql": "SELECT products.id FROM products WHERE (products.id NOT IN (%(id_1_1)s::INTEGER)) AND products.id != %(id_2)s::INTEGER AND products.is_demo IS NOT true AND products.id IN (SELECT DISTINCT ads.product_id FROM ads WHERE ad",
+        "n": 6,
+        "max_ms": 166.0,
+        "avg_ms": 55.2
+      },
+      {
+        "sql": "SELECT products.id FROM products WHERE products.in_target IS true AND products.category IS NOT NULL",
+        "n": 1,
+        "max_ms": 139.2,
+        "avg_ms": 139.2
+      },
+      {
+        "sql": "SELECT ads.id FROM ads WHERE ads.search_text IS NOT NULL",
+        "n": 1,
+        "max_ms": 125.2,
+        "avg_ms": 125.2
+      },
+      {
+        "sql": "SELECT ads.id FROM ads WHERE ads.id != %(id_1)s::INTEGER AND (ads.advertiser_id IS NULL OR (ads.advertiser_id NOT IN (SELECT mkt_advertiser_filters.advertiser_id FROM mkt_advertiser_filters WHERE mkt_advertiser_filters.u",
+        "n": 21,
+        "max_ms": 110.4,
+        "avg_ms": 8.0
+      }
+    ]
+  }
+}

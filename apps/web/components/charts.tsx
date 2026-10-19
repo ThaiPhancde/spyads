@@ -113,7 +113,8 @@ export function Funnel({ stages }: { stages: { label: string; value: number; ok?
 
 /** Score breakdown — weighted components of a formula score. */
 export function Breakdown({ parts }: { parts: Record<string, { weight: number; value: number }> }) {
-  const entries = Object.entries(parts || {});
+  const entries = Object.entries(parts || {}).filter(([k, v]) => v.weight !== 0 &&
+    !["traffic_momentum", "search_trend", "keyword_competition", "low_keyword_competition", "customer_rejection", "internal_win"].includes(k));
   if (!entries.length) return <div className="text-xs text-muted-foreground">—</div>;
   return (
     <div className="space-y-1.5">

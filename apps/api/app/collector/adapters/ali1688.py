@@ -18,8 +18,10 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
+from dataclasses import replace
 from typing import Iterator
 
 import httpx
@@ -33,6 +35,25 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://ainext.1688.com"
 SEARCH_PATH = "/1688claw/skill/searchoffer"
 SKILL_VERSION = "1.0.1"  # reference/1688-shopkeeper/scripts/_const.py — sent signed in x-csk-version
+
+
+class _InvalidResponse(ConnectorError):
+    """Incomplete upstream response: retry with a fresh signed nonce, never call it empty."""
+
+
+class _RetryableBusinessError(ConnectorError):
+    pass
+
+
+def _business_error(payload: dict) -> ConnectorError:
+    code = str(payload.get("msgCode") or payload.get("code") or "")
+    message = payload.get("message") or payload.get("msgInfo") or payload.get("msg") or payload.get("errorMessage") or code or "nguồn báo thất bại"
+    detail = f"1688 AK: {str(message)[:180]}"
+    if re.search(r"\b(401|403)\b", code):
+        return AuthExpired(detail)
+    if re.search(r"\b(429|5\d\d)\b", code):
+        return _RetryableBusinessError(detail)
+    return ConnectorError(detail)
 
 
 def split_ak(raw: str) -> tuple[str, str] | None:
@@ -64,13 +85,40 @@ def _count(v) -> int | None:
 
 def parse_offers(model: dict, query: str, limit: int, source: str = "ali1688") -> list[AdRecord]:
     """searchoffer `model.data` = {offer_id: {title, price, image, stats}} → commerce AdRecords. Missing fields stay None."""
-    data = model.get("data") if isinstance(model, dict) else None
-    if not isinstance(data, dict):
-        raise ConnectorError("1688 AK: kết quả tìm kiếm sai định dạng (model.data không phải object)")
+    if not isinstance(model, dict):
+        raise _InvalidResponse("1688 AK: phản hồi thiếu model.data")
+    if model.get("success") is False:
+        raise _business_error(model)
+    if "data" not in model:
+        raise _InvalidResponse("1688 AK: phản hồi thiếu model.data")
+    data = model["data"]
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            raise _InvalidResponse("1688 AK: model.data không phải JSON hợp lệ") from None
+    if data is None and model.get("success") is True:
+        return []
+    if isinstance(data, list):
+        pairs = []
+        for it in data:
+            if not isinstance(it, dict):
+                raise _InvalidResponse("1688 AK: danh sách sản phẩm có phần tử sai định dạng")
+            oid = it.get("offerId") or it.get("offer_id") or it.get("id")
+            if oid is None:
+                raise _InvalidResponse("1688 AK: sản phẩm thiếu offerId")
+            pairs.append((oid, it))
+    elif isinstance(data, dict):
+        pairs = list(data.items())
+    else:
+        raise _InvalidResponse(f"1688 AK: model.data có kiểu không hỗ trợ ({type(data).__name__})")
     out = []
-    for pos, (oid, it) in enumerate(list(data.items())[:limit], 1):
-        if not isinstance(it, dict) or not str(oid).strip():
-            continue
+    for oid, it in pairs:
+        if len(out) >= max(0, limit):
+            break
+        if not isinstance(it, dict) or not str(oid).strip().isdigit():
+            raise _InvalidResponse("1688 AK: sản phẩm hoặc offerId sai định dạng")
+        oid = str(oid).strip()
         s = it.get("stats") if isinstance(it.get("stats"), dict) else {}
         url = f"https://detail.1688.com/offer/{oid}.html"
         img = it.get("image") if isinstance(it.get("image"), str) and it.get("image") else None
@@ -82,7 +130,7 @@ def parse_offers(model: dict, query: str, limit: int, source: str = "ali1688") -
             media=[MediaItem("image", img)] if img else [], landing_page=url, product_url=url,
             price=_f(it.get("price")), currency="CNY", sold_count=sold,
             review_count=_count(s.get("remarkCnt")),
-            rank=pos, active=True, snapshot_url=url, matched_query=query,
+            rank=len(out) + 1, active=True, snapshot_url=url, matched_query=query,
             raw_source={"offerId": str(oid), "title": it.get("title"), "price": it.get("price"), "stats": s or None},
         ))
     return out
@@ -110,23 +158,68 @@ class Ali1688Connector(BaseConnector):
         if not keys:
             raise NotConfigured("Thiếu ALI_1688_AK (.env hoặc cấu hình connector) — lấy AK trong app 1688 AI版")
         body = json.dumps({"query": query, "channel": ""})
-        for attempt in range(3):  # like the reference: retry network / 429 / 5xx only, re-signed each time
+        for attempt in range(3):  # transport / 429 / 5xx / incomplete responses; every attempt re-signed
             try:
-                res = self.request("POST", BASE_URL + SEARCH_PATH, content=body, headers=sign(SEARCH_PATH, body, *keys),
-                                   timeout=30).json()
-                break
+                response = self.request("POST", BASE_URL + SEARCH_PATH, content=body,
+                                        headers=sign(SEARCH_PATH, body, *keys), timeout=30)
             except AuthExpired:
                 raise
-            except ConnectorError:
-                if attempt == 2:
-                    raise
-                time.sleep(2 ** attempt)
-            except (httpx.HTTPError, ValueError) as e:  # 400 / non-JSON body: a failure the fallback must see
+            except ConnectorError as e:
+                last_error = e  # BaseConnector wraps transport / HTTP 429 / 5xx errors.
+            except httpx.HTTPError as e:
                 raise ConnectorError(f"1688 AK: {type(e).__name__}: {e}") from None
-        if not isinstance(res, dict) or res.get("success") is False:
-            err = res.get("msgInfo") or res.get("msgCode") if isinstance(res, dict) else None
-            raise ConnectorError(f"1688 AK: {err or 'phản hồi không hợp lệ'}")
-        return parse_offers(res.get("model"), query, limit, self.key)
+            else:
+                try:
+                    res = response.json()
+                    if not isinstance(res, dict):
+                        raise _InvalidResponse("1688 AK: phản hồi không phải object")
+                    if res.get("success") is False:
+                        raise _business_error(res)
+                    return parse_offers(res.get("model"), query, limit, self.key)
+                except (_InvalidResponse, _RetryableBusinessError) as e:
+                    last_error = e
+                except ValueError:
+                    last_error = _InvalidResponse("1688 AK: phản hồi không phải JSON hợp lệ")
+            if attempt == 2:
+                raise last_error
+            log.warning("1688 AK: phản hồi chưa dùng được, thử lại %d/3 (%s)", attempt + 2, type(last_error).__name__)
+            time.sleep(2 ** attempt)
+
+    def fetch_page(self, params: FetchParams, country: str, state: dict | None = None) -> tuple[list[AdRecord], dict]:
+        """Live-search paging: one API call (≤ 20 offers, one VARIANTS suffix) per page, so a results page of 50 costs 3 calls
+        instead of the whole crawl, and "Trang sau" continues from the next suffix. state = {i: next suffix, seen: offer ids, done}."""
+        st = dict(state or {})
+        q, i, seen = (params.query or "").strip(), int(st.get("i", 0)), list(st.get("seen", []))
+        if not q or i >= len(self.VARIANTS):
+            return [], {**st, "done": True}
+        try:
+            batch = self.search(q + self.VARIANTS[i], self.max_items)
+            why = None
+        except ConnectorError as e:
+            batch, why = [], str(e)
+        fresh = [r for r in batch if r.source_ad_id not in seen]
+        for r in fresh:
+            seen.append(r.source_ad_id)
+            r.rank = len(seen)
+        st = {"i": i + 1, "seen": seen, "done": i + 1 >= len(self.VARIANTS)}
+        if i == 0 and not why and len(batch) < min(int(str(self.config.get("min_results") or "").strip() or 5), self.max_items):
+            why = f"chỉ {len(batch)} kết quả"
+        if not why:
+            return fresh, st
+        fb = self.config.get("apify_fallback")  # first page only; later pages keep what the AK source gave
+        if i > 0 or fb is None:
+            if fresh:
+                return fresh, st
+            # nothing new: raise instead of ending the paging — the saved cursor stays on this suffix, "Trang sau" retries it
+            raise ConnectorError(why if i > 0 else f"{why} — chọn thêm Apify 1688 để dùng nguồn trả phí")
+        log.warning("1688 '%s': AK source insufficient (%s) → Apify fallback", q, why)
+        try:
+            extra = [r for r in Apify1688Connector(fb).fetch_ads(replace(params, limit=params.limit - len(fresh))) if r.source_ad_id not in seen]
+        except ConnectorError as e:
+            if not fresh:
+                raise ConnectorError(f"1688 AK: {why}; Apify: {e}") from None
+            extra = []
+        return fresh + extra, {**st, "done": True}  # Apify is single-shot: no further pages
 
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
         q = (params.query or "").strip()
@@ -164,9 +257,14 @@ class Ali1688Connector(BaseConnector):
         log.warning("1688 '%s': AK source insufficient (%s) → Apify fallback", q, why)
         seen = set(seen_ids)
         try:
-            for r in Apify1688Connector(fb).fetch_ads(params):  # same offerId from both sources = one listing
+            remaining = total - len(recs)
+            for r in Apify1688Connector(fb).fetch_ads(replace(params, limit=remaining)):
                 if r.source_ad_id not in seen:
+                    seen.add(r.source_ad_id)
+                    r.rank = len(seen)
                     yield r
+                    if len(seen) >= total:
+                        break
         except ConnectorError as e:
             if not recs:  # nothing from either source → the job reports it
                 raise ConnectorError(f"1688 AK: {why}; Apify: {e}") from None

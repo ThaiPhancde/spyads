@@ -472,12 +472,16 @@ async def live_search(request: Request, file: UploadFile | None = File(None), im
     except lens.LensError as e:
         status = 402 if e.code.startswith("quota_exceeded") else 503 if e.code in ("missing_api_key", "live_search_disabled", "image_search_disabled") else 400
         raise HTTPException(status, {"code": e.code, "message": e.detail or e.code, "request_id": rid})
+    from ..workspace.access import grant
+    grant(db, "lens", job["job_id"])
     log.info("live image search %s → job %s %s", rid, job["job_id"], job["status"])
     return {**job, "request_id": rid, "image_ref": getattr(q, "ref", None), "query": q.info()}
 
 
 @router.get("/api/search/images/results/{job_id}")
 def live_results(job_id: int, offset: int = 0, limit: int = 60, keywords: str | None = None, db: Session = Depends(get_db)):
+    from ..workspace.access import require_access
+    require_access(db, "lens", job_id)
     from . import lens
     from .models import LensSearch
 
@@ -500,6 +504,8 @@ class ResultIn(BaseModel):
 
 @router.post("/api/search/images/results/{job_id}/verify")
 def live_verify(job_id: int, body: ResultIn, db: Session = Depends(get_db)):
+    from ..workspace.access import require_access
+    require_access(db, "lens", job_id)
     """Check the observed price on the result's product page (public JSON-LD; no quota)."""
     from . import lens
     from .models import LensSearch
@@ -515,6 +521,8 @@ def live_verify(job_id: int, body: ResultIn, db: Session = Depends(get_db)):
 
 @router.post("/api/search/images/results/{job_id}/save")
 def live_save(job_id: int, body: ResultIn, db: Session = Depends(get_db)):
+    from ..workspace.access import require_access
+    require_access(db, "lens", job_id)
     """Save a discovered web result into SpyAds (listing + picture in the local index)."""
     from . import lens
     from .models import LensSearch

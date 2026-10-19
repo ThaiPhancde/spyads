@@ -35,7 +35,7 @@ export function WatchImageDialog({ open, onOpenChange, query, rows, keywords, th
         keywords: kw.split(/[\n|,]/).map((s) => s.trim()).filter(Boolean),
         eu_product_ids: [...new Set(same.map((r) => r.eu_product_id).filter(Boolean))],
         rules: drop ? { price_drop_pct: Number(drop) } : {} }) });
-      toast.success(`Đã theo dõi “${r.name}” (#${r.id}) — xem Watchlists & Alerts`);
+      toast.success(`Đã theo dõi “${r.name}” (#${r.id}) — xem Watchlists`);
       onOpenChange(false);
     } catch (e: any) { toast.error(String(e.message || e)); } finally { setBusy(false); }
   };

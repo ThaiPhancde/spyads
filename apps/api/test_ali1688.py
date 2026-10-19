@@ -42,11 +42,7 @@ assert a.platform == "1688" and a.price == 3.5 and a.currency == "CNY" and a.sol
 assert a.media[0].url == "https://cbu01.alicdn.com/a.jpg" and a.product_url == "https://detail.1688.com/offer/991122553819.html"
 assert b.price is None and b.sold_count is None and b.media == [] and b.raw_source["stats"] is None
 assert len(ali1688.parse_offers(model, "x", 1)) == 1
-try:
-    ali1688.parse_offers({"data": []}, "x", 5)
-    raise AssertionError("bad shape must raise")
-except ConnectorError:
-    pass
+assert ali1688.parse_offers({"data": []}, "x", 5) == []
 
 
 # 4. router: enough AK results → no Apify; short / failing AK → Apify only if selected; Apify duplicates dropped
@@ -115,5 +111,21 @@ with mock.patch.object(c, "search", side_effect=lambda q, n: [apify_rec(str(len(
     out = list(c.fetch_ads(FetchParams(query="x", limit=45)))
 assert [call.args[0] for call in sr.call_args_list] == ["x", "x 爆款", "x 低价批发"], sr.call_args_list
 assert len(out) == 45 and len({r.source_ad_id for r in out}) == 45 and [r.rank for r in out] == list(range(1, 46))
+
+# 9. live paging: one call per page, cursor carries suffix + seen ids, an error keeps the cursor (no silent end), Apify only on page 1
+c = ali1688.Ali1688Connector({})
+P = FetchParams(query="x", limit=50)
+with mock.patch.object(c, "search", side_effect=lambda q, n: [apify_rec(str(len(q) * 100 + k)) for k in range(20)]) as sr:
+    r1, st = c.fetch_page(P, "ALL", {})
+    r2, st = c.fetch_page(P, "ALL", st)
+assert [call.args[0] for call in sr.call_args_list] == ["x", "x 爆款"] and len(r1) == len(r2) == 20 and st["i"] == 2 and not st["done"]
+with mock.patch.object(c, "search", side_effect=ConnectorError("rateLimit")):
+    try:
+        c.fetch_page(P, "ALL", st)
+        raise AssertionError
+    except ConnectorError as e:
+        assert "rateLimit" in str(e)
+with mock.patch.object(c, "search", return_value=[apify_rec("1")] * 20):
+    assert c.fetch_page(P, "ALL", {"i": len(c.VARIANTS) - 1, "seen": ["1"]})[1]["done"]  # last suffix → no more pages
 
 print("ok")

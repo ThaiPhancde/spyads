@@ -3,7 +3,13 @@
 Records come from the user-triggered Chrome extension (extensions/allegro-bridge), which reads ONLY the Allegro listing
 page the user opened themselves. Auth: header X-ToolSpy-Token == TOOLSPY_BRIDGE_TOKEN (.env), constant-time compare.
 AdminGuard in main.py exempts this exact path because the route authenticates itself.
-Merges into data/imports/allegro.json (read by eu_market.allegro_import), dedup by offer_id, newer fetched_at wins.
+Merges into data/imports/allegro.json (read by eu_market.allegro_import), dedup by offer_id, newer fetched_at wins, then
+upserts exactly the accepted records into eu_listings (allegro_import.map_item + service.upsert_items, identity
+(allegro, offer_id, PL), query = keyword) in the same request.
+Optional job_id (an EUBotJob created by POST /api/eu-market/allegro/search provider=bridge) + status ok|blocked|captcha|error:
+the job ends done | empty | blocked | captcha | failed. Unknown job → 404, foreign / already final (incl. timed out) job → 409;
+records are saved (file + eu_listings) BEFORE the job check, so a late or wrong job_id never loses real data — the 4xx
+detail carries the import stats.
 """
 from __future__ import annotations
 
@@ -15,10 +21,13 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from ..db import get_db
 
 router = APIRouter(tags=["imports"])
 
@@ -32,6 +41,10 @@ class BridgeIn(BaseModel):
     records: list[dict[str, Any]]
     page_url: Optional[str] = None
     parser_log: Optional[dict[str, Any]] = None
+    job_id: Optional[str] = Field(None, max_length=32)
+    keyword: Optional[str] = Field(None, max_length=200)
+    status: Literal["ok", "blocked", "captcha", "error"] = "ok"  # blocked / captcha / error may come with zero records
+    error: Optional[str] = Field(None, max_length=2000)
 
 
 def _check_token(got: str | None) -> None:
@@ -135,8 +148,23 @@ def merge(path: Path, records: list[dict]) -> dict:
         return {"added": added, "updated": updated, "unchanged": unchanged, "total": len(rows)}
 
 
+def upsert_listings(db: Session, records: list[dict], query: str | None) -> list[int]:
+    """Normalized bridge records -> eu_listings. Click-tracking URLs are not stored: the offer URL is rebuilt from offer_id."""
+    from ..eu_market.allegro_import import map_item
+    from ..eu_market.service import upsert_items
+
+    items = []
+    for rec in records:
+        it = map_item({**rec, "product_url": None if rec["url_unresolved"] or "/oferta/" not in rec["product_url"] else rec["product_url"]})
+        if it:
+            it["data_access"] = "browser_bridge"
+            it["raw"] = {"import": "browser_bridge", "row": rec}
+            items.append(it)
+    return upsert_items(db, items, query=query) if items else []
+
+
 @router.post("/api/imports/allegro")
-def import_allegro(body: BridgeIn, x_toolspy_token: str | None = Header(None)):
+def import_allegro(body: BridgeIn, x_toolspy_token: str | None = Header(None), db: Session = Depends(get_db)):
     _check_token(x_toolspy_token)
     if len(body.records) > MAX_RECORDS:
         raise HTTPException(413, f"max {MAX_RECORDS} records per request")
@@ -149,4 +177,20 @@ def import_allegro(body: BridgeIn, x_toolspy_token: str | None = Header(None)):
         elif rec["offer_id"] not in clean or rec["fetched_at"] >= clean[rec["offer_id"]]["fetched_at"]:
             clean[rec["offer_id"]] = rec
     stats = merge(DATA_PATH, list(clean.values())) if clean else {"added": 0, "updated": 0, "unchanged": 0, "total": len(_load(DATA_PATH))}
-    return {"received": len(body.records), "accepted": len(clean), "rejected": rejected, **stats}
+    from ..eu_market import allegro_bot
+    from ..eu_market.models import EUBotJob
+
+    j = db.get(EUBotJob, body.job_id) if body.job_id else None
+    keyword = " ".join((body.keyword or (j.keyword if j else "") or "").split())[:200] or None
+    ids = upsert_listings(db, list(clean.values()), keyword)
+    out = {"received": len(body.records), "accepted": len(clean), "rejected": rejected, **stats, "written": len(ids)}
+    if not body.job_id:
+        return out
+    allegro_bot.expire(db)
+    if j is None:
+        raise HTTPException(404, {"code": "job_not_found", "message": "job không tồn tại — bản ghi vẫn đã được lưu", "import": out})
+    db.refresh(j)
+    if j.source != "allegro" or j.provider != "bridge" or j.status not in allegro_bot.LIVE:
+        raise HTTPException(409, {"code": "job_not_open", "message": f"job {j.provider}/{j.status} không nhận kết quả bridge — bản ghi vẫn đã được lưu",
+                                  "status": j.status, "import": out})
+    return {**out, "job": allegro_bot.finish_bridge(db, j, body.status, len(body.records), ids, body.error)}
