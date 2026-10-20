@@ -387,9 +387,13 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
     return ad, True, p_created
 
 
+_TT_SIG = re.compile(r"^(https?://[^/]*tiktokcdn[^/]*)/[0-9a-f]{32}/[0-9a-f]{8}/")  # tiktokcdn signs in the PATH: /<md5>/<expiry>/video/…
+
+
 def bare_url(u: str | None) -> str:
-    """CDN URL without its signature (fbcdn / tiktokcdn sign in the query, so it changes every fetch)."""
-    return (u or "").split("#", 1)[0].split("?", 1)[0]
+    """CDN URL without its signature (fbcdn signs in the query and rotates hosts; tiktokcdn signs in the query and the first two path segments)."""
+    path = _TT_SIG.sub(r"/", (u or "").split("#", 1)[0].split("?", 1)[0])
+    return re.sub(r"^https?://[^/]*", "", path)  # fbcdn rotates hosts (scontent-sin6-1 …) for the same file
 
 
 def _attach_creatives(db: Session, ad: Ad, rec: AdRecord) -> list[int]:

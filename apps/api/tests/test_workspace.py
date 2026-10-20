@@ -364,3 +364,19 @@ def test_followed_advertiser_is_not_scanned_by_legacy_liveness(monkeypatch):
         raise AssertionError("Followed advertiser was scanned by legacy liveness")
     monkeypatch.setattr("app.collector.adapters.meta.MetaLibraryConnector.fetch_page", forbidden)
     assert realtime.verify_liveness()["advertisers"] == 0
+
+
+def test_known_ads_visible_without_following():
+    create_user(); a = client("mkt-a@example.test"); ids = seed_advertisers(1)
+    aid, ad_id, _ = ids[0]
+    assert a.get(f"/api/competitors/{aid}/ads").status_code == 404  # tracked list still needs a follow
+    r = a.get(f"/api/competitors/{aid}/known-ads")
+    assert r.status_code == 200 and r.json()["total"] == 1 and r.json()["rows"][0]["ad_id"] == ad_id
+    assert a.get("/api/competitors/999999/known-ads").status_code == 404
+
+
+def test_tiktokcdn_resigned_urls_share_one_creative_key():
+    from app.ingest import bare_url
+    a = "https://v16m-default.tiktokcdn.com/5e3c8cc5d8767681b4462b31d2444f05/6ac75ba3/video/tos/alisg/x/?a=0&rc=1"
+    b = "https://v16m-default.tiktokcdn.com/b3e6c2a7e21ba49aeac0e93c99b7d851/6ac75bc0/video/tos/alisg/x/?a=0&rc=2"
+    assert bare_url(a) == bare_url(b) != bare_url(b.replace("/x/", "/y/"))

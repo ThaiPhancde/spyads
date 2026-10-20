@@ -182,6 +182,21 @@ def competitor_ads(aid: int, tab: Literal["all", "active", "new"] = "all", limit
             for a in db.scalars(q.order_by(TrackedAd.detected_at.desc(), TrackedAd.id.desc()).offset(offset).limit(limit))]}
 
 
+@router.get("/competitors/{aid}/known-ads")
+def known_ads(aid: int, limit: int = Query(40, ge=1, le=200), offset: int = Query(0, ge=0),
+              user=Depends(current_user), db: Session = Depends(get_db)):
+    """Read-only view of the ads already collected for this advertiser — works without following (same shape as /ads)."""
+    require_advertiser(db, aid)
+    q = select(Ad).where(Ad.advertiser_id == aid)
+    total = db.scalar(select(func.count()).select_from(q.subquery()))
+    return {"total": total, "rows": [{"id": a.id, "ad_id": a.id, "source_ad_id": a.external_id, "status": "unknown", "baseline": True,
+            "last_seen_at": a.last_seen_at, "data": {"text": a.ad_text, "title": a.title, "media": [a.media_url] if a.media_url else None,
+            "media_type": a.media_type, "landing_url": a.landing_url, "markets": a.countries or [], "snapshot_url": a.snapshot_url,
+            "metrics": {k: getattr(a, col) for k, col in (("views", "views"), ("likes", "likes"), ("comments", "comments_count"),
+                                                         ("shares", "shares")) if getattr(a, col) is not None}}}
+            for a in db.scalars(q.order_by(Ad.last_seen_at.desc(), Ad.id.desc()).offset(offset).limit(limit))]}
+
+
 @router.get("/competitors/{aid}/timeline")
 def timeline(aid: int, limit: int = Query(40, ge=1, le=200), offset: int = Query(0, ge=0),
              user=Depends(current_user), db: Session = Depends(get_db)):

@@ -95,13 +95,15 @@ def test_provider_failure_is_logged_but_not_revealed(mail, monkeypatch):
     emailjs(monkeypatch)
     create_user()
 
-    def boom(url, **kw):
-        raise httpx.ConnectError("down")
-    monkeypatch.setattr(accounts.httpx, "post", boom)
+    class Denied:
+        status_code = 403
+        text = "API access from non-browser environments is currently disabled."
+    monkeypatch.setattr(accounts.httpx, "post", lambda url, **kw: Denied())
     r = write(client(), "POST", "/auth/forgot-password", {"email": "mkt-a@example.test"})
-    assert r.status_code == 200
+    assert r.status_code == 200 and "403" not in r.text  # the caller never learns why
     with SessionLocal() as db:
-        assert db.scalar(select(UserActivity.kind).where(UserActivity.kind == "password_reset_delivery_failed")) is not None
+        row = db.scalar(select(UserActivity).where(UserActivity.kind == "password_reset_delivery_failed"))
+        assert row is not None and "403" in row.data["error"] and "non-browser" in row.data["error"]
 
 
 def test_nothing_configured_sends_nothing_and_cli_issues_a_code(mail, monkeypatch):

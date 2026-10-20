@@ -30,7 +30,7 @@ CAPABILITIES = {
 def capability(advertiser):
     supported, detail = CAPABILITIES.get(advertiser.source, (False, "Nguồn chưa có adapter truy vấn advertiser ID; giữ lịch sử hiện có."))
     if not advertiser.source_advertiser_id or advertiser.source_advertiser_id.startswith("unverified:"):
-        return {"supported": False, "detail": "Chưa có ID advertiser do nguồn cung cấp; không gộp hoặc quét theo tên. " + detail}
+        return {"supported": False, "detail": "Nguồn này không cung cấp ID người bán nên chỉ xem được các ads đã thu thập; không tự quét thêm hay gộp theo tên. " + detail}
     return {"supported": supported, "detail": detail}
 
 

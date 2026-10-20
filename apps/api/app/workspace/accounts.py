@@ -174,7 +174,8 @@ def send_otp(user, otp):
             "user_id": os.environ["EMAILJS_PUBLIC_KEY"], "accessToken": os.environ["EMAILJS_PRIVATE_KEY"],
             "template_params": {"to_email": user.email, "to_name": user.name, "otp_code": otp, "expires_minutes": OTP_MINUTES,
                                 "email": os.getenv("EMAILJS_REPLY_TO") or user.email}})
-        r.raise_for_status()
+        if r.status_code != 200:  # keep EmailJS's own reason (e.g. 403 "non-browser disabled") for the activity log
+            raise httpx.HTTPError(f"EmailJS {r.status_code}: {r.text[:200]}")
         return True
     if os.getenv("SMTP_HOST"):
         message = EmailMessage()
@@ -207,9 +208,9 @@ def forgot(body: Forgot, request: Request, db: Session = Depends(get_db)):
         if otp:
             try:
                 send_otp(u, otp)
-            except (OSError, smtplib.SMTPException, httpx.HTTPError):
-                # Generic response avoids account enumeration; operations can issue a code with the internal CLI.
-                db.add(UserActivity(user_id=u.id, kind="password_reset_delivery_failed"))
+            except (OSError, smtplib.SMTPException, httpx.HTTPError) as e:
+                # Generic response avoids account enumeration; the reason goes to the activity log (never to the caller).
+                db.add(UserActivity(user_id=u.id, kind="password_reset_delivery_failed", data={"error": str(e)[:300]}))
                 db.commit()
     return {"message": "Nếu tài khoản tồn tại, mã OTP đã được gửi tới email (hiệu lực %d phút). Chưa nhận được mail thì kiểm tra thư rác hoặc liên hệ bộ phận vận hành." % OTP_MINUTES}
 
