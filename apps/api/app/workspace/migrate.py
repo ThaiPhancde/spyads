@@ -17,6 +17,7 @@ def migrate():
         if db.bind.dialect.name == "postgresql":
             db.execute(text("SELECT pg_advisory_xact_lock(727018)"))
         single_role(db)
+        one_vote(db)
         first_time = not db.get(WorkspaceMigration, VERSION)
         if not first_time and db.get(WorkspaceMigration, IDENTITY_VERSION):
             return
@@ -67,6 +68,15 @@ def single_role(db):
         db.execute(text("ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role = 'MKT')"))
     if not db.get(WorkspaceMigration, SINGLE_ROLE_VERSION):
         db.add(WorkspaceMigration(version=SINGLE_ROLE_VERSION))
+
+
+def one_vote(db):
+    """One vote per (product, user) since 2026-10-26: drop older rows that the old `market`-keyed dedupe let stack.
+    Idempotent; keeps each user's latest vote. NULL user_id (service token / pre-account rows) is one voter, as in the
+    vote endpoint. No unique index: a legacy product merge can still move two together."""
+    db.execute(text("DELETE FROM votes WHERE EXISTS (SELECT 1 FROM votes v2 WHERE v2.product_id = votes.product_id AND "
+                    "(v2.user_id = votes.user_id OR (v2.user_id IS NULL AND votes.user_id IS NULL)) AND "
+                    "(v2.created_at > votes.created_at OR (v2.created_at = votes.created_at AND v2.id > votes.id)))"))
 
 
 if __name__ == "__main__":

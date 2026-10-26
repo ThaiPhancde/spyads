@@ -10,6 +10,7 @@ import { getUser } from "@/lib/realtime";
 import { RecBadge } from "@/components/ui";
 import { PriceTag } from "@/components/pricing/price-tag";
 import { ProductName } from "@/components/product-name";
+import { WinChecklist } from "@/components/win-checklist";
 import { visualHref } from "@/components/visual/global-image-search";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -208,12 +209,13 @@ export function ProductMediaCard({ p, onVoted }: { p: any; onVoted?: () => void 
           <a href={p.landing_url} target="_blank" rel="noreferrer" title={p.landing_url}
              className="inline-flex min-w-0 items-center gap-1 text-[11px] text-link hover:underline"><Link2 className="size-3 shrink-0" /><span className="truncate">{hostOf(p.landing_url)}</span><ExternalLink className="size-3 shrink-0" /></a>
         )}
+        <WinChecklist items={p.win_checklist} compact />
         <PriceTag subject={`product:${p.id}`} fallback={{ price: p.price, currency: p.currency }} />
         {(p.listings > 0 || p.organic_views > 0) && (
           <div className="flex flex-wrap gap-x-2 text-[11px] text-ink2">
             {p.reviews_total ? <span>★ {fmt.n(p.reviews_total)} đánh giá</span> : null}
             {p.sold_total ? <span>🛒 {fmt.n(p.sold_total)} đã bán</span> : null}
-            {p.supplier_price_usd ? <span title="Giá thấp nhất trên AliExpress — mốc giá nhập">💲 nhập ~${p.supplier_price_usd}</span> : null}
+            {p.supplier_price_usd ? <span title="Giá nguồn thấp nhất (1688 / Taobao / AliExpress) — mốc giá nhập">💲 nhập ~${p.supplier_price_usd}</span> : null}
             {p.organic_views ? <span className="inline-flex items-center gap-0.5"><Play className="size-3" /> {fmt.n(p.organic_views)} view viral</span> : null}
           </div>
         )}

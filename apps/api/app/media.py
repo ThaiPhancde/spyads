@@ -34,6 +34,7 @@ from sqlalchemy.exc import OperationalError
 from .db import SessionLocal, read_only
 from .events import publish
 from .models import Creative
+from .netsafe import FetchError, safe_get, safe_stream
 from .platforms import NETWORKS
 from .storage import DATA_DIR, store
 
@@ -78,7 +79,7 @@ class Expired(Exception):
 def _download(url: str, dest: Path) -> tuple[str, str, int]:
     h = hashlib.sha256()
     size = 0
-    with httpx.stream("GET", url, headers=HEADERS, timeout=120, follow_redirects=True) as r:
+    with safe_stream(url, headers=HEADERS, timeout=120) as r:  # CDN URL from a third party: every hop SSRF-checked
         if r.status_code in (403, 410):
             raise Expired(f"HTTP {r.status_code}")
         r.raise_for_status()
@@ -292,10 +293,10 @@ def _process(cid: int):
                     c.width, c.height, c.duration_sec = meta.get("width"), meta.get("height"), meta.get("duration")
                     if c.preview_source_url:
                         try:
-                            pr = httpx.get(c.preview_source_url, headers=HEADERS, timeout=60, follow_redirects=True)
+                            pr = safe_get(c.preview_source_url, max_bytes=20 * 1024 * 1024, headers=HEADERS, timeout=60)
                             if pr.status_code == 200:
                                 poster = pr.content
-                        except httpx.HTTPError:
+                        except (httpx.HTTPError, FetchError):
                             pass
                     poster = poster or _frame(tmp)
                 c.stored_bytes = tmp.stat().st_size  # after shrink, what the store holds — put_file moves/unlinks tmp
@@ -391,7 +392,7 @@ def grab_thumb(cid: int) -> str | None:
             url = c.preview_source_url if c.type == "video" else c.source_url
             if not source_alive(url):
                 return None
-        r = httpx.get(url, headers=HEADERS, timeout=20, follow_redirects=True)
+        r = safe_get(url, max_bytes=20 * 1024 * 1024, headers=HEADERS, timeout=20)
         if r.status_code != 200 or not r.content:
             if c.type == "image" and r.status_code in (403, 404, 410):
                 with SessionLocal() as db:

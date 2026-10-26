@@ -2,14 +2,15 @@
 
 What costs space is video: ~12 MB each, vs a whole database of ~14 MB. So by default:
 
-  videos   → rolling daily batch: at most VIDEO_DAILY_QUOTA (3000) new videos per day, strongest ads first;
-             at the end of the day (DAY_TZ_OFFSET, default UTC+7) every video older than VIDEO_KEEP_DAYS (1 = only
+  videos   → not downloaded by default (VIDEO_DOWNLOAD=0, user policy: metadata + thumbnail only). When enabled,
+             a rolling daily batch of at most VIDEO_DAILY_QUOTA videos, strongest ads first; at the end of the day (DAY_TZ_OFFSET, default UTC+7) every video older than VIDEO_KEEP_DAYS (1 = only
              today's batch) is deleted so the next day's batch is fresh. Thumbnail + metadata + original link stay
              (status "archived"), the card still shows the poster frame
   images   → IMAGE_RETENTION_DAYS (30)
   raw data → RAW_RETENTION_DAYS (90) raw/*.jsonl batches (only needed to reprocess)
   events   → EVENT_RETENTION_DAYS (30) realtime feed rows
   temp     → half-downloaded .part files older than 1 day
+  tables   → logs / queues / expired sessions that grow forever: table_ttls() ({table: (column, days)})
 
 Never expired automatically (protected):
   · creatives pinned by a user (📌)
@@ -222,6 +223,54 @@ def trim_over_budget(db: Session, prot: set[int], now: datetime, dry_run: bool =
     return res
 
 
+def table_ttls() -> dict[str, tuple[str, int]]:
+    """{table: (time column, days)} — rows older than `days` (by that column) are deleted. Expiry columns use 0 = once
+    expired. Job tables go by finished_at, so queued/running rows (NULL) never match. RETENTION_DAYS_<TABLE> overrides,
+    a negative value keeps the table forever."""
+    from math import ceil
+
+    from .preferences import max_age_days
+
+    ttls = {
+        "user_sessions": ("expires_at", 0), "auth_csrf_tokens": ("expires_at", 0), "auth_rate_limits": ("expires_at", 0),
+        "search_jobs": ("created_at", 60),
+        "external_api_calls": ("created_at", 120),  # provider quotas count per day / month
+        "page_fetches": ("requested_at", 90),  # re-fetched after ENGAGEMENT_PAGE_TTL_DAYS anyway
+        # ponytail: by age only — an unprocessed record this old already failed every normalize pass
+        "raw_records": ("ingested_at", 90),
+        "price_jobs": ("finished_at", 90), "engagement_jobs": ("finished_at", 90),  # freshness lives in the observations
+        "mkt_notifications": ("created_at", 180), "mkt_activity": ("created_at", 365),
+        # the preference profile reads events up to PREFERENCE_MAX_AGE_DAYS back; keep a month more
+        "mkt_behavior_events": ("created_at", ceil(max_age_days()) + 30),
+    }
+    return {t: (col, int(os.getenv(f"RETENTION_DAYS_{t.upper()}", days))) for t, (col, days) in ttls.items()}
+
+
+def prune_tables(db: Session, now: datetime, dry_run: bool = False) -> dict[str, int]:
+    from . import models  # noqa: F401 — registers every table in Base.metadata
+    from .db import Base
+    from .workspace import models as workspace_models  # noqa: F401
+
+    out = {}
+    for name, (col, days) in table_ttls().items():
+        if days < 0:
+            continue
+        t = Base.metadata.tables[name]
+        cond = t.c[col] < now - timedelta(days=days)
+        n = db.scalar(select(func.count()).select_from(t).where(cond)) if dry_run else db.execute(delete(t).where(cond)).rowcount
+        if n:
+            out[name] = n
+    # image-index rows whose creative is gone (creative dedupe deletes rows): derived hash/embedding, never shown, and they
+    # crowd image-search candidates. Recomputed from the thumbnail if a creative comes back.
+    from .models import Creative
+    from .visual.models import ProductImage
+    orphan = (ProductImage.source == "creative") & ~select(Creative.id).where(Creative.id == ProductImage.source_id).exists()
+    n = db.scalar(select(func.count()).select_from(ProductImage).where(orphan)) if dry_run else         db.execute(delete(ProductImage).where(orphan).execution_options(synchronize_session=False)).rowcount
+    if n:
+        out["product_images_orphan"] = n
+    return out
+
+
 def run_cleanup(db: Session, dry_run: bool = False, reset: bool = False) -> dict:
     """reset=True: wipe every unprotected video now (fresh start), however many were collected today."""
     c = cfg()
@@ -316,6 +365,8 @@ def run_cleanup(db: Session, dry_run: bool = False, reset: bool = False) -> dict
         res["events_deleted"] = n
         if n and not dry_run:
             db.execute(delete(Event).where(Event.created_at < cutoff))
+
+    res["rows_deleted"] = prune_tables(db, now, dry_run)
 
     tmp = DATA_DIR / "tmp"
     if BACKEND == "local" and tmp.exists():

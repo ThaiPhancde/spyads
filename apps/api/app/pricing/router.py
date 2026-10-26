@@ -54,15 +54,15 @@ def coherent_range(amts: list[float]) -> tuple[float, float, float] | None:
 def plausible(price: float | None, currency: str | None, market: str | None) -> str | None:
     """Anomaly gate for a stored / parsed price (spec §13.4): None = fine, else the reason. A consumer product sells for
     ~$0.5–$5,000; a currency that is neither the market's nor a world currency was mis-parsed (VND on a US ad)."""
-    from ..services.enrichment import FX_TO_USD
+    from ..services.enrichment import to_usd
 
     if price is None or not currency:
         return "no_currency"
     cur = currency.upper()
     if market and market in MARKET_CURRENCY and cur not in (MARKET_CURRENCY[market], "USD", "EUR", "GBP"):
         return "currency_market_mismatch"
-    usd = price * FX_TO_USD.get(cur, 1)
-    if not 0.5 <= usd <= 5000:
+    usd = to_usd(price, cur)
+    if usd is not None and not 0.5 <= usd <= 5000:  # unknown currency: no rate to range-check with (never ×1)
         return "out_of_range"
     return None
 

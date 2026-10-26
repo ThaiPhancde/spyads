@@ -41,13 +41,24 @@ def after_business_events(db: Session, product_ids: set[int]):
 
 
 # ------------------------------------------------------------ connector / query jobs
+HISTORY_ADAPTERS = {"meta_library", "meta_graph", "apify_meta"}  # map is_active / end_date per ad (adapters/meta.py)
+
+
 def _params_from(c: Connector, q: TrackedQuery | None = None) -> FetchParams:
     cfg = c.config or {}
     countries = (q.countries if q and q.countries else None) or \
         [x.strip().upper() for x in str(cfg.get("countries") or "ALL").split(",") if x.strip()]
+    # scheduled Meta syncs ask for stopped ads too: real is_active / end_date and the earliest start date (design §2.1).
+    # Same `limit`, so volume is unchanged. Live search (_run_search) keeps active_only=True for speed.
+    # tracked query: continue from where its last run stopped (meta adapters) until the results end or the cursor is older
+    # than RESUME_HOURS, then start over from page 1 — so re-runs reach new ads instead of the same first page
+    cur = (q.cursor or {}) if q else {}
+    fresh = cur.get("at") and datetime.utcnow() - datetime.fromisoformat(cur["at"]) < timedelta(hours=RESUME_HOURS)
+    resume = {k: v for k, v in (cur.get("pages") or {}).items() if v and not v.get("done")} if fresh else {}
     return FetchParams(query=q.query if q else None, countries=countries or ["ALL"],
                        page_ids=(q.page_ids if q else []) or [], media_type=q.media_type if q else None,
-                       limit=(q.limit if q else int(cfg.get("max_per_query") or 60)))
+                       limit=(q.limit if q else int(cfg.get("max_per_query") or 60)),
+                       active_only=c.adapter not in HISTORY_ADAPTERS, extra={"resume": resume} if resume else {})
 
 
 def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchParams | None = None) -> dict:
@@ -65,7 +76,8 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
             connector = ConnectorFactory.get(c.adapter, c.config or {})  # KeyError = adapter removed from the factory
             plist = [params] if params else ([_params_from(c, query)] if query else _connector_param_list(c))
             if not plist:  # keyword-search source without scheduled keywords: it runs from live searches only
-                c.status, c.last_error = "ok", None
+                # stamp it, else it stays "most overdue" and is re-picked every 30 s tick ahead of real syncs
+                c.status, c.last_error, c.last_sync_at = "ok", None, datetime.utcnow()
                 db.commit()
                 return {**result, "skipped": "chỉ chạy khi tìm từ khoá (Tìm sản phẩm) hoặc khi cấu hình keywords"}
             recs = []
@@ -92,6 +104,9 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                 if query:
                     q = db.get(TrackedQuery, query.id)
                     q.last_run_at, q.last_count, q.last_new, q.last_error = datetime.utcnow(), len(recs), stats["new_ads"], None
+                    pages = plist[0].extra.get("resume_out")
+                    if pages is not None:  # paging state for the next run (see _params_from)
+                        q.cursor = {"at": datetime.utcnow().isoformat(), "pages": pages}
                 db.commit()
             result.update(fetched=len(recs), **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source")})
             publish("CONNECTOR_SYNCED", result)
@@ -130,9 +145,9 @@ def _connector_param_list(c: Connector) -> list[FetchParams]:
     base = _params_from(c)
     kws = [k.strip() for k in str(cfg.get("keywords") or "").replace(",", "\n").splitlines() if k.strip()]
     pages = [p.strip() for p in str(cfg.get("page_ids") or "").split(",") if p.strip()]
-    out = [FetchParams(query=k, countries=base.countries, limit=base.limit) for k in kws]
+    out = [FetchParams(query=k, countries=base.countries, limit=base.limit, active_only=base.active_only) for k in kws]
     if pages:
-        out.append(FetchParams(page_ids=pages, countries=base.countries, limit=base.limit))
+        out.append(FetchParams(page_ids=pages, countries=base.countries, limit=base.limit, active_only=base.active_only))
     # search-type sources need a keyword / page list — never pull random ads
     cls = ConnectorFactory.connectors.get(c.adapter)
     return out or ([] if cls and cls.supports_search and not getattr(cls, "browses", False) else [base])
@@ -362,6 +377,13 @@ LIVE_SEARCH_SLOTS = int(_os.getenv("LIVE_SEARCH_SLOTS", "12"))
 _search_slots = threading.BoundedSemaphore(LIVE_SEARCH_SLOTS)
 
 
+def _heavy() -> int:
+    """Jobs that count against MAX_PARALLEL_JOBS: source scans (connector / tracked query) and liveness — they hit Meta and
+    write many rows. The light periodic jobs (visual, price, engagement, naming…) live in _running too, but counting them
+    starved liveness and the syncs (seen live 2026-10-26: liveness never ran after a worker restart)."""
+    return sum(1 for k in _running if k.startswith(("c:", "q:")) or k == "liveness")
+
+
 async def scheduler_loop():
     global _last_daily, _last_media, _last_cleanup, _last_liveness, _last_spy, _last_eu, _last_visual, _last_price, _last_naming, _last_creative, _last_cluster, _last_engagement
     await asyncio.sleep(5)
@@ -386,7 +408,7 @@ async def scheduler_loop():
                 due.sort(key=lambda x: x[0])  # most overdue first
                 due = [d[1:] for d in due]
             for kind, cid, q in due:
-                if len(_running) >= MAX_PARALLEL_JOBS:
+                if _heavy() >= MAX_PARALLEL_JOBS:
                     break  # the rest run on the next ticks — keeps SQLite writes and Meta rate limits sane
                 key = f"{kind}:{cid}:{q.id if q else ''}"
                 if key in _running or cid is None:
@@ -433,12 +455,13 @@ async def scheduler_loop():
                 if eu_jobs.enabled() and eu_jobs.any_configured():  # no EU credentials → nothing to call
                     _running.add("eu")
                     asyncio.get_running_loop().run_in_executor(None, _eu_wrapper)
-            if now - _last_liveness >= timedelta(minutes=20) and len(_running) < MAX_PARALLEL_JOBS:
+            if now - _last_liveness >= timedelta(minutes=20) and "liveness" not in _running and _heavy() < MAX_PARALLEL_JOBS:
                 _last_liveness = now
                 _running.add("liveness")
                 asyncio.get_running_loop().run_in_executor(None, _liveness_wrapper)
             from .retention import day_start
 
+            write_heartbeat()  # before the inline cleanup / re-score: a fresh worker shows up at once, not minutes later
             if now - _last_cleanup >= timedelta(hours=6) or _last_cleanup < day_start(now):  # + right after midnight
                 await asyncio.to_thread(_cleanup_job)
                 _last_cleanup = now
@@ -447,7 +470,46 @@ async def scheduler_loop():
                 _last_daily = now
         except Exception:
             log.exception("scheduler tick failed")
+        try:  # ponytail: written after the inline cleanup / re-score, so its age grows by their duration during those ticks
+            write_heartbeat()
+        except Exception:
+            log.exception("scheduler heartbeat failed")
         await asyncio.sleep(30)
+
+
+HEARTBEAT_KEY = "scheduler_heartbeat"
+
+
+def heartbeat_state() -> dict:
+    """This process's scheduler state: utc time, running jobs, last run per job (`_last_<job>` globals)."""
+    last = {k[6:]: v.isoformat() for k, v in globals().items()
+            if k.startswith("_last_") and isinstance(v, datetime) and v != datetime.min}
+    return {"at": datetime.utcnow().isoformat(), "pid": _os.getpid(), "running": sorted(_running),
+            "max_parallel": MAX_PARALLEL_JOBS, "last": last}
+
+
+def write_heartbeat():
+    """The scheduler may run in the worker process: publish its state in app_settings for the API to read."""
+    import json
+
+    from .interest import AppSetting
+
+    with SessionLocal() as db:
+        db.merge(AppSetting(key=HEARTBEAT_KEY, value=json.dumps(heartbeat_state()), updated_at=datetime.utcnow()))
+        db.commit()
+
+
+def read_heartbeat(db: Session) -> dict | None:
+    """Last heartbeat any scheduler wrote (see write_heartbeat), plus its age in seconds; None if none ever ran."""
+    import json
+
+    from .interest import AppSetting
+
+    row = db.get(AppSetting, HEARTBEAT_KEY)
+    if not row:
+        return None
+    hb = json.loads(row.value)
+    return {**hb, "age_s": round((datetime.utcnow() - datetime.fromisoformat(hb["at"])).total_seconds(), 1)}
 
 
 def _export_has_files(c: Connector) -> bool:
@@ -470,7 +532,7 @@ def _cleanup_job():
 
     with SessionLocal() as db:
         r = run_cleanup(db)
-        if r["archived"] or r["raw_deleted"] or r["events_deleted"]:
+        if r["archived"] or r["raw_deleted"] or r["events_deleted"] or r["rows_deleted"]:
             log.info("retention: %s", r)
     if r["archived"]:
         publish("STORAGE_ROLLOVER", {"archived": r["archived"], "freed_bytes": r["freed_bytes"]}, persist=False)
@@ -614,9 +676,15 @@ def _price_wrapper():
 
 def _daily_job():
     """Tier 3: full re-score + daily snapshot (keeps history for growth / acceleration)."""
+    from .services import adsignals
     from .services.engine import build_snapshots, score_all
 
     with SessionLocal() as db:
+        from .services.enrichment import refresh_rates
+
+        refresh_rates(db)  # ECB rates for price → USD (static table fallback)
+        adsignals.refresh(db)  # force_score's running days are capped by ACTIVE_GRACE_DAYS: recompute as days pass
+        db.commit()
         score_all(db, commit_every=50)
         db.commit()
         build_snapshots(db, commit_every=50)
@@ -624,16 +692,21 @@ def _daily_job():
 
 
 # ------------------------------------------------------------ liveness (blueprint §7, §18; facebook_ad_library _last_updated)
+RESUME_HOURS = float(_os.getenv("TRACKED_RESUME_HOURS", "6"))  # a tracked query's stored Meta cursor older than this → page 1
 LIVENESS_STALE_HOURS = 6     # re-verify active ads not confirmed for this long
 LIVENESS_PAGES_PER_RUN = 12  # advertisers checked per run (each ≈ 1-5 Ad Library requests)
 LIVENESS_MAX_PAGES = 5       # result pages per advertiser (≈10 ads each); beyond that the list is "incomplete"
+# ads still unconfirmed after their page scan (big pages: 5 result pages cover ~50 ads) are looked up one by one: an Ad
+# Library keyword search for the numeric Library ID returns exactly that ad with its status + end date (tested 2026-10-26)
+LIVENESS_ID_LOOKUPS = int(_os.getenv("LIVENESS_ID_LOOKUPS", "30"))
 
 
 def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
-    """Ask Meta for each stale advertiser's *currently active* ads and reconcile.
-
-    Absence is only a verification miss, never inactive evidence. Followed advertisers use the durable
-    competitor worker instead, which stores unknown status and preserves source snapshots.
+    """Ask Meta for each stale advertiser's ads in ALL statuses and reconcile: an ad Meta reports stopped is marked
+    inactive with Meta's end date (source evidence); one reported running is re-verified. Absence alone is only a
+    verification miss, never inactive evidence — those ads get a per-ID lookup (LIVENESS_ID_LOOKUPS per run).
+    Followed advertisers use the durable competitor worker instead, which stores unknown status and preserves source
+    snapshots.
     """
     from .collector.adapters.meta import MetaLibraryConnector
     from .models import Ad, AdSource
@@ -671,9 +744,10 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
             recs_all = []
             try:
                 for _ in range(LIVENESS_MAX_PAGES):
-                    recs, st = connector.fetch_page(FetchParams(page_ids=[pid], active_only=True), "ALL", st)
+                    recs, st = connector.fetch_page(FetchParams(page_ids=[pid], active_only=False), "ALL", st)
                     recs_all += recs
-                    seen |= {r.source_ad_id for r in recs} | set(st.get("siblings") or [])
+                    # only ads Meta reports running count as alive; collation siblings' own status is unknown in this mode
+                    seen |= {r.source_ad_id for r in recs if r.active is not False}
                     if st.get("done"):
                         break
             except Exception:
@@ -685,6 +759,7 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
                 log.exception("liveness: page %s lost (sqlite busy)", pid)
                 db.rollback()
                 out["errors"] += 1
+        _lookup_misses(db, connector, out, touched)
         if touched:
             from .services import adsignals
 
@@ -694,6 +769,40 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
                 rescore_products(db, touched)
                 db.commit()
     return out
+
+
+def _lookup_misses(db, connector, out, touched, limit: int | None = None):
+    """Per-ID check for 'active' ads no scan has confirmed within the grace window — misses, and ads on pages too big for
+    LIVENESS_MAX_PAGES (those pages never complete, so their ads never collect a miss). Target markets, oldest first."""
+    from .models import Ad, AdSource
+    from .services.adsignals import ACTIVE_GRACE_DAYS
+    from .workspace.models import Follow
+
+    limit = LIVENESS_ID_LOOKUPS if limit is None else limit
+    if limit <= 0:
+        return
+    ids = db.scalars(select(AdSource.source_ad_id).join(Ad, Ad.id == AdSource.ad_id).where(
+        Ad.is_active.is_(True), AdSource.source == "meta_library",
+        (Ad.verify_misses >= 1) | Ad.last_verified_at.is_(None)
+        | (Ad.last_verified_at < datetime.utcnow() - timedelta(days=ACTIVE_GRACE_DAYS)),
+        Ad.advertiser_id.not_in(select(Follow.advertiser_id)))  # followed pages: the competitor tracker owns them
+        .order_by(Ad.in_target.desc(), Ad.verify_misses.desc(), Ad.last_verified_at.asc().nullsfirst()).limit(limit)).all()
+    db.commit()  # no read transaction held across the network calls
+    for aid in ids:
+        out["looked_up"] = out.get("looked_up", 0) + 1
+        try:
+            recs, _ = connector.fetch_page(FetchParams(query=aid, active_only=False), "ALL", {})
+        except Exception:  # noqa: BLE001 — one failed lookup must not stop the run
+            out["errors"] += 1
+            continue
+        hit = [r for r in recs if r.source_ad_id == aid]
+        if not hit:
+            continue  # not found by ID either: stays a miss, never guessed inactive
+        with ingest_lock():
+            out["stopped"] += sum(1 for r in hit if r.active is False)
+            out["verified"] += sum(1 for r in hit if r.active)
+            touched |= set(ingest_ads(db, hit)["product_ids"])
+            db.commit()
 
 
 def _reconcile_page(db, pid, recs_all, seen, complete, now, out, touched):
@@ -707,7 +816,8 @@ def _reconcile_page(db, pid, recs_all, seen, complete, now, out, touched):
                 AdSource.source == "meta_library", AdSource.source_ad_id.in_([r.source_ad_id for r in recs_all]))))
             recs_all = [r for r in recs_all if r.source_ad_id in known]
         if recs_all:
-            stats = ingest_ads(db, recs_all)  # refreshes last_verified_at / is_active
+            out["stopped"] += sum(1 for r in recs_all if r.active is False)
+            stats = ingest_ads(db, recs_all)  # refreshes last_verified_at / is_active (+ inactive_at = Meta's end date)
             touched |= set(stats["product_ids"])
             out["verified"] += len(seen)
         if not complete:

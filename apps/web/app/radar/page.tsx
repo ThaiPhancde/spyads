@@ -1,98 +1,56 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
-import { Search } from "lucide-react";
-import { CartesianGrid, ReferenceLine, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis } from "recharts";
-import { MarketPicker } from "@/components/MarketPicker";
-import { ProductMediaCard } from "@/components/media";
-import { Card, Empty, Loading, PageHeader } from "@/components/ui";
-import { Button } from "@/components/ui/button";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { qs, useApi } from "@/lib/api";
-import { useEvents, useTeam } from "@/lib/realtime";
+import { useSearchParams } from "next/navigation";
+import { Suspense } from "react";
+import { CHANNEL_TABS, DISCOVERY_TABS, DiscoveryView } from "@/components/discover/discovery";
+import { LiveView } from "@/components/discover/live";
+import { LowCompetitionView } from "@/components/discover/low-competition";
+import { MarketsView } from "@/components/discover/markets";
+import { TableView } from "@/components/discover/table";
+import { Loading } from "@/components/ui";
+import { cn } from "@/lib/utils";
 
-const TAB_ORDER = ["breakout", "experimental", "new", "hidden", "wave", "novelty", "creative", "mess", "ladi", "favorites", "scaling", "saved", "risk"];
-// Quadrants: 3 validated categorical slots + neutral gray for "low signal" (≤3 coloured series on a scatter).
-const QUAD: [string, string, string][] = [
-  ["BREAKOUT", "🚀 Breakout (đang tăng + đã được xác nhận)", "var(--series-1)"],
-  ["EXPERIMENTAL", "💎 Experimental (đang tăng, chưa xác nhận)", "var(--series-2)"],
-  ["STABLE_WINNER", "🏛 Stable winner (xác nhận, tuần này không tăng)", "var(--series-3)"],
-  ["LOW_SIGNAL", "Low signal", "var(--axis)"],
+/** One "Khám phá sản phẩm" page (design §3b): the five old product-list pages are views; the view lives in the URL so
+ *  old links (/product-radar, /hidden-winners, /products, /markets) redirect here and stay shareable. */
+const VIEWS: [string, string][] = [
+  ["channel", "Theo kênh"], ["discovery", "Discovery"], ["live", "Đang chạy"], ["low-competition", "Ít cạnh tranh"],
+  ["table", "Bảng xếp hạng"], ["markets", "Thị trường"],
 ];
-const tick = { fill: "var(--muted-foreground)", fontSize: 11 };
 
-function RadarChart({ country, funnel }: { country: string; funnel: string }) {
-  const { data } = useApi(`/discovery/radar${qs({ country, funnel })}`);
-  if (!data) return <Loading />;
-  if (!data.points.length) return <Empty>Chưa có sản phẩm được chấm điểm.</Empty>;
+function View({ view }: { view: string }) {
+  switch (view) {
+    case "discovery":
+      return <DiscoveryView key="discovery" tabs={DISCOVERY_TABS} chart title="Discovery"
+                            subtitle="Không chỉ “sản phẩm bán chạy” — sản phẩm độc lạ, có sóng, có chất liệu creative, hợp market và hợp gu team MKT" />;
+    case "live": return <LiveView />;
+    case "low-competition": return <LowCompetitionView />;
+    case "table": return <TableView />;
+    case "markets": return <MarketsView />;
+    default:
+      return <DiscoveryView key="channel" tabs={CHANNEL_TABS} title="Theo kênh bán"
+                            subtitle="Video Win / Video Scale cho người chạy Facebook · Tiềm năng cho TikTok · Bò sữa cho Google / SEO / sàn / free traffic. Chỉ tính ad được nguồn xác nhận còn chạy." />;
+  }
+}
+
+function Discover() {
+  const sp = useSearchParams();
+  const view = VIEWS.some(([k]) => k === sp.get("view")) ? sp.get("view")! : "channel";
   return (
-    <>
-      <ResponsiveContainer width="100%" height={380}>
-        <ScatterChart margin={{ top: 10, right: 20, bottom: 24, left: 0 }}>
-          <CartesianGrid stroke="var(--border)" />
-          <XAxis type="number" dataKey="x" domain={[0, 100]} name="Market validation" tick={tick} stroke="var(--axis)"
-                 label={{ value: "Market validation (demand) →", position: "insideBottom", offset: -12, ...tick }} />
-          <YAxis type="number" dataKey="y" domain={[0, 100]} name="Momentum" tick={tick} stroke="var(--axis)" width={40}
-                 label={{ value: "Momentum (7 ngày) ↑", angle: -90, position: "insideLeft", ...tick }} />
-          <ZAxis type="number" dataKey="opportunity" range={[40, 260]} name="Opportunity" />
-          <ReferenceLine x={50} stroke="var(--axis)" strokeDasharray="4 4" />
-          <ReferenceLine y={55} stroke="var(--axis)" strokeDasharray="4 4" />
-          <Tooltip cursor={{ strokeDasharray: "3 3" }}
-                   content={({ payload }) => {
-                     const p = payload?.[0]?.payload;
-                     if (!p) return null;
-                     return (
-                       <div className="rounded-lg border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md">
-                         <div className="font-semibold">{p.name}</div>
-                         <div className="tnum">Demand {p.x} · Momentum {p.y} · Opportunity {p.opportunity}</div>
-                         <div className="text-muted-foreground">{p.quadrant} · {p.decision}</div>
-                       </div>
-                     );
-                   }} />
-          {QUAD.map(([q, label, color]) => (
-            <Scatter key={q} name={label} data={data.points.filter((p: any) => p.quadrant === q)} fill={color}
-                     stroke="var(--card)" strokeWidth={2}
-                     onClick={(p: any) => { if (p?.id) window.location.href = `/products/${p.id}`; }} style={{ cursor: "pointer" }} />
-          ))}
-        </ScatterChart>
-      </ResponsiveContainer>
-      <div className="mt-1 flex flex-wrap justify-center gap-x-5 gap-y-1.5 text-xs">
-        {QUAD.map(([q, label, color]) => (
-          <span key={q} className="inline-flex items-center gap-1.5 text-ink2">
-            <span className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: color }} />
-            {label} <b className="tnum text-foreground">{data.counts[q] || 0}</b>
-          </span>
+    <div className="space-y-4">
+      <nav aria-label="Chế độ xem" className="flex flex-wrap gap-1.5 border-b pb-2">
+        {VIEWS.map(([k, label]) => (
+          <Link key={k} href={`/radar?view=${k}`} aria-current={k === view ? "page" : undefined}
+                className={cn("rounded-md px-3 py-1.5 text-sm transition-colors",
+                              k === view ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+            {label}
+          </Link>
         ))}
-      </div>
-    </>
+      </nav>
+      <View view={view} />
+    </div>
   );
 }
 
-export default function Discovery() {
-  const [tab, setTab] = useState("breakout");
-  const [country, setCountry] = useState("");
-  const team = useTeam();
-  const { data, error, reload } = useApi(`/discovery/tab/${tab}${qs({ country, funnel: team })}`);
-  useEvents((e) => { if (["DECISION_CHANGED", "PRODUCT_DISCOVERED", "SEARCH_DONE"].includes(e.type)) reload(); });
-  return (
-    <div className="space-y-4">
-      <PageHeader title="Product Discovery" subtitle="Không chỉ “sản phẩm bán chạy” — tìm sản phẩm độc lạ, có sóng, có chất liệu creative, hợp market và hợp gu team MKT">
-        <Button asChild><Link href="/search"><Search />Tìm sản phẩm mới</Link></Button>
-      </PageHeader>
-      <MarketPicker value={country} onChange={setCountry} />
-      <Card title="Opportunity Radar — momentum × market validation"><RadarChart country={country} funnel={team} /></Card>
-      <ToggleGroup type="single" variant="outline" size="sm" spacing={1.5} value={tab} onValueChange={(v) => v && setTab(v)} className="flex-wrap justify-start">
-        {TAB_ORDER.map((t) => (
-          <ToggleGroupItem key={t} value={t} className="text-xs data-[state=on]:bg-primary data-[state=on]:text-primary-foreground">
-            {data?.tabs?.[t] || t}
-          </ToggleGroupItem>
-        ))}
-      </ToggleGroup>
-      {!data ? <Loading error={error} /> : data.rows.length === 0 ? <Card><Empty>Chưa có sản phẩm trong nhóm “{data.title}”.</Empty></Card> : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-          {data.rows.map((p: any) => <ProductMediaCard key={p.id} p={p} onVoted={reload} />)}
-        </div>
-      )}
-    </div>
-  );
+export default function Page() {
+  return <Suspense fallback={<Loading />}><Discover /></Suspense>;
 }

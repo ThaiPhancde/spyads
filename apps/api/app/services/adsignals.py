@@ -14,24 +14,49 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import unicodedata
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ..markets import ad_in_targets
 from ..models import Ad, ad_markets
 
 TIERS = [(70, "legendary"), (45, "strong"), (20, "regular"), (0, "testing")]
+# An "active" ad the source has not re-confirmed only counts this long past its last sighting. Never flips is_active:
+# silence is not evidence the ad stopped, it only stops adding running days (design §2.1).
+ACTIVE_GRACE_DAYS = float(os.getenv("ACTIVE_GRACE_DAYS", "3"))
+
+
+def ran_until(a, now: datetime) -> datetime:
+    """Last moment we can vouch the ad ran: its stop date, else last sighting/verification + grace, capped at now."""
+    if not a.is_active:
+        end = a.inactive_at or a.last_seen_at or now
+    else:
+        seen = max((x for x in (a.last_verified_at, a.last_seen_at) if x), default=None)
+        end = seen + timedelta(days=ACTIVE_GRACE_DAYS) if seen else now
+    return min(end, now)
+
+
+def verified_live(a, now: datetime | None = None) -> bool:
+    """Active and confirmed by a source within the grace window (Meta liveness, follow scans, re-collection)."""
+    now = now or datetime.utcnow()
+    return bool(a.is_active) and ran_until(a, now) >= now
+
+
+def verified_live_sql(now: datetime | None = None):
+    """`verified_live` as a SQL filter on Ad."""
+    cut = (now or datetime.utcnow()) - timedelta(days=ACTIVE_GRACE_DAYS)
+    return and_(Ad.is_active.is_(True), or_(Ad.last_verified_at >= cut, Ad.last_seen_at >= cut))
 
 
 def days_running(a: Ad, now: datetime | None = None) -> int:
     now = now or datetime.utcnow()
-    end = now if a.is_active else (a.inactive_at or a.last_seen_at or now)
-    return max(0, (min(end, now) - a.first_seen_at).days) if a.first_seen_at else 0
+    return max(0, (ran_until(a, now) - a.first_seen_at).days) if a.first_seen_at else 0
 
 
 def force(a: Ad, now: datetime | None = None) -> tuple[float, str]:

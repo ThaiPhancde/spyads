@@ -211,10 +211,19 @@ class MetaLibraryConnector(BaseConnector):
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
         """Scheduled / single-shot path = fetch_page in a loop: the collector's own `search()` rejects country 'ALL'
         (tracked queries on 'ALL' failed every run) and skipped the token bucket."""
+        resume, out = params.extra.get("resume") or {}, params.extra.setdefault("resume_out", {})
         for country in params.countries or ["ALL"]:
-            st, got, empty = {}, 0, 0
+            st = {k: v for k, v in (resume.get(country) or {}).items() if k in ("cursor", "sid", "tok")}  # continue deeper
+            resumed, got, empty = bool(st.get("cursor")), 0, 0
             while got < params.limit and not st.get("done"):
-                recs, st = self.fetch_page(params, country, st)
+                try:
+                    recs, st = self.fetch_page(params, country, st)
+                except ConnectorError:
+                    if not resumed:
+                        raise
+                    st, resumed = {}, False  # Meta refused the stored cursor (expired session): start over from page 1
+                    continue
+                out[country] = {k: st.get(k) for k in ("cursor", "sid", "tok", "done")}
                 empty = 0 if recs else empty + 1  # Meta sends empty pages mid-stream; a run of them is the end
                 if empty >= 3:
                     break

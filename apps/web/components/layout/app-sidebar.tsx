@@ -37,7 +37,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        {NAV.filter((g) => !g.hidden).map((g) => (
+        {NAV.filter((g) => !g.hidden && g.items.some((it) => !it.admin)).map((g) => (  // no empty "Hệ thống" label
           <SidebarGroup key={g.group}>
             <SidebarGroupLabel>{g.group}</SidebarGroupLabel>
             <SidebarGroupContent>

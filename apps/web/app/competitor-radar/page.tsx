@@ -25,7 +25,8 @@ function Radar() {
   const detail = useApi(focus ? `/competitor-radar/${focus}` : null);
   useEffect(() => { if (focus) window.scrollTo({ top: 0, behavior: "smooth" }); }, [focus]);
   const act = useAction();
-  const toggleWatch = (id: number, w: boolean) => act.run(async () => { await api(`/competitor-radar/${id}/watch?watched=${w}`, { method: "POST" }); reload(); detail.reload(); });
+  // "Theo dõi" = this account's own follow (same as /competitors), never a global flag
+  const toggleWatch = (id: number, w: boolean) => act.run(async () => { await api(`/competitors/${id}/follow`, w ? { method: "POST", body: JSON.stringify({ interval_hours: 24 }) } : { method: "DELETE" }); reload(); detail.reload(); });
   const extra = (meta.data?.countries || []).filter((c: string) => !MARKETS.some(([k]) => k === c));
 
   return (
@@ -65,7 +66,7 @@ function Radar() {
           <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3">
             <Stat label="Advertisers tracked" value={fmt.n(data.total)} />
             <Stat label="Đang scale nhanh (7d ≥ 2× tuần trước)" value={data.scaling} />
-            <Stat label="Đang theo dõi" value={data.rows.filter((r: any) => r.watched).length} />
+            <Stat label="Đang theo dõi" value={data.watched} />
           </div>
           <Card title="Advertisers" pad={false}>
             <Table>

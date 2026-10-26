@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..markets import priority_boost
 from ..models import Ad, Creative, Product, Vote
+from .adsignals import verified_live_sql
 from .creative_text import CURIOSITY, DEMO, EMOTION, TRANSFORM, UGC, ad_text_evidence, summarize
 from .scoring import lin
 
@@ -152,7 +153,7 @@ def market_dna(db: Session) -> dict[str, dict]:
                                                 "loved": Counter(), "price": []})
     for country, cat, angle, funnel, price in db.execute(
             select(Ad.country, Product.category, Ad.angle, Ad.funnel, Ad.price).join(Product, Product.id == Ad.product_id)
-            .where(Ad.is_active.is_(True), Ad.is_internal.is_(False))):
+            .where(verified_live_sql(), Ad.is_internal.is_(False))):
         if not country or cat is None:  # unclassified products are not a category (H13)
             continue
         d = dna[country]
@@ -269,7 +270,10 @@ def potential_vector(p: Product, f: dict, ads: list[Ad], creatives: list[Creativ
     }
     creative = sum(creative_parts.values()) / len(creative_parts)
 
-    voted = [VOTE_VALUE.get(v.decision, 50) for v in votes]
+    # mean over users, not rows: a product merge can carry two votes of one MKT (latest wins)
+    per_user = {v.user_id: VOTE_VALUE.get(v.decision, 50)  # None = service / pre-account votes, one voter (as the endpoint)
+                for v in sorted(votes, key=lambda v: (v.created_at or datetime.min, v.id or 0))}
+    voted = list(per_user.values())
     ad_feats = set().union(*(ad_feature_set(a.hook, a.angle, a.funnel) for a in ext_ads)) if ext_ads else set()
     predicted = taste.predict(p, ad_feats)
     if voted:

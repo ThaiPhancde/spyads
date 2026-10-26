@@ -129,6 +129,9 @@ def mkt_write(path):
             or re.fullmatch(r"/api/library/products/\d+/(save|favorite|start-test)", path)
             or path == "/api/search/live" or re.fullmatch(r"/api/search/jobs/\d+/more", path)
             or re.fullmatch(r"/api/products/\d+/vote", path)
+            or re.fullmatch(r"/api/products/\d+/(name|name/confirm|name/undo|split|scan|merges/\d+/undo)", path)
+            or path in ("/api/products/merge", "/api/products/image-matches/review")
+            or re.fullmatch(r"/api/creatives/\d+/pin", path)
             or re.fullmatch(r"/api/creatives/\d+/retry", path)
             or re.fullmatch(r"/api/search/images/results/\d+/(verify|save)", path)
             or path in ("/api/search/images/upload", "/api/search/images", "/api/search/images/by-url", "/api/search/images/from-product",

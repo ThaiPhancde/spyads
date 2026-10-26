@@ -14,7 +14,10 @@ from sqlalchemy.orm import Session
 from ..markets import priority_markets
 from ..models import Ad, ad_markets, Comment, Product, Store
 from ..platforms import REMOVED_NETWORKS
+from .adsignals import ran_until
 from .enrichment import to_usd
+
+COLLECTED_DATE_SOURCES = {"tiktok_top_ads"}  # first_seen_at = collection day (adapter gets no start date)
 
 
 @dataclass
@@ -46,12 +49,11 @@ def _stopped_at(ad: Ad) -> datetime | None:
 
 
 def _active_at(ad: Ad, d: date) -> bool:
-    """Running on day d: started by then and not (verified) stopped before it. Live ads are confirmed by the
-    liveness job, so silence alone no longer makes an ad look removed."""
+    """Running on day d: started by then and vouched for until at least the day before — a stop date, or the last
+    source confirmation + ACTIVE_GRACE_DAYS for an "active" ad nobody re-checked (adsignals.ran_until)."""
     if ad.first_seen_at > _end(d):
         return False
-    stop = _stopped_at(ad)
-    return stop is None or stop >= _end(d - timedelta(days=1))
+    return ran_until(ad, _end(d)) >= _end(d - timedelta(days=1))
 
 
 def adv_key(a) -> str | None:
@@ -79,9 +81,12 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
     # ad metrics come from ad libraries only: a marketplace listing or a viral post is not an ad (platforms.py)
     ext_ads = [a for a in seen_by if a.channel in (None, "ads") and a.network not in REMOVED_NETWORKS]
     active = [a for a in ext_ads if _active_at(a, as_of)]
-    new_7d = [a for a in ext_ads if a.first_seen_at > d7]
-    new_prev7 = [a for a in ext_ads if d14 < a.first_seen_at <= d7]
-    new_30d = [a for a in ext_ads if a.first_seen_at > d30]
+    # TikTok Top Ads carry no start date: first_seen_at is the day we collected it, not a launch — never "new this week".
+    # ponytail: source list, not a per-ad date-kind flag; add a column if another dateless source appears
+    dated = [a for a in ext_ads if a.source not in COLLECTED_DATE_SOURCES]
+    new_7d = [a for a in dated if a.first_seen_at > d7]
+    new_prev7 = [a for a in dated if d14 < a.first_seen_at <= d7]
+    new_30d = [a for a in dated if a.first_seen_at > d30]
     removed_7d = [a for a in ext_ads if _stopped_at(a) and d7 < _stopped_at(a) <= end]
     running_30d = [a for a in active if (end - a.first_seen_at).days >= 30]
 
@@ -92,7 +97,8 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
             adv_first[k] = min(adv_first.get(k, a.first_seen_at), a.first_seen_at)
     active_adv = Counter(k for a in active if (k := adv_key(a)))
     advertisers = len(active_adv) or len(adv_first)
-    new_adv_7d = sum(1 for t in adv_first.values() if t > d7)
+    dated_adv = {k for a in dated if (k := adv_key(a))}  # a page seen only through collection-dated ads is never "new"
+    new_adv_7d = sum(1 for k, t in adv_first.items() if t > d7 and k in dated_adv)
     hhi = sum((c / sum(active_adv.values())) ** 2 for c in active_adv.values()) if active_adv else 1.0
 
     country_first: dict[str, datetime] = {}
@@ -112,8 +118,9 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
                                sum((s.estimated_traffic or 1) for s in stores), 0.0)
 
     # prices in USD: ads of one product come in PHP / SAR / AUD … (readers: margin_potential, alerts ratio)
-    prices_recent = [to_usd(a.price, a.currency) for a in ext_ads if a.price and a.first_seen_at > d14]
-    prices_old = [to_usd(a.price, a.currency) for a in ext_ads if a.price and a.first_seen_at <= d14]
+    # an unknown currency converts to None and is left out
+    prices_recent = [u for a in ext_ads if a.price and a.first_seen_at > d14 and (u := to_usd(a.price, a.currency)) is not None]
+    prices_old = [u for a in ext_ads if a.price and a.first_seen_at <= d14 and (u := to_usd(a.price, a.currency)) is not None]
     avg_price = _safe_div(sum(prices_recent + prices_old), len(prices_recent + prices_old), None) if (prices_recent or prices_old) else to_usd(p.price, p.currency)
     price_trend = (_safe_div(sum(prices_recent), len(prices_recent)) / _safe_div(sum(prices_old), len(prices_old)) - 1) \
         if prices_recent and prices_old else 0.0
@@ -155,7 +162,7 @@ def compute_features(data: ProductData, as_of: date | None = None) -> dict:
         "strong_ads": sum(1 for a in active if (a.force_score or 0) >= 45),
         **{f"variation_{k}": v for k, v in var.items()},
         # what marketers trust most: days the strongest ad has run, copies of the same creative, sellers at the priority market
-        "longevity_days": max(((end - a.first_seen_at).days for a in active), default=0),
+        "longevity_days": max(((ran_until(a, end) - a.first_seen_at).days for a in active), default=0),
         "variants": max([var["max_group"], *fp_groups.values()]),  # largest group of live ads sharing page+copy or creative
         "advertisers_at_primary_market": len({adv_key(a) for a in active if prim & set(ad_markets(a))} - {None}),
         "creative_count": len(set(fps)) or len(active),
@@ -204,7 +211,7 @@ def compute_channel_features(rows: list, end: datetime) -> dict:
     listings = [a for a in rows if a.channel == "commerce"]
     organic = [a for a in rows if a.channel == "organic"]
     ads = [a for a in rows if a.channel in (None, "ads")]
-    supplier = [to_usd(a.price, a.currency) for a in listings if a.price]
+    supplier = [u for a in listings if a.price and (u := to_usd(a.price, a.currency)) is not None]
     return {
         "ad_networks": sorted({a.network or "meta" for a in ads}),
         "networks": sorted({a.network for a in rows if a.network}),

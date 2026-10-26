@@ -8,10 +8,8 @@ import { Card, Empty, Loading, PageHeader, Pill } from "@/components/ui";
 import { Button } from "@/components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api, fmt, useApi } from "@/lib/api";
-import { getUser } from "@/lib/realtime";
 
 const TABS: [string, string][] = [["groups", "Product Clusters"], ["duplicates", "Ads trùng"], ["pending", "Cần xác nhận"], ["similar", "Sản phẩm tương tự"], ["auto_clustered", "Tự động gom"], ["accepted", "Đã xác nhận"], ["blocked", "Đã chặn"], ["auto_merged", "Lịch sử gộp cũ"], ["impure", "Nghi lẫn sản phẩm"]];
-const user = () => getUser().name || null;
 
 function Thumb({ id }: { id?: number | null }) {
   return id ? /* eslint-disable-next-line @next/next/no-img-element */ <img src={`/api/creatives/${id}/thumb`} alt="" className="h-24 w-24 shrink-0 rounded object-cover" loading="lazy" />
@@ -38,7 +36,7 @@ function Pair({ row, onDone }: { row: any; onDone: () => void }) {
   const act = async (kind: "accept" | "reject") => {
     setBusy(true);
     try {
-      await api(`/clusters/candidates/${row.id}/${kind}`, { method: "POST", body: JSON.stringify({ user: user() }) });
+      await api(`/clusters/candidates/${row.id}/${kind}`, { method: "POST" });
       toast.success(kind === "accept" ? "Đã gom cluster; Ads và sản phẩm gốc được giữ nguyên" : "Đã ghi nhận: không phải cùng sản phẩm");
       onDone();
     } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
@@ -46,7 +44,7 @@ function Pair({ row, onDone }: { row: any; onDone: () => void }) {
   const undo = async () => {
     setBusy(true);
     try {
-      await api(row.algorithm_version ? `/clusters/events/${row.event_id}/undo` : `/products/${row.keep_id}/merges/${row.event_id}/undo`, { method: "POST", body: JSON.stringify({ user: user() }) });
+      await api(row.algorithm_version ? `/clusters/events/${row.event_id}/undo` : `/products/${row.keep_id}/merges/${row.event_id}/undo`, { method: "POST" });
       toast.success("Đã hoàn tác — cặp này sẽ không bị tự gộp lại"); onDone();
     } catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
   };

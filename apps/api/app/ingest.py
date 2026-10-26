@@ -279,6 +279,11 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
             if ad.product_id and (p := db.get(Product, ad.product_id)) and not p.country:
                 p.country = cc
         ad.last_seen_at = max(ad.last_seen_at, min(last, now))
+        # first seen through a dateless source (TikTok Top Ads = collection day), a source with a start date may go earlier
+        if (first := _dt(rec.first_seen)) and min(first, now) < ad.first_seen_at:
+            ad.first_seen_at = min(first, now)
+            if ad.product_id and (p := db.get(Product, ad.product_id)) and ad.first_seen_at < p.first_seen_at:
+                p.first_seen_at = ad.first_seen_at
         if rec.active is not None:
             if rec.active and not ad.is_active:  # seen running again after we marked it stopped
                 ad.reactivated_at, ad.inactive_at = now, None

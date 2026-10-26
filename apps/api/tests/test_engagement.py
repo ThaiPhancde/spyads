@@ -400,20 +400,3 @@ def test_slow_page_collection_is_kept_as_a_snapshot_and_collected_free(db, monke
     assert service.collect_pending(db) == {"collected": 1}            # free: progress + snapshot polling only
     db.commit()
     assert service.summary(db, [a.id])[a.id]["post"]["likes"] == 77 and quota_used(db, "brightdata_posts") == 1
-
-
-def test_watching_a_competitor_shows_in_the_watched_list_at_once(db):
-    """Audit 2026-10-14: the memoised competitor list ignored a new watch for up to 60 s."""
-    from app.models import Advertiser
-
-    adv = Advertiser(name=f"Audit Shop {RUN}")
-    db.add(adv)
-    db.flush()
-    a = mk_ad(db, source="meta_library", network="meta")
-    a.advertiser_id, a.country = adv.id, "PH"
-    db.commit()
-    c = TestClient(app, headers={"X-Admin-Token": "adm"})
-    ids = lambda: {r["id"] for r in c.get("/api/competitor-radar", params={"watched_only": "true", "limit": 500}).json()["rows"]}
-    assert adv.id not in ids()
-    assert c.post(f"/api/competitor-radar/{adv.id}/watch", params={"watched": "true"}).status_code == 200
-    assert adv.id in ids()

@@ -1,10 +1,12 @@
 import {
-  Activity, BadgeEuro, Bot, Camera, Database, Euro, Eye, Gauge, Gem, GitMerge, Globe, LayoutGrid, type LucideIcon, Megaphone,
-  PlaySquare, PlugZap, Radar, Search, ShoppingCart, Sparkles, Store, Table2, Tag, TrendingUp, Truck, Users, Zap,
+  Activity, BadgeEuro, Bot, Camera, Database, Euro, Eye, Gauge, GitMerge, LayoutGrid, type LucideIcon, Megaphone,
+  PlaySquare, PlugZap, Radar, Search, ShoppingCart, Sparkles, Store, Tag, TrendingUp, Truck, Users,
 } from "lucide-react";
 
 export type NavItem = { href: string; label: string; icon: LucideIcon; hint?: string; children?: NavItem[]; admin?: boolean };  // admin = internal system page: never in the MKT sidebar (no ADMIN accounts)
 export type NavGroup = { group: string; items: NavItem[]; hidden?: boolean };
+/** EU Market is kept in code but hidden from the UI (user, 2026-10-26). NEXT_PUBLIC_EU_MARKET=1 shows it again. */
+export const EU_VISIBLE = process.env.NEXT_PUBLIC_EU_MARKET === "1";
 
 /** Single source of truth for the sidebar + the header title. Routes are unchanged from the pre-shadcn app. */
 export const NAV: NavGroup[] = [
@@ -20,25 +22,20 @@ export const NAV: NavGroup[] = [
   { group: "Khám phá sản phẩm", items: [
     { href: "/search", label: "Tìm sản phẩm", icon: Search, hint: "Tìm trong kho hoặc quét trực tiếp mọi nguồn" },
     { href: "/visual", label: "Tìm bằng ảnh", icon: Camera, hint: "Ảnh trùng, sản phẩm giống, quảng cáo, nguồn hàng, so sánh giá từ một tấm ảnh" },
-    { href: "/product-radar", label: "Product Radar", icon: Zap },
-    { href: "/radar", label: "Product Discovery", icon: Radar },
-    { href: "/hidden-winners", label: "Hidden Winners", icon: Gem },
+    { href: "/radar", label: "Khám phá sản phẩm", icon: Radar, hint: "Theo kênh · Discovery · Đang chạy · Ít cạnh tranh · Bảng xếp hạng · Thị trường" },
   ]},
   { group: "Nguồn dữ liệu", items: [
     { href: "/ads", label: "Thư viện quảng cáo", icon: LayoutGrid, hint: "Mọi ad đã thu thập: Meta, TikTok, Snapchat" },
     { href: "/marketplace", label: "Nguồn hàng & Store", icon: ShoppingCart },
-    { href: "/vault", label: "Creative Vault", icon: PlaySquare, hint: "Video / ảnh đã lưu trong kho" },
+    { href: "/vault", label: "Creative Vault", icon: PlaySquare, hint: "Ảnh bìa giữ lâu, video chỉ trong ngày, Ghim để giữ" },
   ]},
   { group: "Thị trường", items: [
     { href: "/", label: "Daily Pulse", icon: Activity },
-    { href: "/markets", label: "Market Radar", icon: Globe },
-    { href: "/products", label: "Xếp hạng sản phẩm", icon: Table2 },
     { href: "/naming", label: "Đặt tên sản phẩm", icon: Tag, hint: "Tên theo bằng chứng + AI miễn phí (Groq / Cerebras / Cloudflare), quota từng provider" },
     { href: "/clusters", label: "Gom cụm sản phẩm", icon: GitMerge, hint: "Sản phẩm trùng: tự động gộp, MKT xác nhận, hoàn tác" },
     { href: "/competitor-radar", label: "Competitor Radar", icon: Users },
   ]},
-  // Temporarily hidden from the sidebar until the user requests re-enabling it.
-  { group: "EU Market", hidden: true, items: [
+  { group: "EU Market", hidden: !EU_VISIBLE, items: [
     { href: "/eu-market", label: "EU Market", icon: Euro, hint: "Mua bán, xu hướng, giá, hàng hiếm, nguồn hàng châu Âu", children: [
       { href: "/eu-market", label: "Overview", icon: Gauge },
       { href: "/eu-market/products", label: "Product Explorer", icon: Search },

@@ -133,6 +133,9 @@ class Store(Base):
     estimated_traffic: Mapped[float] = mapped_column(Float, default=0)
     traffic_growth: Mapped[float] = mapped_column(Float, default=0)  # % (Similarweb)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # landing page age (spy.fetch_landing): shopify / shoplazza / ladipage / woocommerce / unknown + Shopify published_at
+    page_platform: Mapped[str | None] = mapped_column(String(32))
+    page_published_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class Ad(Base):
@@ -310,6 +313,9 @@ class TrackedQuery(Base):
     last_count: Mapped[int] = mapped_column(Integer, default=0)
     last_new: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
+    # Meta Ad Library paging state per country ({country: {cursor, sid, tok, done, at}}): the next run continues deeper
+    # instead of re-reading the same first `limit` ads (every re-run of a query used to return 40 known ads → 0 new)
+    cursor: Mapped[dict | None] = mapped_column(JSON)
 
 
 class SearchJob(Base):

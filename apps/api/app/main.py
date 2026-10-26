@@ -29,7 +29,7 @@ app = FastAPI(title="Market Intelligence OS", version="0.1.0")
 
 
 app.add_middleware(ReadOnlyGets)
-from .workspace.auth import SessionGuard
+from .workspace.auth import SessionGuard, rate_limit
 from .workspace.accounts import router as accounts_router
 from .workspace.routes import router as workspace_router
 
@@ -81,6 +81,10 @@ app.include_router(pricing_router)
 from .routers.bridge import router as bridge_router  # noqa: E402 — Browser Bridge (extensions/allegro-bridge)
 
 app.include_router(bridge_router)
+from .routers.videos import router as videos_router  # noqa: E402 — video identity (design §2.2)
+from .videos import product_video_facts as video_facts  # noqa: E402
+
+app.include_router(videos_router)
 
 from .eu_market.jobs import enabled as eu_market_enabled  # noqa: E402
 
@@ -109,21 +113,14 @@ async def _startup():
     import asyncio
     import logging
 
-    from .db import SessionLocal, auto_migrate
+    from .db import SessionLocal, migrate_all, scheduler_lock
     from .media import enqueue_pending
     from .realtime import scheduler_loop
 
     logging.basicConfig(level=logging.INFO)
     for noisy in ("httpx", "httpcore"):  # one INFO line per request, with the full (signed) CDN URL — drowns real logs
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    from .workspace.migrate import migrate
-    migrate()
-    from .cluster_migrate import migrate as migrate_clusters
-    migrate_clusters()
-    from .similar import migrate as migrate_similar
-    migrate_similar()
-    from .personalization_migrate import migrate as migrate_personalization
-    migrate_personalization()
+    migrate_all()
     with SessionLocal() as db:
         ensure_default_connectors(db)
         from sqlalchemy import update
@@ -142,10 +139,17 @@ async def _startup():
 
         from . import platforms
 
+        from .services.enrichment import refresh_rates
+
+        refresh_rates(db)  # ECB rates for price → USD before anything converts a price
         platforms.backfill(db)  # rows from before network/channel existed; the scheduler's first full re-score picks them up
         adsignals.refresh(db)  # per-ad force / variation / target-market flags (cheap; keeps them in sync with .env)
         db.commit()
     if os.getenv("DISABLE_SCHEDULER", "").lower() not in ("1", "true"):  # else `python -m app.worker` runs all of this
+        app.state.scheduler_lock = scheduler_lock()
+        if app.state.scheduler_lock is None:
+            logging.getLogger(__name__).warning("scheduler already running in another process (worker) — not starting it here")
+            return
         from .media import requeue_lost
 
         logging.getLogger(__name__).info("media: %s lost creatives re-queued", requeue_lost())
@@ -327,7 +331,8 @@ def hidden_winners(tag: str | None = None, scope: str | None = None, status: str
 
 
 # ============================================================ Product 360
-from .services.spy import SKIP_HOST as _SKIP_HOST
+from .services.spy import SKIP_HOST as _SKIP_HOST, page_age_flag
+from .services.checklist import win_checklist
 
 
 def mkt_summary(ads: list[Ad], advs: dict, observations=()) -> dict:
@@ -335,6 +340,7 @@ def mkt_summary(ads: list[Ad], advs: dict, observations=()) -> dict:
     marketplace proof (reviews / sold / rank), how long the ads have run and where they send traffic."""
     from urllib.parse import urlparse
 
+    from .services.adsignals import days_running
     from .services.enrichment import to_usd, FX_TO_USD
     from .pricing.models import VERIFIED_COMPETITOR, VERIFIED_MARKETPLACE
 
@@ -386,7 +392,7 @@ def mkt_summary(ads: list[Ad], advs: dict, observations=()) -> dict:
     eng = lambda a: (a.likes or 0) + 3 * (a.comments_count or 0) + 5 * (a.shares or 0)
     top = sorted((a for a in spy if eng(a) or a.views), key=lambda a: (eng(a), a.views or 0), reverse=True)[:5]
     now = datetime.utcnow()
-    days = [((a.last_seen_at if not a.is_active else now) - a.first_seen_at).days for a in spy if a.first_seen_at]
+    days = [days_running(a, now) for a in spy if a.first_seen_at]
     domains = Counter(urlparse(a.landing_url).netloc.removeprefix("www.") for a in spy if a.landing_url)
     return {
         "floor": sorted(floor.values(), key=lambda r: r["usd"]),
@@ -420,7 +426,7 @@ def mkt_summary(ads: list[Ad], advs: dict, observations=()) -> dict:
         "top_ads": [{"id": a.id, "advertiser": advs[a.advertiser_id].name if a.advertiser_id in advs else None,
                      "text": (a.ad_text or a.title or "")[:200], "likes": a.likes, "comments": a.comments_count, "shares": a.shares,
                      "views": a.views, "network": a.network, "url": a.snapshot_url or a.landing_url, "active": a.is_active,
-                     "days": ((now if a.is_active else a.last_seen_at) - a.first_seen_at).days if a.first_seen_at else None}
+                     "days": days_running(a, now) if a.first_seen_at else None}
                     for a in top],
     }
 
@@ -463,6 +469,11 @@ def product_360(pid: int, db: Session = Depends(get_db)):
 
     snaps = db.scalars(select(ProductDailySnapshot).where(ProductDailySnapshot.product_id == pid).order_by(ProductDailySnapshot.date)).all()
     stores = db.scalars(select(Store).where(Store.product_id == pid).order_by(Store.estimated_traffic.desc())).all()
+    # page-age red flag compares against the video's first sighting on any page (video identity), else this product's
+    # first video ad, else its first ad — the same reference the checklist uses (services/checklist.checklists)
+    vf = video_facts(db, pid)
+    own_video = min((a.first_seen_at for a in ads if a.media_type == "video"), default=None)
+    video_first_seen = (vf["primary"] or {}).get("video_first_seen") or own_video or min((a.first_seen_at for a in ads), default=None)
     events = db.scalars(select(LifecycleEvent).where(LifecycleEvent.product_id == pid).order_by(LifecycleEvent.created_at.desc())).all()
     by_country = Counter(a.country for a in ads if a.is_active and not a.is_internal)
     hooks = Counter(a.hook for a in ads if a.is_active)
@@ -494,9 +505,12 @@ def product_360(pid: int, db: Session = Depends(get_db)):
         "creatives": creative_lib,
         "creative_mix": {"hooks": dict(hooks.most_common()), "angles": dict(angles.most_common()), "offers": dict(offers.most_common())},
         "stores": [{"domain": s.domain, "country": s.country, "price": s.price, "traffic": s.estimated_traffic,
-                    "traffic_growth": s.traffic_growth} for s in stores],
+                    "traffic_growth": s.traffic_growth, "page_platform": s.page_platform, "page_published_at": s.page_published_at,
+                    "page_age": page_age_flag(s, video_first_seen)} for s in stores],
         "pricing": {"points": price_points[-200:], "avg": f.get("avg_price"), "trend": f.get("price_trend")},
         "comments": comment_summary(db, [pid]),
+        "video_facts": vf,
+        "win_checklist": win_checklist(f, vf["primary"], own_video, video_first_seen, stores),
         "timeseries": [{"date": s.date.isoformat(), "active_ads": s.active_ads, "new_ads": s.new_ads, "advertisers": s.advertisers,
                         "saturation": s.saturation_score, "negative_comments": s.negative_comments, "comments": s.comments} for s in snaps],
         "lifecycle": {"current": p.lifecycle_status, "allowed": sorted(TRANSITIONS.get(p.lifecycle_status, [])),
@@ -538,7 +552,11 @@ def explain(pid: int, db: Session = Depends(get_db)):
 class MergeIn(BaseModel):
     source_id: int
     target_id: int
-    user: str | None = None
+
+
+def _by(db: Session) -> str:
+    """Who did it: the signed-in account (never a client-sent name); the internal service token has no account."""
+    return db.info.get("user_name") or "service"
 
 
 @app.post("/api/products/merge")
@@ -546,7 +564,12 @@ def merge(body: MergeIn, db: Session = Depends(get_db)):
     s, t = db.get(Product, body.source_id), db.get(Product, body.target_id)
     if not s or not t or s.id == t.id:
         raise HTTPException(400, "invalid products")
-    merge_products(db, s, t, by=body.user)
+    from . import allocation as A  # same exclusivity rule as cluster joins (cluster_membership.join)
+    A.expire(db)
+    held = [{a.user_id for _, a in A.owners(db, [pid])} for pid in (s.id, t.id)]
+    if held[0] and held[1] and len(held[0] | held[1]) > 1:
+        raise HTTPException(409, "Hai sản phẩm đang được hai MKT khác nhau nhận nên không gộp được. Gộp lại sau khi một bên trả sản phẩm.")
+    merge_products(db, s, t, by=_by(db))
     rescore_products(db, {t.id})  # was score_all: minutes of rescoring the whole catalogue for one merge
     db.commit()
     return {"ok": True, "target_id": t.id}
@@ -571,7 +594,6 @@ def _duplicate_of(db: Session, p: Product) -> dict | None:
 class NameIn(BaseModel):
     name: str | None = None  # canonical (matching) name — English / source language
     name_vi: str | None = None  # what MKT reads; "" clears it
-    user: str | None = None
 
 
 @app.patch("/api/products/{pid}/name")
@@ -581,21 +603,17 @@ def set_product_name(pid: int, body: NameIn, db: Session = Depends(get_db)):
         raise HTTPException(400, "name or name_vi required")
     if p.name_status == "UNKNOWN" and not (body.name or "").strip() and (body.name_vi or "").strip():
         body.name = body.name_vi  # an unidentified product named in Vietnamese only: that is its name too
-    naming.set_name(p, body.name, body.name_vi, body.user)
+    naming.set_name(p, body.name, body.name_vi, _by(db))
     db.commit()
     return {"ok": True, "product": product_card(p), "duplicate": _duplicate_of(db, p)}
 
 
-class ByIn(BaseModel):
-    user: str | None = None
-
-
 @app.post("/api/products/{pid}/name/confirm")
-def confirm_product_name(pid: int, body: ByIn, db: Session = Depends(get_db)):
+def confirm_product_name(pid: int, db: Session = Depends(get_db)):
     p = _product(db, pid)
     if p.name_status == "UNKNOWN":
         raise HTTPException(400, "Chưa có tên để xác nhận — nhập tên sản phẩm")
-    naming.confirm(p, body.user)
+    naming.confirm(p, _by(db))
     db.commit()
     return {"ok": True, "product": product_card(p)}
 
@@ -613,7 +631,6 @@ class SplitIn(BaseModel):
     ad_ids: list[int]
     name: str | None = None
     name_vi: str | None = None
-    user: str | None = None
 
 
 @app.post("/api/products/{pid}/split")
@@ -621,10 +638,10 @@ def split_product(pid: int, body: SplitIn, db: Session = Depends(get_db)):
     """Selected ads leave this product for a new one (named by MKT, or 'Chưa xác định sản phẩm')."""
     p = _product(db, pid)
     try:
-        new = split_ads(db, p, body.ad_ids, (body.name or "").strip() or None, body.user, body.name_vi)
+        new = split_ads(db, p, body.ad_ids, (body.name or "").strip() or None, _by(db), body.name_vi)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    clustering.record_cannot_link(db, p.id, new.id, body.user)  # MKT separated them: never auto-merge them back
+    clustering.record_cannot_link(db, p.id, new.id, _by(db))  # MKT separated them: never auto-merge them back
     rescore_products(db, {p.id, new.id})
     db.commit()
     return {"ok": True, "new_id": new.id, "duplicate": _duplicate_of(db, new) if new.name_status != "UNKNOWN" else None}
@@ -640,11 +657,11 @@ def product_merges(pid: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/products/{pid}/merges/{eid}/undo")
-def undo_merge(pid: int, eid: int, body: ByIn, db: Session = Depends(get_db)):
+def undo_merge(pid: int, eid: int, db: Session = Depends(get_db)):
     """Merge undone = its ads split back out under the old name; split undone = the split product merged back."""
     _product(db, pid)
     try:
-        touched = clustering.undo_event(db, pid, eid, body.user)
+        touched = clustering.undo_event(db, pid, eid, _by(db))
     except ValueError as e:
         raise HTTPException(400, str(e))
     rescore_products(db, touched)
@@ -657,6 +674,8 @@ def scan_product(pid: int, db: Session = Depends(get_db)):
     """On-demand competitor spy: prices from ad copy + landing pages, reviews from AliExpress / landing pages."""
     from .services import spy
 
+    if db.info.get("user_id"):  # each scan fetches up to 30 outside pages; before any query (SQLite: no open read txn)
+        rate_limit(f"scan:{db.info['user_id']}", 20, 3600)
     if not db.get(Product, pid):
         raise HTTPException(404, "Product not found")
     db.commit()  # the scan manages its own transactions (fetches run with no write lock held)
@@ -714,12 +733,21 @@ def competitors(country: str | None = None, watched_only: bool = False, offset: 
                 db: Session = Depends(get_db)):
     from .routers.intel import cached
 
-    rows = cached(("competitors", country, watched_only), lambda: _competitor_rows(country, watched_only, db))
+    rows = cached(("competitors", country), lambda: _competitor_rows(country, db))
+    mine = _followed(db)  # "watched" = this account's own follows, applied after the shared 60 s cache so a follow shows at once
+    rows = [r | {"watched": r["id"] in mine} for r in rows if not watched_only or r["id"] in mine]
     return {"rows": rows[offset: offset + limit], "total": len(rows), "has_more": offset + limit < len(rows),
-            "scaling": sum(1 for r in rows if r["scaling"])}
+            "scaling": sum(1 for r in rows if r["scaling"]), "watched": sum(1 for r in rows if r["watched"])}
 
 
-def _competitor_rows(country: str | None, watched_only: bool, db: Session) -> list[dict]:
+def _followed(db: Session) -> set[int]:
+    from .workspace.models import Follow
+
+    uid = db.info.get("user_id")
+    return set(db.scalars(select(Follow.advertiser_id).where(Follow.user_id == uid))) if uid else set()
+
+
+def _competitor_rows(country: str | None, db: Session) -> list[dict]:
     now = datetime.utcnow()
     ads = db.scalars(select(Ad).where(Ad.is_internal.is_(False), ADS_ONLY, Ad.advertiser_id.is_not(None))).all()
     by = defaultdict(list)
@@ -736,15 +764,13 @@ def _competitor_rows(country: str | None, watched_only: bool, db: Session) -> li
         adv = advs[aid]
         if not any(_in_scope(a) for a in lst):
             continue
-        if watched_only and not adv.is_competitor_watched:
-            continue
         active = [a for a in lst if a.is_active]
         n7 = sum(1 for a in lst if a.first_seen_at > now - timedelta(days=7))
         p7 = sum(1 for a in lst if now - timedelta(days=14) < a.first_seen_at <= now - timedelta(days=7))
         prods = Counter(a.product_id for a in active)
         rows.append({
             "id": aid, "name": adv.name, "country": adv.country, "platform": adv.platform, "page_url": adv.page_url,
-            "watched": adv.is_competitor_watched, "total_ads": len(lst), "active_ads": len(active), "new_ads_7d": n7, "prev_7d": p7,
+            "total_ads": len(lst), "active_ads": len(active), "new_ads_7d": n7, "prev_7d": p7,
             "growth_7d": round(n7 / p7 - 1, 2) if p7 else (None if not n7 else 9.99),
             "products": len(prods), "countries": sorted({a.country for a in active if a.country}),
             "top_products": [{"id": pid, "name": products[pid].canonical_name, "ads": n} for pid, n in prods.most_common(3) if pid in products],
@@ -763,25 +789,11 @@ def competitor_detail(aid: int, db: Session = Depends(get_db)):
     ads = db.scalars(select(Ad).where(Ad.advertiser_id == aid).order_by(Ad.first_seen_at.desc()).limit(50)).all()
     stores = db.scalars(select(Store).where(Store.advertiser_id == aid)).all()
     return {"advertiser": {"id": adv.id, "name": adv.name, "country": adv.country, "platform": adv.platform, "page_url": adv.page_url,
-                           "watched": adv.is_competitor_watched},
+                           "watched": aid in _followed(db)},
             "timeseries": [{"date": s.date.isoformat(), "active_ads": s.active_ads, "new_ads": s.new_ads, "products": s.products} for s in snaps],
             "ads": [{"id": a.id, "product_id": a.product_id, "text": a.ad_text, "country": a.country, "first_seen": a.first_seen_at,
                      "active": a.is_active, "price": a.price} for a in ads],
             "stores": [{"domain": s.domain, "traffic": s.estimated_traffic, "growth": s.traffic_growth} for s in stores]}
-
-
-@app.post("/api/competitor-radar/{aid}/watch")
-def watch(aid: int, watched: bool = True, db: Session = Depends(get_db)):
-    adv = db.get(Advertiser, aid)
-    if not adv:
-        raise HTTPException(404)
-    adv.is_competitor_watched = watched
-    db.commit()
-    from .routers.intel import _cache
-
-    for k in [k for k in _cache if isinstance(k, tuple) and k and k[0] == "competitors"]:  # the list is memoised 60 s: a watch must show at once
-        _cache.pop(k, None)
-    return {"ok": True}
 
 
 # ============================================================ Data import (§3): CSV templates / upload, manual URL
@@ -849,9 +861,12 @@ def ask(body: AskIn, db: Session = Depends(get_db)):
 
 
 @app.get("/api/health")
-def health():
+def health(db: Session = Depends(get_db)):
     import time
 
+    from .realtime import read_heartbeat
+
     cooling = time.time() < getattr(llm, "_cool_until", 0)
-    return {"ok": True, "llm": llm.available(),
+    hb = read_heartbeat(db)
+    return {"ok": True, "llm": llm.available(), "worker_heartbeat_age_s": hb and hb["age_s"],
             "llm_reason": "disabled" if llm._disabled else f"rate-limited, retry in {int(llm._cool_until - time.time())}s" if cooling else None}

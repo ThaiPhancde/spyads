@@ -69,6 +69,13 @@ def join(db, source_pid, target_pid, confidence, evidence, by, st, manual=False)
         return dst, None
     left = {pid for pid in nodes if root(nodes, pid) == src}
     right = {pid for pid in nodes if root(nodes, pid) == dst}
+    # Never unite two clusters held by two different MKT: it would break exclusivity (audit C2). Auto-merge parks the pair in
+    # the MKT review queue with this blocker; a manual accept gets a 409.
+    from .. import allocation as A
+    A.expire(db)
+    held = [{a.user_id for _, a in A.owners(db, side)} for side in (left, right)]
+    if held[0] and held[1] and len(held[0] | held[1]) > 1:
+        raise ValueError("allocation_conflict")
     for x in left:
         for y in right:
             px, py = st.prods.get(x), st.prods.get(y)

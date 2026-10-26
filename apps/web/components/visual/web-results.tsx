@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { BadgeCheck, BadgeEuro, Database, ExternalLink, Eye, Globe, ImageOff, Megaphone, Save, Truck } from "lucide-react";
 import { toast } from "sonner";
+import { EU_VISIBLE } from "@/components/layout/nav";
 import { Card, Pill } from "@/components/ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -109,10 +110,10 @@ export function WebResultCard({ r, jobId, index, cached, onChanged }: { r: any; 
               {busy === "verify" ? <Spinner /> : <BadgeEuro />} {r.price != null ? "Xác minh giá" : "Lấy giá từ trang"}</Button>
           )}
           {!r.in_database && <Button variant="outline" size="xs" onClick={save} disabled={!!busy} title="Lưu vào SpyAds để nghiên cứu tiếp (ảnh vào chỉ mục nội bộ)">{busy === "save" ? <Spinner /> : <Save />} Lưu</Button>}
-          {r.eu_product_id && <Button variant="ghost" size="xs" asChild><Link href={`/eu-market/products/view?id=${r.eu_product_id}`} title="Sản phẩm đã lưu · lịch sử giá">SP</Link></Button>}
+          {EU_VISIBLE && r.eu_product_id && <Button variant="ghost" size="xs" asChild><Link href={`/eu-market/products/view?id=${r.eu_product_id}`} title="Sản phẩm đã lưu · lịch sử giá">SP</Link></Button>}
           {img && <Button variant="ghost" size="xs" asChild><Link href={visualHref({ image_url: img, mode: "ads_match", origin: "local" } as any)} title="Quảng cáo liên quan (trong kho)"><Megaphone /></Link></Button>}
           {img && <Button variant="ghost" size="xs" asChild><Link href={visualHref({ image_url: img, mode: "find_suppliers", origin: "local" } as any)} title="Tìm nguồn hàng (trong kho)"><Truck /></Link></Button>}
-          <Button variant="ghost" size="xs" onClick={watch} disabled={!!busy} title="Lưu + theo dõi giá / offer mới">{busy === "watch" ? <Spinner /> : <Eye />}</Button>
+          {EU_VISIBLE && <Button variant="ghost" size="xs" onClick={watch} disabled={!!busy} title="Lưu + theo dõi giá / offer mới">{busy === "watch" ? <Spinner /> : <Eye />}</Button>}
         </div>
       </div>
     </Card>

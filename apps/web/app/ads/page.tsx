@@ -60,7 +60,7 @@ export default function AdsLibrary() {
 
   return (
     <div>
-      <PageHeader title="Thư viện quảng cáo" subtitle="Mọi quảng cáo đã thu thập từ mọi nền tảng, mỗi thẻ là một quảng cáo thật kèm video/ảnh tải về được. TikTok Ads gồm Creative Center Top Ads (PH/US/EU/ME) và TikTok Ad Library (EU/UK)." />
+      <PageHeader title="Thư viện quảng cáo" subtitle="Mọi quảng cáo đã thu thập từ mọi nền tảng, mỗi thẻ là một quảng cáo thật kèm ảnh bìa và link gốc để xem video. TikTok Ads gồm Creative Center Top Ads (PH/US/EU/ME) và TikTok Ad Library (EU/UK)." />
       <Card className="mb-4">
         {adId && <Button variant="outline" size="sm" onClick={() => setAdId("")}>Đang xem Ads #{adId} · Xem tất cả</Button>}
         <AdvertiserFilters />
