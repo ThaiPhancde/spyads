@@ -563,6 +563,7 @@ from . import preferences  # noqa: E402,F401 — Phase 4 MKT preference profiles
 from . import recommend  # noqa: E402,F401 — Phase 5 personalized recommendation cache
 from . import interest  # noqa: E402,F401 — app_settings (soft-dedup penalty knobs)
 from . import crawl_queue  # noqa: E402,F401 — Phase 3 persistent crawl jobs (crawl_jobs / crawl_runs)
+from . import creative_reuse  # noqa: E402,F401 — P4 creative_reuse_observations
 
 
 class IngestBatch(Base):

@@ -427,6 +427,8 @@ ENGAGEMENT_EVERY_S = int(_os.getenv("ENGAGEMENT_EVERY_S", "30"))  # engagement q
 PRICE_EVERY_S = int(_os.getenv("PRICE_EVERY_S", "30"))  # price enrichment queue (pricing/jobs.py); 0 = off in this worker
 NAMING_EVERY_MIN = float(_os.getenv("NAMING_EVERY_MIN", "3"))  # naming_jobs: model pass for unidentified products + Vietnamese names; 0 = off
 _last_naming = datetime.min
+REUSE_EVERY_MIN = float(_os.getenv("REUSE_EVERY_MIN", "60"))  # creative_reuse: observations per (video family, ad); 0 = off
+_last_reuse = datetime.min
 CREATIVE_ENRICH_EVERY_MIN = float(_os.getenv("CREATIVE_ENRICH_EVERY_MIN", "10"))  # creative_enrich: OCR / transcript for unreadable TEST ads; 0 = off
 _last_creative = datetime.min
 CLUSTER_EVERY_MIN = float(_os.getenv("CLUSTER_EVERY_MIN", "180"))  # cluster_jobs: merge certain duplicate products, queue the rest for MKT; 0 = off
@@ -450,7 +452,7 @@ def _heavy() -> int:
 
 
 async def scheduler_loop():
-    global _last_daily, _last_media, _last_cleanup, _last_liveness, _last_spy, _last_eu, _last_visual, _last_price, _last_naming, _last_creative, _last_cluster, _last_engagement
+    global _last_daily, _last_media, _last_cleanup, _last_liveness, _last_spy, _last_eu, _last_visual, _last_price, _last_naming, _last_creative, _last_cluster, _last_engagement, _last_reuse
     await asyncio.sleep(5)
     while True:
         try:
@@ -510,6 +512,10 @@ async def scheduler_loop():
                 _last_creative = now
                 _running.add("creative")
                 asyncio.get_running_loop().run_in_executor(None, _creative_wrapper)
+            if REUSE_EVERY_MIN and now - _last_reuse >= timedelta(minutes=REUSE_EVERY_MIN) and "reuse" not in _running:
+                _last_reuse = now
+                _running.add("reuse")
+                asyncio.get_running_loop().run_in_executor(None, _reuse_wrapper)
             if CLUSTER_EVERY_MIN and now - _last_cluster >= timedelta(minutes=CLUSTER_EVERY_MIN) and "cluster" not in _running:
                 _last_cluster = now
                 _running.add("cluster")
@@ -628,6 +634,19 @@ def start_crawl(cid: int, q: TrackedQuery | None = None) -> bool:
         return False
     threading.Thread(target=_job_wrapper, args=(key, cid, q, token), daemon=True, name=f"crawl-{key}").start()
     return True
+
+
+def _reuse_wrapper():
+    """creative_reuse.refresh: one observation per (video family, ad) — the experimental reuse insight (P4)."""
+    from . import creative_reuse
+
+    try:
+        with SessionLocal() as db:
+            log.info("creative reuse: %s", creative_reuse.refresh(db))
+    except Exception:
+        log.exception("creative reuse refresh failed")
+    finally:
+        _running.discard("reuse")
 
 
 def _cleanup_job():

@@ -5,6 +5,7 @@ from sqlalchemy import inspect, text
 
 from .db import engine
 from .crawl_queue import CrawlJob, CrawlRun
+from .creative_reuse import CreativeReuseObservation
 from .models import IngestBatch, MetaCollation
 
 log = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ def migrate(bind=None):
     with (bind or engine).begin() as conn:
         if conn.dialect.name == "postgresql":
             conn.execute(text("SELECT pg_advisory_xact_lock(727004)"))
-        for model in (IngestBatch, MetaCollation, CrawlJob, CrawlRun):
+        for model in (IngestBatch, MetaCollation, CrawlJob, CrawlRun, CreativeReuseObservation):
             model.__table__.create(conn, checkfirst=True)
         insp = inspect(conn)
         for table, cols in COLUMNS.items():

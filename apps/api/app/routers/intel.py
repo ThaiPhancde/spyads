@@ -1399,6 +1399,15 @@ def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
     return {**stats, "invalid": stats["invalid"] + len(body.items) - len(valid), "idempotency_key": key.removeprefix("extension:")}
 
 
+@router.get("/api/products/{pid}/creative-reuse")
+def product_creative_reuse(pid: int, db: Session = Depends(get_db)):
+    """P4: who else runs this product's videos — pages, shops, markets, our observation times and the evidence.
+    Features are experimental: displayed, never part of TEST / TEST_NOW."""
+    from .. import creative_reuse
+
+    return {"families": creative_reuse.for_product(db, pid), "experimental": True}
+
+
 class DriftIn(BaseModel):
     """What the extension saw: an Ad Library response mentioning ad_archive_id from which it could read no ad.
     Key names only (no values: nothing the user browsed leaves the page)."""

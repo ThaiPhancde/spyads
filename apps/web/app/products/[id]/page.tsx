@@ -222,6 +222,39 @@ function StorePageCard({ stores }: { stores: any[] }) {
 
 const TABS = ["Video & Discovery", "Overview", "Market & Ads", "Creative Library", "Comments"];
 
+const EVIDENCE: Record<string, string> = { video_fp_v2: "Vân tay video v2", video_fp_v1: "Vân tay video v1", poster_phash: "Ảnh bìa giống", same_file: "Cùng file" };
+
+/** P4 — experimental: who else runs this product's videos. Our observation times + the evidence; never part of TEST / TEST_NOW. */
+function ReuseCard({ productId }: { productId: string }) {
+  const { data } = useApi(`/products/${productId}/creative-reuse`);
+  const fams: any[] = data?.families || [];
+  return (
+    <Card title="Video được tái sử dụng (thử nghiệm — không tính vào TEST / TEST_NOW)" className="xl:col-span-3" pad={false}>
+      {!fams.length ? <div className="p-4"><Empty>Chưa có video nào của sản phẩm thuộc một nhóm vân tay.</Empty></div> : fams.map((f) => (
+        <div key={f.family_key} className="border-b p-4 last:border-b-0">
+          <div className="text-xs text-muted-foreground">
+            {f.family_key} · {f.features.ad_count} ad · {f.features.collation_variants} biến thể Meta · {f.features.distinct_pages} page ·{" "}
+            {f.features.distinct_shop_id} shop · thị trường {f.features.markets.join(", ") || "—"} · +{f.features.new_distinct_pages_7d} page mới 7 ngày ·{" "}
+            {f.features.reuse_velocity_7d} ad/ngày (7 ngày) · thấy lần đầu {f.features.earliest_observed_video_at ? fmt.dt(f.features.earliest_observed_video_at) : "—"}
+          </div>
+          <Table>
+            <TableHeader><TableRow><TableHead>Page / nhà quảng cáo</TableHead><TableHead>Thị trường</TableHead><TableHead>Bằng chứng</TableHead><TableHead>Thấy đầu → cuối</TableHead></TableRow></TableHeader>
+            <TableBody>{f.observations.map((o: any) => (
+              <TableRow key={o.ad_id}>
+                <TableCell className="text-xs">{o.advertiser || o.page_id || "—"}<div className="text-muted-foreground">page {o.page_id || "—"}</div></TableCell>
+                <TableCell className="text-xs">{o.market || "—"}</TableCell>
+                <TableCell className="text-xs">{EVIDENCE[o.evidence?.kind] || o.evidence?.kind}{o.evidence?.confidence != null ? ` · tin cậy ${Math.round(o.evidence.confidence * 100)}%` : ""}
+                  {o.evidence?.snapshot_url && <> · <a className="underline" href={o.evidence.snapshot_url} target="_blank" rel="noreferrer">Ad Library</a></>}</TableCell>
+                <TableCell className="text-xs">{o.first_seen_at ? fmt.dt(o.first_seen_at) : "—"} → {o.last_seen_at ? fmt.dt(o.last_seen_at) : "—"}</TableCell>
+              </TableRow>
+            ))}</TableBody>
+          </Table>
+        </div>
+      ))}
+    </Card>
+  );
+}
+
 export default function Product360({ params }: { params: { id: string } }) {
   const { data, error, reload } = useApi(`/products/${params.id}`);
   if (!data) return <Loading error={error} />;
@@ -374,6 +407,7 @@ export default function Product360({ params }: { params: { id: string } }) {
                 {!data.creatives.length && <Empty>Chưa có creative.</Empty>}
               </ScrollArea>
             </Card>
+            <ReuseCard productId={params.id} />
           </div>
         </TabsContent>
 
