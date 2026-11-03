@@ -64,7 +64,7 @@ def fetch(db, advertiser):
             if any(str(r.page_id) != pid for r in page):
                 raise ConnectorError("Nguồn trả Ads của advertiser khác; không ghi nhận lượt quét thành công")
             records.extend(page)
-            if state.get("done") or len(records) >= limit:
+            if state.get("done") or state.get("page_status") == "partial" or len(records) >= limit:
                 break
         return ScanResult(records[:limit], bool(state.get("done")) and len(records) <= limit)
     if advertiser.source == "meta_graph":

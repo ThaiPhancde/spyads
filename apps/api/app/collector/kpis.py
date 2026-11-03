@@ -77,3 +77,13 @@ def collector_kpis(db: Session, hours: int = 24, now: datetime | None = None) ->
     totals["retry_wait"] = sum(r["retry_wait"] for r in out)
     totals["blocked_jobs"] = sum(r["blocked_jobs"] for r in out)
     return {"window_hours": hours, "generated_at": now, "totals": totals, "connectors": out, "media": dict(media)}
+
+
+if __name__ == "__main__":  # operators: the Data & Connectors system area is service-token only (no browser access)
+    import json
+    import sys
+
+    from ..db import SessionLocal
+
+    with SessionLocal() as db:
+        print(json.dumps(collector_kpis(db, int(sys.argv[1]) if len(sys.argv) > 1 else 24), default=str, ensure_ascii=False, indent=1))

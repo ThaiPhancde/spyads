@@ -308,7 +308,7 @@ function MonitoringCard({ byKey }: { byKey: any }) {
                             <Pill tone={jt}>{jl}</Pill>
                             <span className="text-muted-foreground">{j.key.startsWith("q:") ? "truy vấn" : "sync"}</span>
                             {j.cursor && <span>cursor {j.cursor.resumable}/{j.cursor.countries} nước còn trang · {j.cursor.done} xong</span>}
-                            {j.retry_count > 0 && <span className="text-warning">thử lại #{j.retry_count} lúc {when(j.next_retry_at)}</span>}
+                            {j.retry_count > 0 && j.next_retry_at && <span className="text-warning">thử lại #{j.retry_count} lúc {when(j.next_retry_at)}</span>}
                             {j.status === "running" && <span className="text-muted-foreground">{j.lease_owner} · nhịp {when(j.heartbeat_at)}</span>}
                             {j.last_error && j.status !== "idle" && <span className="truncate text-critical" title={j.last_error}>{j.last_error.slice(0, 80)}</span>}
                           </div>

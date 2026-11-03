@@ -240,6 +240,8 @@ def table_ttls() -> dict[str, tuple[str, int]]:
         "raw_records": ("ingested_at", 90),
         "price_jobs": ("finished_at", 90), "engagement_jobs": ("finished_at", 90),  # freshness lives in the observations
         "mkt_notifications": ("created_at", 180), "mkt_activity": ("created_at", 365),
+        # extension receipts: the outbox retries for hours, never months; crawl history feeds the 30-day KPI window
+        "collector_ingest_batches": ("created_at", 30), "crawl_runs": ("started_at", 90),
         # the preference profile reads events up to PREFERENCE_MAX_AGE_DAYS back; keep a month more
         "mkt_behavior_events": ("created_at", ceil(max_age_days()) + 30),
     }

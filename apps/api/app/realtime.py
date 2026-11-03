@@ -13,7 +13,6 @@ import queue
 import re
 import threading
 import time
-import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 
@@ -65,8 +64,10 @@ def _params_from(c: Connector, q: TrackedQuery | None = None) -> FetchParams:
                        active_only=c.adapter not in HISTORY_ADAPTERS, extra={"resume": resume} if resume else {})
 
 
-def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchParams | None = None) -> dict:
-    """Fetch → ingest → incremental score. Runs in a worker thread."""
+def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchParams | None = None,
+                  lease: tuple[str, str] | None = None) -> dict:
+    """Fetch → ingest → incremental score. Runs in a worker thread. `lease` = (crawl key, token): the batch and the cursor
+    commit only while this worker still holds the crawl (crawl_queue.holds)."""
     t0 = time.perf_counter()
     with SessionLocal() as db:
         c = db.get(Connector, cid)
@@ -88,8 +89,7 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                     r.matched_query = p.query
                     recs.append(r)
             with ingest_lock():
-                stats = (ingest_batch(db, recs, "scheduled:" + str(uuid.uuid4()))
-                         if c.adapter in HISTORY_ADAPTERS else ingest_ads(db, recs))
+                stats = ingest_batch(db, recs) if c.adapter in HISTORY_ADAPTERS else ingest_ads(db, recs)
                 c = db.get(Connector, cid)
                 c.status, c.health, c.last_error = "ok", "healthy", None
                 if not recs and c.adapter == "export":
@@ -109,8 +109,14 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                     pages = plist[0].extra.get("resume_out")
                     if pages is not None:  # paging state for the next run (see _params_from)
                         q.cursor = {"at": datetime.utcnow().isoformat(), "pages": pages}
+                if lease and not crawl_queue.holds(db, *lease):
+                    raise crawl_queue.LeaseLost(f"{lease[0]}: lease moved to another worker — this run's data is discarded")
                 db.commit()
-            after_business_events(db, set(stats["product_ids"]))
+                try:  # the data is committed: a re-score failure is logged, never a failed crawl (its retry would skip a page)
+                    after_business_events(db, set(stats["product_ids"]))
+                except Exception:
+                    log.exception("connector %s: re-score after sync failed", cid)
+                    db.rollback()
             result.update(fetched=len(recs), pages=getattr(connector, "pages_fetched", None), empty_pages=getattr(connector, "empty_pages", None),
                           **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source",
                                                    "invalid", "excluded_entertainment")})
@@ -119,6 +125,9 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
             if isinstance(e, OperationalError):
                 log.exception("connector %s: batch lost (sqlite busy)", cid)
             db.rollback()
+            if isinstance(e, crawl_queue.LeaseLost):  # a stale worker writes nothing, not even the connector's status
+                log.warning("%s", e)
+                return {**result, "error": str(e), "lease_lost": True}
             for _try in range(3):  # the failure may itself be "database is locked": retry the status write briefly
                 try:
                     c = db.get(Connector, cid)
@@ -243,7 +252,7 @@ def _run_search(job_id: int, more: int = 0):
                                 empty = 0 if recs else empty + 1
                                 got += len(recs)
                                 q.put(("batch", cid, name, recs, key, dict(st), kw))
-                                if empty >= 3:
+                                if empty >= 3 or st.get("page_status") == "partial":
                                     break  # pause, never claim end without source confirmation
                     elif not more:  # single-shot sources (Apify, REST…): only on the first run
                         batch: list = []
@@ -309,8 +318,7 @@ def _run_search(job_id: int, more: int = 0):
                 try:
                     for r in recs:
                         r.matched_query = kw
-                    res = (ingest_batch(db, recs, "search:" + str(uuid.uuid4()))
-                           if adapter_by.get(cid) in HISTORY_ADAPTERS else ingest_ads(db, recs))
+                    res = ingest_batch(db, recs) if adapter_by.get(cid) in HISTORY_ADAPTERS else ingest_ads(db, recs)
                     if res["errors"] and not (res["new_ads"] or res["updated_ads"]):
                         errors.append(f"{name}: lưu vào kho lỗi — {_redact(res['errors'][0])[:200]}")
                     s = sources[name]
@@ -562,7 +570,7 @@ def _job_wrapper(key, cid, q, token):
     try:
         with crawl_queue.leased(key, token):
             with _slots:
-                r = run_connector(cid, query=q)
+                r = run_connector(cid, query=q, lease=(key, token))
         if r.get("error"):
             crawl_queue.fail(key, token, r["error"], blocked=r.get("health") == "blocked")
         else:
@@ -809,8 +817,8 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
                     recs_all += recs
                     # only ads Meta reports running count as alive; collation siblings' own status is unknown in this mode
                     seen |= {r.source_ad_id for r in recs if r.active is not False}
-                    if st.get("done"):
-                        break
+                    if st.get("done") or st.get("page_status") == "partial":
+                        break  # partial = page 1 from the SSR fallback: incomplete, so no misses are counted
             except Exception:
                 out["errors"] += 1
                 continue

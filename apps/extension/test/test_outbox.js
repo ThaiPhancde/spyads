@@ -29,3 +29,14 @@ test("bounded exponential retry and rejected batches retained", async () => {
   await drain(store, async () => { throw Error("401"); }, () => 0);
   assert.equal(store.rows.size, 1); assert.equal(store.rows.get("bad").error, "401");
 });
+test("permanent rejections are kept but never retried; auth errors keep retrying", async () => {
+  const store = memory();
+  await store.put({ id: "bad", nextAt: 0 }); await store.put({ id: "auth", nextAt: 0 });
+  let calls = 0;
+  const send = async (r) => { calls++; throw Object.assign(Error(r.id), { status: r.id === "bad" ? 422 : 401 }); };
+  await drain(store, send, () => 0);
+  assert.equal(store.rows.get("bad").dead, true); assert.ok(!store.rows.get("auth").dead);
+  calls = 0;
+  await drain(store, send, () => 10 ** 13);
+  assert.equal(calls, 1); assert.equal(store.rows.size, 2);
+});

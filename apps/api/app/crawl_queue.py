@@ -79,21 +79,42 @@ def backoff(retry_count: int) -> timedelta:
     return timedelta(seconds=min(RETRY_CAP_S, RETRY_BASE_S * 2 ** max(0, retry_count - 1)))
 
 
+LOST = "lease expired (worker stopped or stalled)"
+
+
 def _lose(db, job: CrawlJob, now: datetime):
+    """The run whose lease expired is lost. A lost run counts as a failed attempt: a crawl that kills or hangs its worker
+    backs off like any failure, and after MAX_RETRIES waits RETRY_CAP_S — its last_sync_at never moved, so the regular
+    schedule alone would pick it again on every tick."""
     db.execute(update(CrawlRun).where(CrawlRun.run_token == job.run_token, CrawlRun.status == "running")
-               .values(status="lost", finished_at=now, error="lease expired (worker stopped or stalled)"))
+               .values(status="lost", finished_at=now, error=LOST))
+    job.retry_count += 1
+    job.last_error = LOST
+    if job.retry_count <= MAX_RETRIES:
+        job.status, job.next_retry_at = "retry_wait", now + backoff(job.retry_count)
+    else:
+        job.status, job.next_retry_at, job.retry_count = "error", now + timedelta(seconds=RETRY_CAP_S), 0
+    job.run_token, job.lease_owner, job.lease_until, job.updated_at = None, None, None, now
+
+
+class LeaseLost(Exception):
+    """This worker no longer holds the crawl: its writes must not land."""
+
+
+def holds(db, key: str, token: str) -> bool:
+    """Inside the caller's transaction, lock the job row and check the token: commit right after (the row lock keeps a
+    recovering / claiming worker out until then), so a stale worker can never commit data or a checkpoint."""
+    return db.scalar(select(CrawlJob.run_token).where(CrawlJob.key == key, CrawlJob.status == "running").with_for_update()) == token
 
 
 def recover(now: datetime | None = None) -> int:
-    """Running jobs whose lease ran out: the run is lost, the job is retried at once. Called on worker start and every tick."""
+    """Running jobs whose lease ran out: the run is lost and retried after backoff. Called on worker start and every tick."""
     now = now or datetime.utcnow()
     with SessionLocal.begin() as db:
         jobs = db.scalars(select(CrawlJob).where(CrawlJob.status == "running", CrawlJob.lease_until < now)
                           .with_for_update(skip_locked=True)).all()
         for job in jobs:
             _lose(db, job, now)
-            job.status, job.run_token, job.lease_owner, job.lease_until = "retry_wait", None, None, None
-            job.next_retry_at, job.updated_at = now, now
     if jobs:
         log.warning("crawl queue: recovered %d job(s) with an expired lease", len(jobs))
     return len(jobs)
@@ -122,10 +143,10 @@ def claim(key: str, kind: str, connector_id: int | None, query_id: int | None = 
                 db.flush()
             if job.status == "running" and job.lease_until and job.lease_until > now:
                 return None
-            if job.status == "retry_wait" and job.next_retry_at and job.next_retry_at > now:
-                return None
-            if job.status == "running":  # lease ran out and recover() has not seen it yet
+            if job.status == "running":  # lease ran out and recover() has not seen it yet: same as recover()
                 _lose(db, job, now)
+            if job.status in ("retry_wait", "error") and job.next_retry_at and job.next_retry_at > now:
+                return None
             token = secrets.token_hex(24)
             job.status, job.run_token, job.lease_owner = "running", token, worker
             job.lease_until, job.heartbeat_at, job.updated_at = now + timedelta(seconds=LEASE_S), now, now

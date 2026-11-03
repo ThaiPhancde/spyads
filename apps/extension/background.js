@@ -10,7 +10,7 @@ async function post(path, body, endpoint) {
   const headers = { "Content-Type": "application/json" };
   if (c.token) headers["X-Ingest-Token"] = c.token;
   const r = await fetch(base(c) + path, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
-  if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 160));
+  if (!r.ok) throw Object.assign(new Error(r.status + " " + (await r.text()).slice(0, 160)), { status: r.status });
   return r.json();
 }
 

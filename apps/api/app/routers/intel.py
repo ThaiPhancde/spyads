@@ -1370,9 +1370,10 @@ def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
 
     payload = body.model_dump(exclude={"idempotency_key"})
     key = "extension:" + (body.idempotency_key or digest(payload))
-    if any(not it.get("ad_archive_id") for it in body.items):
-        raise HTTPException(422, "Every item needs ad_archive_id")
-    recs = [map_library_ad(it, "meta_library", (body.country or "").upper() or None) for it in body.items]
+    valid = [it for it in body.items if it.get("ad_archive_id")]
+    if not valid:  # nothing to store: a permanent rejection, the extension stops retrying this batch
+        raise HTTPException(422, "No item has an ad_archive_id")
+    recs = [map_library_ad(it, "meta_library", (body.country or "").upper() or None) for it in valid]
     with ingest_lock():
         try:
             stats = ingest_batch(db, recs, key, saved_by=body.saved_by, payload=payload)
@@ -1384,7 +1385,8 @@ def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
             db.rollback()
             raise
     realtime.after_business_events(db, set(stats["product_ids"]))
-    return {**stats, "idempotency_key": key.removeprefix("extension:")}
+    # items without an id are skipped (as before the outbox), counted, never a reason to refuse the rest of the batch
+    return {**stats, "invalid": stats["invalid"] + len(body.items) - len(valid), "idempotency_key": key.removeprefix("extension:")}
 
 
 # ============================================================ Storage retention

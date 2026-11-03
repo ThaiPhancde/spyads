@@ -218,6 +218,8 @@ class MetaLibraryConnector(BaseConnector):
             while got < params.limit and not st.get("done"):
                 try:
                     recs, st = self.fetch_page(params, country, st)
+                except (Blocked, RateLimited):
+                    raise  # not an expired cursor: dropping it and asking page 1 again would only make it worse
                 except ConnectorError:
                     if not resumed:
                         raise
@@ -225,14 +227,15 @@ class MetaLibraryConnector(BaseConnector):
                     continue
                 out[country] = {k: st.get(k) for k in ("cursor", "sid", "tok", "done")}
                 empty = 0 if recs else empty + 1  # Meta sends empty pages mid-stream; pause after several; only page_info declares the end
-                if empty >= 3:
-                    break
+                stop = empty >= 3 or st.get("page_status") == "partial"
                 for rec in recs:
                     if params.media_type and rec.creative_type != params.media_type:
                         continue
                     got += 1
                     yield rec
                     # Finish the whole fetched page before exposing its next cursor.
+                if stop:
+                    break  # this page's ads are out; pausing never claims the end
 
     def fetch_page(self, params: FetchParams, country: str, state: dict | None = None) -> tuple[list[AdRecord], dict]:
         """One page (~10 ads) with a resume cursor, so the UI can 'load more' from where it stopped.
@@ -264,9 +267,15 @@ class MetaLibraryConnector(BaseConnector):
             try:  # GraphQL broke on page 1 → server-rendered payload (first page only)
                 raw_ads = ssr_search(params.query or "", country.upper(), params.active_only, params.page_ids,
                                      params.media_type, self.config.get("proxy") or None)
+            except Blocked:
+                raise
             except Exception as e2:
                 raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}; SSR: {type(e2).__name__}: {e2}") from e
-            resp, cursor = {"ads": raw_ads, "page_info": {"has_next_page": False}, "ssr_only": True}, None
+            # SSR has page 1 and no cursor: not the end of the results — "partial" pauses the loop, the next run retries GraphQL
+            recs = [map_library_ad(raw, self.key, country) for raw in raw_ads]
+            st.update(cursor=None, done=False, page_status="partial")
+            self.pages_fetched = getattr(self, "pages_fetched", 0) + 1
+            return recs, st
         if isinstance(resp, dict) and resp.get("rate_limited"):
             raise RateLimited("Meta Ad Library rate limit")
         if not isinstance(resp, dict) or any(resp.get(k) for k in ("error", "errors", "session_expired")):

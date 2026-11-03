@@ -23,6 +23,7 @@ from .events import publish
 from .db import read_only
 from .markets import known_country
 from .models import Ad, AdSource, Creative, MetaCollation, Product
+from sqlalchemy.exc import DataError, IntegrityError
 from .platforms import channel_of, network_of
 from .services import content_filter
 from .services import enrichment as E
@@ -232,7 +233,9 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
                 new_creatives += _attach_creatives(db, ad, rec)
                 db.flush()
         except Exception as e:
-            if atomic:
+            # atomic batch: a record the DB rejects (its savepoint rolled back) is skipped like before — re-fetching the page
+            # would hit it again forever; anything else (lost connection, disk, bug) aborts the batch and its checkpoint
+            if atomic and not isinstance(e, (IntegrityError, DataError, ValueError)):
                 raise
             stats["errors"].append(f"{rec.source}:{rec.source_ad_id}: {type(e).__name__}: {e}")
     db.flush()

@@ -1,7 +1,7 @@
 # Meta Collector Upgrade
 
 Spec: [Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md](Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md).
-Trạng thái: **Phase 1–5 xong** (2026-11-03). Nghiệm thu: mục cuối.
+Trạng thái: **Phase 1–5 xong, đã nghiệm thu** (2026-11-03). Kết quả nghiệm thu: mục cuối.
 
 ## Phase 1 — Meta Collector Reliability
 
@@ -318,3 +318,54 @@ Không thêm bộ đếm mới — đọc lại dữ liệu đã có:
 | `tsc --noEmit` (apps/web) | không lỗi ở `data/page.tsx` |
 
 Test chạy qua `run_connector` + `ingest_batch` thật: 2 lượt × 3 ad × 2 trang (1 rỗng) → trang 4, rỗng 2, nhận 6, mới 3, chấp nhận 6, trùng 3, không hợp lệ 0, cursor 1/2 nước còn trang; nguồn lỗi → health `error`, job `retry_wait` với `retry_count` 1; live search chỉ đếm job trong cửa sổ (job 3 ngày trước bị loại); media 4 creative → xem được 50 %; endpoint 200 với `hours=168`, 422 với `hours=0`.
+
+## Nghiệm thu toàn bộ (2026-11-03)
+
+### Cách làm
+
+1. **Review độc lập**: một agent review khác đọc `git diff e8cfee4..HEAD`, chỉ được đưa code, không được đưa kết luận của người viết. Mọi phát hiện được kiểm chứng lại với code trước khi sửa.
+2. **Kiểm thử tự động**: toàn bộ suite trên SQLite; các test của nhánh trên PostgreSQL 18 với DB sạch; toàn bộ suite trên PostgreSQL; extension; typecheck toàn bộ web.
+3. **Smoke test end-to-end**: `apps/api/scripts/verify_collector_browser.py` chạy API (8014) + Next (3004) thật trên SQLite tạm, gọi HTTP thật và mở Edge thật. Không đụng DB thật.
+
+### Phát hiện của review và cách xử lý
+
+| # | Phát hiện | Kết luận | Xử lý |
+|---|-----------|----------|-------|
+| 1 | 1 bản ghi bị DB từ chối làm hỏng cả batch atomic → cursor kẹt mãi, outbox retry mãi | **Đúng** | Lỗi dữ liệu (`IntegrityError`, `DataError`, `ValueError`) bị bỏ qua theo từng bản ghi (savepoint), như hành vi cũ; lỗi hạ tầng vẫn huỷ batch |
+| 2 | SSR fallback đánh dấu `done` → không bao giờ "load more" | **Đúng** | SSR = `page_status: partial`, không `done`; mọi vòng phân trang (scheduled, live search, liveness, competitor scan) tạm dừng, lần sau thử lại GraphQL |
+| 3 | `Blocked` bị bọc thành `ConnectorError`; `RateLimited` bị coi là cursor hết hạn → quay lại trang 1 | **Đúng** | Giữ nguyên loại lỗi; rate limit giữ cursor |
+| 4 | `recover()` không tính lượt thử → job làm sập worker bị chạy lại vô hạn | **Đúng, nặng hơn reviewer mô tả**: crash không cập nhật `last_sync_at`, nên kể cả ở `error` lịch thường vẫn claim lại *mỗi tick* | Lượt bị mất lease tính như 1 lần lỗi: backoff; quá `MAX_RETRIES` → `error` với thời gian chờ 1 h mà lịch thường không bỏ qua được |
+| 5 | Fencing không bảo vệ dữ liệu: worker mất lease vẫn commit ads + cursor | **Đúng** | `crawl_queue.holds()` khoá dòng job trong **cùng transaction** và kiểm tra token ngay trước commit; mất lease → rollback toàn bộ, không ghi cả status connector |
+| 6 | Outbox retry mãi batch bị từ chối vĩnh viễn; server 422 cả batch nếu 1 item thiếu id | **Đúng** | Server bỏ qua item thiếu id và đếm vào `invalid` (như trước Phase 1), chỉ 422 khi không còn item nào hợp lệ. Outbox: 400/404/409/413/422 → row `dead` (giữ lại, không retry); 401/403/429/5xx vẫn retry |
+| 7 | Batch atomic tắt LLM naming | Đúng — **đánh đổi đã ghi ở Phase 1** | Giữ nguyên; chờ quyết định sản phẩm (xem bên dưới) |
+| 8 | `collector_ingest_batches` tăng vô hạn, key UUID vô nghĩa | **Đúng** | Crawl phía server không ghi receipt (`ingest_batch(key=None)`); TTL: receipt 30 ngày, `crawl_runs` 90 ngày (`retention.table_ttls`) |
+| 9 | `assign_family` quét O(N) | Đúng — đã ghi giới hạn ở Phase 2 | Giữ nguyên |
+| 10 | Rescore lỗi sau khi data đã commit → crawl bị coi là lỗi, retry nhảy trang | **Đúng** | Rescore chạy trong `ingest_lock`, lỗi chỉ ghi log |
+| 11 | TikTok: 1 nước lỗi làm mất dữ liệu các nước khác | **Đúng** | Lỗi theo nước được cô lập; chỉ raise khi mọi nước đều lỗi |
+| — | "`/api/collector/kpis` không có auth" | **Sai** | `SessionGuard`: `/api/collector/*` chỉ cho service token; smoke test xác nhận 401 khi không có token |
+| — | "`meta_ads_collector` chưa cài, không chắc có `page_info`" | **Sai** | Đã cài; parser luôn trả `page_info` (`{}` ở nhánh lỗi) |
+
+Mỗi bản sửa có test hồi quy trong `tests/test_collector_review_fixes.py` (9 test), `tests/test_crawl_queue.py::test_crash_loop_is_capped`, `test_outbox.js`. Mutation check: bỏ phần bỏ qua lỗi dữ liệu → test poison fail; bỏ `holds()` → test stale lease fail.
+
+### Kết quả kiểm thử cuối
+
+| Bộ | Kết quả |
+|----|---------|
+| Toàn bộ `apps/api/tests`, SQLite | **497 passed**, 4 skipped |
+| Test của nhánh (7 file), PostgreSQL 18, DB sạch | **58 passed** |
+| Toàn bộ `apps/api/tests`, PostgreSQL | 489 passed, **2 failed — có sẵn từ trước** (xem dưới) |
+| Extension `node --test` | 3 passed |
+| `tsc --noEmit` toàn bộ apps/web | 0 lỗi |
+| `browser_worker.run("health")` với Edge đã cài | OK (Edge 156) |
+| `scripts/verify_collector_browser.py` (API + Next + Edge thật) | **22/22 kiểm tra pass**, không có lỗi trang |
+
+Smoke test kiểm tra: extension gửi lại cùng key → cùng receipt, 1 ad; cùng key khác payload → 409; không token → 401; worker chết → run `lost` + backoff; sau backoff worker mới nhận job; nút Sync khi worker đang giữ lease → `already_running`; KPI (trang 4/2 rỗng, nhận 30, chấp nhận 28, trùng 18, không hợp lệ 2, lọc 1, 2 ok + 1 lost, live search 120, TikTok blocked, media 75 %); tab Giám sát hiển thị đúng các số đó.
+
+### Vấn đề có sẵn, ngoài phạm vi nhánh (chưa sửa)
+
+- **2 test PostgreSQL fail**: `test_clustering.py::test_clip_alone_is_never_enough_to_merge` và `::test_stock_picture_hash_shared_by_many_ads_is_ignored` fail khi chạy sau `test_cluster_phase1.py` trên PG. Fail y hệt trên commit gốc `e8cfee4`; chạy riêng thì pass. Đây là lỗi cô lập dữ liệu giữa các test trên PG, không phải lỗi code của nhánh.
+- **Trang Data & Connectors không mở được từ trình duyệt trong môi trường thật**: account policy chỉ có tài khoản MKT, và `/api/collector/*` chỉ nhận service token. `web/middleware.js` cố ý xoá `x-admin-token` khỏi request của trình duyệt. Khi request có cả phiên MKT, `/api/collector` trả bản rút gọn → trang crash (`data.storage` undefined). Tab Giám sát mới thừa hưởng giới hạn này. Operator xem KPI bằng CLI: `python -m app.collector.kpis [giờ]`, hoặc `GET /api/collector/kpis` với `X-Admin-Token`. Muốn xem trên web thì cần quyết định chính sách: cho phép một vai trò operator, hoặc mở riêng KPI read-only cho MKT.
+
+### Cần quyết định
+
+- **LLM naming trong batch atomic** (phát hiện #7): hiện tắt để không giữ transaction trong lúc gọi mạng, tên sản phẩm được bù bằng `backfill_names --llm`. Nếu cần tên LLM ngay lúc ingest, phải gọi LLM *trước* khi mở transaction — làm được nhưng là thay đổi riêng.

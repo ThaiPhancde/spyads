@@ -13,7 +13,11 @@ def digest(payload):
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
 
-def ingest_batch(db, records, key, saved_by=None, payload=None):
+def ingest_batch(db, records, key=None, saved_by=None, payload=None):
+    """key=None: atomic ingest without a receipt (server-side crawls: the checkpoint commit is their idempotency)."""
+    if key is None:
+        db.info["collector_atomic"] = True
+        return ingest_ads(db, records, saved_by=saved_by, allow_llm=False, atomic=True)
     fingerprint = digest(payload if payload is not None else [r.to_dict() for r in records])
     prior = db.get(IngestBatch, key)
     if prior:

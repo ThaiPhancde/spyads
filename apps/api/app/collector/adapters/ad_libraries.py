@@ -321,15 +321,23 @@ class TikTokTopAdsHeadlessConnector(BaseConnector):
         countries = [c.upper() for c in params.countries or [] if c.upper() != "ALL"] or _csv(cfg.get("countries"), "PH")
         objectives = set(_csv(cfg.get("objectives"), "conversion,lead_generation,traffic,product_sales,shop_purchases"))
         done: set[str] = set()
+        failed: list[Exception] = []
         for country in countries:
             self.bucket.take()
-            pages = self._scrape(country, str(cfg.get("period") or 180))
+            try:
+                pages = self._scrape(country, str(cfg.get("period") or 180))
+            except ConnectorError as e:  # one blocked / timed-out country must not throw away the others' ads
+                log.warning("tiktok_top_ads_headless %s: %s", country, e)
+                failed.append(e)
+                continue
             for page in pages:
                 for m in (page.get("data") or {}).get("materials") or []:
                     if m["id"] in done or str(m.get("objective_key") or "").replace("campaign_objective_", "") not in objectives:
                         continue  # reach / video views = brand awareness, not a product being sold
                     done.add(m["id"])
                     yield map_tiktok_top_ad(m, country, None)
+        if failed and len(failed) == len(countries):
+            raise failed[0]  # every country failed: the source's state (blocked / rate_limited / timeout) is the run's
 
 
 TIKTOK_PROFILE = DATA_DIR / "browser" / "tiktok"  # Creative Center browser profile; log in once: scripts/tiktok_login.py

@@ -46,8 +46,11 @@ def test_dead_worker_is_recovered_and_fenced():
     old = cq.claim("c:1:", "c", 1, worker="w1", now=T0)  # w1 then dies: no heartbeat, no finish
     later = T0 + timedelta(seconds=cq.LEASE_S + 1)
     assert cq.recover(later) == 1
-    assert job().status == "retry_wait" and runs()[0].status == "lost"
-    assert "c:1:" in cq.retry_due(later)  # due at once, ahead of its regular schedule
+    j = job()
+    assert (j.status, j.retry_count, j.last_error) == ("retry_wait", 1, cq.LOST) and runs()[0].status == "lost"
+    assert cq.claim("c:1:", "c", 1, worker="w2", now=later) is None  # a lost run backs off like any failure
+    later = j.next_retry_at
+    assert "c:1:" in cq.retry_due(later)  # then due ahead of its regular schedule
     new = cq.claim("c:1:", "c", 1, worker="w2", now=later)
     assert new and new != old
     # the stale worker wakes up: none of its writes reach the job
@@ -56,10 +59,29 @@ def test_dead_worker_is_recovered_and_fenced():
     assert [r.status for r in runs()] == ["lost", "ok"]
 
 
-def test_expired_lease_reclaimed_without_recover_pass():
+def test_expired_lease_seen_by_claim_counts_as_lost():
     cq.claim("c:1:", "c", 1, worker="w1", now=T0)
-    assert cq.claim("c:1:", "c", 1, worker="w2", now=T0 + timedelta(seconds=cq.LEASE_S + 1))
-    assert [r.status for r in runs()] == ["lost", "running"]
+    later = T0 + timedelta(seconds=cq.LEASE_S + 1)
+    assert cq.claim("c:1:", "c", 1, worker="w2", now=later) is None  # same as recover(): lost + backoff
+    assert [r.status for r in runs()] == ["lost"] and job().status == "retry_wait"
+    assert cq.claim("c:1:", "c", 1, worker="w2", now=job().next_retry_at)
+
+
+def test_crash_loop_is_capped():
+    """A crawl that kills its worker every time: backoff, then `error` with a cool-down the schedule cannot skip."""
+    now = T0
+    for n in range(1, cq.MAX_RETRIES + 2):
+        assert cq.claim("c:1:", "c", 1, now=now)
+        now += timedelta(seconds=cq.LEASE_S + 1)
+        cq.recover(now)
+        j = job()
+        if n <= cq.MAX_RETRIES:
+            assert (j.status, j.retry_count) == ("retry_wait", n) and j.next_retry_at == now + cq.backoff(n)
+            now = j.next_retry_at
+    assert (j.status, j.retry_count) == ("error", 0) and j.next_retry_at == now + timedelta(seconds=cq.RETRY_CAP_S)
+    assert cq.claim("c:1:", "c", 1, now=now + timedelta(minutes=30)) is None  # due by schedule, still cooling down
+    assert cq.claim("c:1:", "c", 1, now=j.next_retry_at)
+    assert [r.status for r in runs()].count("lost") == cq.MAX_RETRIES + 1
 
 
 def test_retry_backoff_then_error_then_success_resets():
@@ -126,10 +148,10 @@ def setup_query():
 def test_scheduler_wrapper_records_failure_then_cursor(monkeypatch):
     cid, q = setup_query()
     key = realtime.job_key(cid, q)
-    monkeypatch.setattr(realtime, "run_connector", lambda cid, query=None: {"error": "Meta access challenge"})
+    monkeypatch.setattr(realtime, "run_connector", lambda cid, query=None, **kw: {"error": "Meta access challenge"})
     realtime._job_wrapper(key, cid, q, realtime.claim_crawl(cid, q))
     assert (job(key).status, job(key).last_error) == ("retry_wait", "Meta access challenge")
-    def ok(cid, query=None):
+    def ok(cid, query=None, **kw):
         with SessionLocal() as db:
             db.get(TrackedQuery, query.id).cursor = {"pages": {"US": {"cursor": "p2"}}}
             db.commit()
@@ -148,7 +170,7 @@ def test_scheduler_wrapper_records_failure_then_cursor(monkeypatch):
 def test_wrapper_exception_is_a_failure_not_a_stuck_lease(monkeypatch):
     cid, q = setup_query()
     key = realtime.job_key(cid, q)
-    def crash(cid, query=None):
+    def crash(cid, query=None, **kw):
         raise RuntimeError("worker bug")
     monkeypatch.setattr(realtime, "run_connector", crash)
     realtime._job_wrapper(key, cid, q, realtime.claim_crawl(cid, q))
@@ -161,7 +183,7 @@ def test_manual_run_never_duplicates_a_running_crawl(monkeypatch):
     from app.routers.intel import router
     cid, q = setup_query()
     started = threading.Event()
-    monkeypatch.setattr(realtime, "run_connector", lambda cid, query=None: started.set() or {"fetched": 0})
+    monkeypatch.setattr(realtime, "run_connector", lambda cid, query=None, **kw: started.set() or {"fetched": 0})
     assert realtime.claim_crawl(cid)  # the worker holds the connector sync
     app = FastAPI(); app.include_router(router)
     client = TestClient(app)

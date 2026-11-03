@@ -30,9 +30,12 @@
     put: (row) => operation("readwrite", (s) => s.put(row)),
     remove: (id) => operation("readwrite", (s) => s.delete(id)),
   };
+  // The server refused the batch itself (bad payload, key reused with other data, too large): retrying never helps.
+  // The row is kept (dead) so nothing is silently lost; auth / rate-limit / server errors keep retrying.
+  const PERMANENT = new Set([400, 404, 409, 413, 422]);
   async function drain(storage, send, now = Date.now) {
     for (const row of await storage.all()) {
-      if (row.nextAt > now()) continue;
+      if (row.dead || row.nextAt > now()) continue;
       try {
         await send(row);
         await storage.remove(row.id); // only a server ACK removes durable data
@@ -40,6 +43,7 @@
         row.attempts = (row.attempts || 0) + 1;
         row.nextAt = now() + delay(row.attempts);
         row.error = String(error.message || error).slice(0, 200);
+        if (PERMANENT.has(error.status)) row.dead = true;
         await storage.put(row);
       }
     }
