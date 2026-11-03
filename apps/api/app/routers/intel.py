@@ -1389,6 +1389,26 @@ def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
     return {**stats, "invalid": stats["invalid"] + len(body.items) - len(valid), "idempotency_key": key.removeprefix("extension:")}
 
 
+class DriftIn(BaseModel):
+    """What the extension saw: an Ad Library response mentioning ad_archive_id from which it could read no ad.
+    Key names only (no values: nothing the user browsed leaves the page)."""
+    keys: list[str] = Field(default_factory=list, max_length=40)
+    path: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/api/ingest/meta-library/drift", dependencies=[Depends(require_token)])
+def meta_library_drift(body: DriftIn, db: Session = Depends(get_db)):
+    """The extension's schema-drift report becomes the source's health + an alert instead of a silent zero."""
+    keys = [k[:64] for k in body.keys]
+    c = db.scalar(select(Connector).where(Connector.adapter == "meta_library").order_by(Connector.id))
+    msg = f"Meta đổi cấu trúc dữ liệu (extension): có ad_archive_id nhưng không đọc được quảng cáo — khoá: {', '.join(keys)[:300]}"
+    if c is not None:
+        c.health, c.last_error = "schema_changed", msg
+    events.publish("SOURCE_SCHEMA_CHANGED", {"connector": c.name if c else "meta_library", "origin": "extension", "keys": keys, "path": body.path}, db=db)
+    db.commit()
+    return {"ok": True}
+
+
 # ============================================================ Storage retention
 @router.get("/api/storage/usage")
 def storage_usage(db: Session = Depends(get_db)):

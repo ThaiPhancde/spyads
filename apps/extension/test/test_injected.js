@@ -79,5 +79,20 @@ function makeSandbox(responseText) {
   await new Promise((r) => setTimeout(r, 20));
   check("malformed payload ignored safely", t.posted.length === 0);
 
+  // 7) shape changed: valid JSON mentioning ad_archive_id, but no ad the collector can read → one drift report, key names only
+  const drifted = JSON.stringify({ data: { results_v2: [{ ad_archive_id: "1", creative_v2: { body: "secret copy" }, advertiser_ref: "p" }] } });
+  t = makeSandbox(drifted);
+  await t.sb.window.fetch("/api/graphql/");
+  await new Promise((r) => setTimeout(r, 20));
+  const drift = t.posted.filter((m) => m.__mi_drift__);
+  check("schema drift reported instead of a silent zero", drift.length === 1 && t.posted.every((m) => !m.__mi_ads__)
+    && drift[0].keys.join(",") === "ad_archive_id,creative_v2,advertiser_ref" && !JSON.stringify(drift[0]).includes("secret copy"));
+
+  // 8) a normal response never raises a drift report
+  t = makeSandbox();
+  await t.sb.window.fetch("/api/graphql/");
+  await new Promise((r) => setTimeout(r, 20));
+  check("normal response: no drift report", t.posted.length > 0 && t.posted.every((m) => !m.__mi_drift__));
+
   process.exit(ok ? 0 : 1);
 })();

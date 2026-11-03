@@ -24,6 +24,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           body: { items: msg.items, country: msg.country, saved_by: c.user || null, idempotency_key: id } });
         sendResponse({ ok: true, queued: true, idempotency_key: id });
         void drainOutbox();
+      } else if (msg.type === "drift") {
+        // an alert, not data: best effort, at most one report per 10 minutes
+        const { lastDriftAt = 0 } = await chrome.storage.local.get({ lastDriftAt: 0 });
+        if (Date.now() - lastDriftAt > 600000) {
+          await chrome.storage.local.set({ lastDriftAt: Date.now() });
+          await post("/api/ingest/meta-library/drift", { keys: msg.keys, path: msg.path }).catch(console.error);
+        }
+        sendResponse({ ok: true });
       } else if (msg.type === "product") {
         const res = await post("/api/ingest/products", Object.assign({}, msg.payload, { saved_by: c.user || null }));
         sendResponse({ ok: true, result: res });

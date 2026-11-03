@@ -11,13 +11,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import re
 from datetime import datetime, timezone
 from typing import Iterator
 
-from ..base import BaseConnector, Blocked, ConnectorError, FetchParams, NotConfigured, RateLimit, RateLimited
+from ..base import BaseConnector, Blocked, ConnectorError, FetchParams, NotConfigured, RateLimit, RateLimited, SchemaChanged
 from ..contract import AdRecord, MediaItem
 
 log = logging.getLogger(__name__)
@@ -139,6 +140,17 @@ def extract_ads(payload) -> list[dict]:
     return out
 
 
+def _has_results(payload, depth=0) -> bool:
+    """Any non-empty `edges` list (GraphQL connection results) in the payload."""
+    if depth > 12:
+        return False
+    if isinstance(payload, dict):
+        return bool(payload.get("edges")) and isinstance(payload["edges"], list) or any(_has_results(v, depth + 1) for v in payload.values())
+    if isinstance(payload, list):
+        return any(_has_results(v, depth + 1) for v in payload)
+    return False
+
+
 def map_library_ad(raw: dict, source: str, country: str | None) -> AdRecord:
     """Map one Ad Library `collated_results[]` item (or Apify item, same shape) to the contract."""
     s = {**raw, **(raw.get("snapshot") or {})}
@@ -226,12 +238,13 @@ class MetaLibraryConnector(BaseConnector):
             while got < params.limit and not st.get("done") and pages < budget:
                 try:
                     recs, st = self.fetch_page(params, country, st)
-                except (Blocked, RateLimited):
+                except (Blocked, RateLimited, SchemaChanged):
                     raise  # not an expired cursor: dropping it and asking page 1 again would only make it worse
                 except ConnectorError:
                     if not resumed:
                         raise
                     st, resumed = {}, False  # Meta refused the stored cursor (expired session): start over from page 1
+                    self.cursor_restarts = getattr(self, "cursor_restarts", 0) + 1  # bounded rerun: the run is a sample again
                     continue
                 pages += 1
                 out[country] = {k: st.get(k) for k in (*RESUME_KEYS, "done")}
@@ -262,6 +275,7 @@ class MetaLibraryConnector(BaseConnector):
             col = self._col = self._collector()
             col.client.initialize()
         self.bucket.take()
+        self.requests = getattr(self, "requests", 0) + 1  # every attempt, failed ones too (KPIs: requests vs pages)
         try:
             resp, cursor = col.client.search_ads(
                 query=params.query or "", country=country.upper(), active_status="ACTIVE" if params.active_only else "ALL",
@@ -269,6 +283,9 @@ class MetaLibraryConnector(BaseConnector):
                 search_type="PAGE" if params.page_ids else "KEYWORD_UNORDERED", page_ids=params.page_ids or None,
                 cursor=st.get("cursor"), first=30, sort_mode=None, session_id=st["sid"], collation_token=st["tok"])
         except Exception as e:
+            if isinstance(e, json.JSONDecodeError):  # not one JSON document (e.g. newline-delimited): the format changed
+                self.schema_drift = getattr(self, "schema_drift", 0) + 1
+                log.warning("Meta GraphQL response is not one JSON document (%s): format changed", e)
             if params.extra.get("competitor_strict"):
                 raise ConnectorError("Meta advertiser query failed; no access-challenge fallback") from e
             if st.get("cursor"):
@@ -294,6 +311,8 @@ class MetaLibraryConnector(BaseConnector):
         items = resp["ads"]
         if not resp.get("page_info"):
             raise ConnectorError("Meta response missing pagination metadata")
+        if not items and resp.get("raw"):
+            items = self._drifted(resp["raw"])
         # collation siblings are kept as records: ingest maps them onto one ad via meta_collations (across pages and jobs)
         recs = [map_library_ad(raw, self.key, country) for raw in items]
         info = resp.get("page_info") or {}
@@ -316,6 +335,19 @@ class MetaLibraryConnector(BaseConnector):
         st["done"] = not has_next
         st["page_status"] = "end" if st["done"] else "page" if recs else "empty"
         return recs, st
+
+    def _drifted(self, raw) -> list[dict]:
+        """The library found no ad but the page holds results: Meta changed the shape (e.g. renamed `collated_results`).
+        Ads our shape-agnostic walker still recognises are kept (and flagged); results it cannot read are an alert —
+        never an 'empty page', which only pauses and looks like 'no ads'."""
+        found = extract_ads(raw)
+        if not found and not _has_results(raw):
+            return []  # a genuinely empty page
+        self.schema_drift = getattr(self, "schema_drift", 0) + 1
+        if not found:
+            raise SchemaChanged("Meta response shape changed: results present but no ad the parser can read")
+        log.warning("Meta response shape changed: %d ads recovered with the fallback parser", len(found))
+        return found
 
     def health_check(self) -> dict:
         recs = list(self.fetch_ads(FetchParams(query="shop", countries=["US"], limit=2)))

@@ -13,7 +13,8 @@ from ..crawl_queue import CrawlJob, CrawlRun
 from ..models import Connector, Creative, SearchJob
 from ..platforms import connector_network
 
-COUNTS = ("pages", "empty_pages", "fetched", "accepted", "new_ads", "duplicates", "invalid", "excluded")
+COUNTS = ("pages", "empty_pages", "fetched", "accepted", "new_ads", "duplicates", "invalid", "excluded",
+          "requests", "cursor_cycles", "cursor_restarts", "schema_drift")
 
 
 def cursor_summary(checkpoint: dict | None) -> dict | None:

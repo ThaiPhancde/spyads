@@ -30,6 +30,7 @@ const HEALTH: Record<string, [Tone, string]> = {
   waiting_file: ["neutral", "Chờ file"],
   configured: ["neutral", "Đủ cấu hình"],
   blocked: ["bad", "Bị chặn (cần xác minh)"], rate_limited: ["warn", "Rate limited"],
+  schema_changed: ["bad", "Nguồn đổi cấu trúc"],
 };
 const JOB: Record<string, [Tone, string]> = {
   idle: ["good", "Sẵn sàng"], running: ["info", "Đang chạy"], retry_wait: ["warn", "Chờ thử lại"], error: ["bad", "Lỗi"], blocked: ["bad", "Bị chặn"],
@@ -265,14 +266,15 @@ function MonitoringCard({ byKey }: { byKey: any }) {
           <span className="text-xs text-muted-foreground">Trình duyệt chạy song song tối đa: {data.browser_capacity}</span>
         </div>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
-          <Metric label="Trang đã lấy" value={fmt.n(t.pages)} sub={fmt.n(t.empty_pages) + " trang rỗng"} />
+          <Metric label="Trang đã lấy" value={fmt.n(t.pages)} sub={(t.requests ? fmt.n(t.requests) + " request · " : "") + fmt.n(t.empty_pages) + " trang rỗng"} />
           <Metric label="Bản ghi nhận" value={fmt.n(t.fetched)} sub={"+ " + fmt.n(t.live_fetched) + " từ tìm kiếm"} />
           <Metric label="Ads chấp nhận" value={fmt.n(t.accepted)} sub={fmt.n(t.new_ads) + " mới"} />
           <Metric label="Trùng" value={fmt.n(t.duplicates)} sub="ad đã có, chỉ cập nhật" />
           <Metric label="Không hợp lệ" value={fmt.n(t.invalid)} sub={fmt.n(t.excluded) + " bị lọc nội dung"} />
           <Metric label="Lượt chạy" value={fmt.n(t.runs)} sub={t.ok + " ok · " + t.error + " lỗi · " + t.lost + " mất lease"} />
           <Metric label="Đang chờ thử lại" value={fmt.n(t.retry_wait)} sub={t.blocked_jobs + " job bị chặn"} />
-          <Metric label="Nguồn không khoẻ" value={fmt.n(t.unhealthy)} />
+          <Metric label="Nguồn không khoẻ" value={fmt.n(t.unhealthy)}
+            sub={fmt.n(t.schema_drift) + " trang đổi cấu trúc · " + fmt.n(t.cursor_cycles) + " vòng cursor · " + fmt.n(t.cursor_restarts) + " lần quay lại trang 1"} />
         </div>
       </Card>
       <Card title="Theo nguồn" pad={false} className="mb-4">

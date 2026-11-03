@@ -70,6 +70,12 @@ class CrawlRun(Base):
     duplicates: Mapped[int | None] = mapped_column(Integer)  # valid records of an ad already in the library
     invalid: Mapped[int | None] = mapped_column(Integer)  # rejected by ingest validation
     excluded: Mapped[int | None] = mapped_column(Integer)  # dropped by the content filter (drama / movie / podcast…)
+    # pagination diagnostics (P2): source requests incl. failed ones, A→B→A cursor cycles, stale-cursor restarts from page 1,
+    # pages whose response shape changed (read with the fallback parser or refused)
+    requests: Mapped[int | None] = mapped_column(Integer)
+    cursor_cycles: Mapped[int | None] = mapped_column(Integer)
+    cursor_restarts: Mapped[int | None] = mapped_column(Integer)
+    schema_drift: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text)
     checkpoint_before: Mapped[dict | None] = mapped_column(JSON)
     checkpoint_after: Mapped[dict | None] = mapped_column(JSON)
@@ -209,6 +215,8 @@ def _counts(result: dict) -> dict:
     """crawl_runs columns from a run_connector result (Data & Connectors KPIs)."""
     return dict(fetched=result.get("fetched"), new_ads=result.get("new_ads"), pages=result.get("pages"), empty_pages=result.get("empty_pages"),
                 invalid=result.get("invalid"), excluded=result.get("excluded_entertainment"), duplicates=result.get("updated_ads"),
+                requests=result.get("requests"), cursor_cycles=result.get("cursor_cycles"), cursor_restarts=result.get("cursor_restarts"),
+                schema_drift=result.get("schema_drift"),
                 accepted=(result.get("new_ads") or 0) + (result.get("updated_ads") or 0) if "new_ads" in result else None)
 
 

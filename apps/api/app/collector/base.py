@@ -35,6 +35,10 @@ class RateLimited(ConnectorError):
     """The source said slow down (HTTP 429 / rate-limit payload): retry later with backoff."""
 
 
+class SchemaChanged(ConnectorError):
+    """The source answered with results the parser cannot read (its response shape changed): an alert, never 'no ads'."""
+
+
 @dataclass
 class RateLimit:
     requests_per_minute: float = 30

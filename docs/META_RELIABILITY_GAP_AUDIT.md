@@ -135,10 +135,24 @@ Ba trường hợp khác đã kiểm chứng là **đúng, không cần sửa**,
 - Bảng trạng thái đầy đủ: `complete/partial/rate_limited/schema_changed/auth_required/blocked/failed/cancelled`. Hiện có `page/empty/end/partial/cycle` và health `blocked/rate_limited/error`.
 - Outbox của extension: jitter, giới hạn dung lượng, nút thử lại cho batch `dead` trên popup, gzip.
 
-**P2 — phân trang GraphQL và theo dõi cấu trúc:**
-- Cảnh báo schema drift: extension bắt response có chữ `ad_archive_id` nhưng không ra quảng cáo nào thì phải báo, không im lặng ra 0.
-- Ghi `first_observed_at/last_observed_at` tách khỏi `delivery_start/stop`.
-- Ghi `end_cursor`, `has_next_page`, `cursor_cycles` và số request vào `crawl_runs` (hiện `cursor_cycles` chỉ có trong kết quả và log).
-- Tách "độ phủ crawl" khỏi mọi tuyên bố phủ 100% Meta.
+**P2 — phân trang GraphQL và theo dõi cấu trúc:** ✅ đã làm ở nhánh `meta-p2-graphql-health`, xem mục 6.
 
 **P3–P5:** xem addendum. Gồm `video_fp_v2` dạng cell-mean có version, efg chỉ là metadata không xác minh, `creative_reuse_observations`, worker kiểm tra URL, hạn mức theo thị trường, alert khi nguồn âm thầm trả 0.
+
+## 6. P2 — GraphQL schema health và chẩn đoán phân trang (nhánh `meta-p2-graphql-health`)
+
+| Yêu cầu P2 | Trước | Sau |
+|---|---|---|
+| Parse JSON, JSON nhiều dòng, node có `ad_archive_id`, không đòi `collation_id` | Extension đã có. Server: thư viện `meta-ads-collector` đọc theo một đường cố định `edges[].node.collated_results[]`; khi Meta đổi tên trường thì thư viện trả `ads=[]` nhưng `page_info` vẫn hợp lệ, và **ToolSpy hiểu là "trang rỗng": im lặng ra 0** | **GAP-05:** `_drifted()` chạy bộ duyệt `extract_ads` trên dữ liệu thô của thư viện. Tìm thấy quảng cáo thì cứu dữ liệu và gắn cờ đổi cấu trúc. Có kết quả (`edges` không rỗng) mà không đọc được quảng cáo nào thì báo `SchemaChanged`. `edges` rỗng thì vẫn là trang rỗng thật. Response không phải một JSON duy nhất (`JSONDecodeError`, ví dụ dạng nhiều dòng) cũng tính là đổi cấu trúc |
+| Schema drift là cảnh báo, không phải 0 giả | Không có | Health `schema_changed` (nhãn "Nguồn đổi cấu trúc"), sự kiện `SOURCE_SCHEMA_CHANGED` ghi vào bảng `events`, áp dụng cho crawl theo lịch, tìm kiếm trực tiếp và extension. `SchemaChanged` không bị hiểu nhầm là cursor hết hạn (không quay lại trang 1) |
+| Extension: đổi cấu trúc thì báo | Im lặng ra 0 | **GAP-06:** `injected.js`: response là JSON hợp lệ, có `ad_archive_id`, nhưng không đọc ra quảng cáo nào → gửi **tên khoá**, không gửi giá trị. `content.js` gửi một lần mỗi lần tải trang; `background.js` gửi tối đa một lần mỗi 10 phút tới `POST /api/ingest/meta-library/drift` (cần token, tối đa 40 khoá, `path` ≤ 200 ký tự) |
+| Ghi `end_cursor`, `has_next_page`, vòng cursor, chuỗi trang rỗng, số request, lỗi nguồn | `end_cursor`/`done` có trong `crawl_runs.checkpoint_after`; `pages`, `empty_pages`, `error` đã có | **GAP-07:** thêm cột `crawl_runs.requests` (kể cả request lỗi), `cursor_cycles`, `cursor_restarts`, `schema_drift`. Migration cộng thêm, chạy lặp lại được. Hiện trên KPI và tab Giám sát |
+| Cursor cũ → chạy lại có giới hạn, không coi là phủ hết | Đã có quay lại trang 1 và giới hạn trang (GAP-02) | Nay được đếm (`cursor_restarts`) |
+| `first_observed_at/last_observed_at` tách khỏi `delivery_start/stop` | — | **Không cần cột mới:** thời điểm *ta thấy* đã có theo từng nguồn ở `AdSource.first_collected_at/last_collected_at`. `Ad.first_seen_at/last_seen_at` là ngày chạy do nguồn báo (lùi về ngày thu thập nếu nguồn không có ngày). Không đổi công thức TEST/TEST_NOW |
+| Tách độ phủ crawl khỏi tuyên bố phủ 100% | KPI cursor "x/y nước còn trang · z xong", `has_more` của tìm kiếm | Giữ nguyên. Chỉ `has_next_page=false` mới là hết; `cycle`, `partial`, giới hạn trang và 3 trang rỗng chỉ là tạm dừng |
+
+Chưa làm trong P2:
+- Phía server chưa tự parse JSON nhiều dòng (việc đó nằm trong thư viện), mới chỉ phát hiện và dùng SSR cho trang 1.
+- Chưa ghi chuỗi trang rỗng liên tiếp riêng; `empty_pages` là tổng.
+- Chưa gửi cảnh báo ra ngoài (email/Slack); hiện chỉ có health, bảng `events` và tab Giám sát.
+

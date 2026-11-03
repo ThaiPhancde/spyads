@@ -413,3 +413,54 @@ Không có thay đổi schema. `seen` nằm trong cột JSON checkpoint đã có
 
 Chưa kiểm thử: Meta thật và extension cài trong Chrome thật; chạy tải 24–72 giờ. **Chưa nói là sẵn sàng cho production.**
 
+## P2 — GraphQL schema health và chẩn đoán phân trang (2026-11-03, nhánh `meta-p2-graphql-health`)
+
+Chồng lên `meta-phase1-hardening`. Chi tiết và lý do: [META_RELIABILITY_GAP_AUDIT.md §6](META_RELIABILITY_GAP_AUDIT.md#6-p2--graphql-schema-health-và-chẩn-đoán-phân-trang-nhánh-meta-p2-graphql-health). P1 của addendum chưa làm (vẫn trong backlog).
+
+### Đã làm
+
+- **Phát hiện đổi cấu trúc phía server:** thư viện trả 0 quảng cáo mà dữ liệu thô vẫn có quảng cáo → cứu bằng `extract_ads`, health `schema_changed`, sự kiện `SOURCE_SCHEMA_CHANGED`. Có kết quả mà không đọc được → `SchemaChanged`. Response không phải một JSON duy nhất → tính là đổi cấu trúc.
+- **Phát hiện đổi cấu trúc phía extension:** gửi tên khoá (không gửi giá trị) tới `POST /api/ingest/meta-library/drift`, mỗi trang một lần, tối đa một lần mỗi 10 phút.
+- **Chẩn đoán:** `crawl_runs.requests / cursor_cycles / cursor_restarts / schema_drift`, hiện trên KPI và tab Giám sát.
+
+### File thay đổi
+
+| File | Thay đổi |
+|---|---|
+| `apps/api/app/collector/base.py` | `SchemaChanged(ConnectorError)` |
+| `apps/api/app/collector/adapters/meta.py` | `_drifted()`, `_has_results()`, đếm `requests`/`cursor_restarts`/`schema_drift`, `JSONDecodeError` tính là đổi cấu trúc, `SchemaChanged` không làm quay lại trang 1 |
+| `apps/api/app/realtime.py` | `DIAGNOSTICS`, health và sự kiện `schema_changed` cho crawl theo lịch và tìm kiếm trực tiếp |
+| `apps/api/app/crawl_queue.py`, `meta_collector_migrate.py`, `collector/kpis.py` | 4 cột chẩn đoán (migration cộng thêm), `_counts`, tổng KPI |
+| `apps/api/app/routers/intel.py` | `POST /api/ingest/meta-library/drift` (token, giới hạn đầu vào) |
+| `apps/extension/injected.js`, `content.js`, `background.js` | Báo đổi cấu trúc |
+| `apps/web/app/data/page.tsx` | Nhãn "Nguồn đổi cấu trúc", số request / vòng cursor / lần quay lại trang 1 |
+| `apps/api/tests/test_meta_p2_schema_health.py` | Mới: 12 test |
+| `apps/extension/test/test_injected.js` | Thêm 2 ca (báo đổi cấu trúc chỉ với tên khoá; response bình thường không báo) |
+
+### Migration
+
+`python -m app.meta_collector_migrate`, tự chạy khi API/worker khởi động. Thêm 4 cột `INTEGER` vào `crawl_runs` và không đổi dữ liệu cũ. Các dòng cũ có giá trị NULL, KPI tính là 0, và UI ẩn số request khi bằng 0. Đã chạy 2 lần liên tiếp trên PostgreSQL test: cả 4 cột có mặt, không lỗi.
+Rollback: `ALTER TABLE crawl_runs DROP COLUMN requests, DROP COLUMN cursor_cycles, DROP COLUMN cursor_restarts, DROP COLUMN schema_drift;`.
+
+### Kết quả kiểm thử (2026-11-03, chạy thật)
+
+| Bộ | Kết quả |
+|---|---|
+| `tests/test_meta_p2_schema_health.py`, trước khi cài đặt | Lỗi import (`SchemaChanged` chưa có) |
+| `test_injected.js` ca báo đổi cấu trúc chạy với `injected.js` **cũ** | FAIL, đúng là lỗi im lặng ra 0 |
+| Toàn bộ `apps/api/tests`, SQLite | **538 passed**, 4 skipped, 0 failed |
+| 6 file độ tin cậy + P2, PostgreSQL 18 | **61 passed**, chạy 2 lần |
+| Extension `test_injected.js` / `test_outbox.js` | 9/9 · 3/3 |
+| `tsc --noEmit` apps/web | 0 lỗi |
+| `scripts/verify_collector_browser.py` (API + Next + trình duyệt thật, SQLite tạm) | **22/22** kiểm tra pass, tab Giám sát hiển thị chỉ số mới, không lỗi trang |
+
+Các ca kiểm thử bắt buộc của addendum:
+- Response nhiều dòng: extension parse được; server tính là đổi cấu trúc.
+- Response đổi cấu trúc: cứu dữ liệu và báo động, hoặc báo `SchemaChanged`.
+- Thiếu `collation_id`: vẫn lưu.
+- Trang rỗng có cursor kế tiếp: vẫn là `empty`, không phải hết (`test_a_truly_empty_page_with_a_next_cursor_stays_empty`, `test_empty_page_is_not_end`).
+- Cursor lặp: Phase 1 hardening.
+- Rate limiting: `test_rate_limit_keeps_the_stored_cursor`.
+
+Chưa kiểm thử với Meta thật hay extension cài trong Chrome thật; chưa chạy tải 24–72 giờ.
+

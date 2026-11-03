@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from .collector.base import AuthExpired, Blocked, ConnectorError, FetchParams, NotConfigured, RateLimited
+from .collector.base import AuthExpired, Blocked, ConnectorError, FetchParams, NotConfigured, RateLimited, SchemaChanged
 from .collector.factory import ConnectorFactory
 from .db import SessionLocal, ingest_lock
 from .events import publish
@@ -62,6 +62,11 @@ def _params_from(c: Connector, q: TrackedQuery | None = None) -> FetchParams:
                        page_ids=(q.page_ids if q else []) or [], media_type=q.media_type if q else None,
                        limit=(q.limit if q else int(cfg.get("max_per_query") or 60)),
                        active_only=c.adapter not in HISTORY_ADAPTERS, extra={"resume": resume} if resume else {})
+
+
+# per-run pagination diagnostics a connector may expose (Meta: collector/adapters/meta.py) → crawl_runs columns
+DIAGNOSTICS = ("requests", "cursor_cycles", "cursor_restarts", "schema_drift")
+SCHEMA_DRIFT_MSG = "Meta đổi cấu trúc dữ liệu: {n} trang đọc bằng bộ đọc dự phòng — cần cập nhật parser (dữ liệu vẫn được lưu)"
 
 
 def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchParams | None = None,
@@ -112,6 +117,9 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                 c.last_duration_ms = int((time.perf_counter() - t0) * 1000)
                 if c.last_duration_ms > 120_000:
                     c.health = "slow"
+                if drift := getattr(connector, "schema_drift", 0):  # stored with the fallback parser: the data is fine, the source is not
+                    c.health, c.last_error = "schema_changed", SCHEMA_DRIFT_MSG.format(n=drift)
+                    publish("SOURCE_SCHEMA_CHANGED", {"connector": c.name, "origin": "server", "pages": drift}, db=db)
                 if query:
                     q = db.get(TrackedQuery, query.id)
                     q.last_run_at, q.last_count, q.last_new, q.last_error = datetime.utcnow(), len(recs), stats["new_ads"], None
@@ -127,7 +135,7 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                     log.exception("connector %s: re-score after sync failed", cid)
                     db.rollback()
             result.update(fetched=len(recs), pages=getattr(connector, "pages_fetched", None), empty_pages=getattr(connector, "empty_pages", None),
-                          cursor_cycles=getattr(connector, "cursor_cycles", None),
+                          **{k: getattr(connector, k, None) for k in DIAGNOSTICS},
                           **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source",
                                                    "invalid", "excluded_entertainment")})
             if fetch_error is not None:  # stored up to the last whole page; the run is still a failure (retry, health, KPIs)
@@ -150,7 +158,8 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                     time.sleep(2)
             c.status = "not_configured" if isinstance(e, NotConfigured) else "error"
             c.health = ("auth_expired" if isinstance(e, AuthExpired) else "unknown" if isinstance(e, NotConfigured)
-                        else "blocked" if isinstance(e, Blocked) else "rate_limited" if isinstance(e, RateLimited) else "error")
+                        else "blocked" if isinstance(e, Blocked) else "rate_limited" if isinstance(e, RateLimited)
+                        else "schema_changed" if isinstance(e, SchemaChanged) else "error")
             c.last_error = "adapter removed" if isinstance(e, KeyError) else _redact(f"{type(e).__name__}: {e}")[:500]
             c.last_sync_at = datetime.utcnow()
             c.last_sync_count = result.get("fetched", 0) if result.get("partial") else 0  # partial: stored up to its last whole page
@@ -251,6 +260,7 @@ def _run_search(job_id: int, more: int = 0):
 
         def worker(cid: int, name: str, adapter: str, cfg: dict):
             _search_slots.acquire()  # own pool: a user's search never waits behind scheduled jobs
+            connector = None
             try:
                 connector = ConnectorFactory.get(adapter, cfg)
                 for kw, params in plist:
@@ -276,19 +286,23 @@ def _run_search(job_id: int, more: int = 0):
                                 q.put(("batch", cid, name, batch, None, None, kw))
                                 batch = []
                         q.put(("batch", cid, name, batch, f"{cid}:*{sfx}", {"done": True}, kw))
-                q.put(("end", cid, name, None))
+                q.put(("end", cid, name, None, getattr(connector, "schema_drift", 0)))
             except Exception as e:
-                q.put(("end", cid, name, f"{type(e).__name__}: {e}"))
+                q.put(("end", cid, name, f"{type(e).__name__}: {e}", getattr(connector, "schema_drift", 0)))
             finally:
                 _search_slots.release()
 
-        def mark(cid: int, n: int, err: str | None):
+        def mark(cid: int, n: int, err: str | None, drift: int = 0):
             """A live search is a real run of the source: keep its health on the Data & Connectors screen honest."""
             cc = db.get(Connector, cid)
             cc.last_sync_at, cc.last_error = datetime.utcnow(), err
-            cc.status, cc.health = ("error", "error") if err else ("ok", "healthy")
+            cc.status, cc.health = ("error", "schema_changed" if err.startswith("SchemaChanged") else "error") if err else ("ok", "healthy")
             if not err:
                 cc.last_sync_count = n
+            if drift:  # pages read with the fallback parser (or not at all): an alert, not a quiet zero
+                cc.health = "schema_changed"
+                cc.last_error = err or SCHEMA_DRIFT_MSG.format(n=drift)
+                publish("SOURCE_SCHEMA_CHANGED", {"connector": cc.name, "origin": "live_search", "pages": drift}, db=db)
             db.commit()
 
         for c in conns:
@@ -315,6 +329,7 @@ def _run_search(job_id: int, more: int = 0):
             kind, cid, name, *rest = q.get()
             if kind == "end":
                 pending -= 1
+                drift = rest[1] if len(rest) > 1 else 0
                 err = _redact(rest[0]) or sources[name].get("error")
                 if err:
                     errors.append(f"{name}: {err}")
@@ -322,7 +337,7 @@ def _run_search(job_id: int, more: int = 0):
                 job.sources = {k: dict(v) for k, v in sources.items()}
                 db.commit()
                 if not (more and not got_by[cid] and not err):  # "load more" skips single-shot sources
-                    mark(cid, got_by[cid], err and err[:500])
+                    mark(cid, got_by[cid], err and err[:500], drift)
                 continue
             recs, key, st, kw = rest
             if cid in failed_sources:
