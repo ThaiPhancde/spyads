@@ -120,7 +120,7 @@ def test_gpt_oss_is_asked_with_a_strict_schema_and_low_reasoning(db, monkeypatch
     calls = fake_http(monkeypatch, lambda url, body: answer([]))
     llm.complete_json("s", "u", naming_ai.SCHEMA)
     b = calls[0]["body"]
-    assert b["model"] == "openai/gpt-oss-20b" and b["response_format"]["json_schema"]["strict"] is True and b["reasoning_effort"] == "low"
+    assert b["model"] == P.config("groq")["model"] and b["response_format"]["json_schema"]["strict"] is True and b["reasoning_effort"] == "low"
 
 
 def test_cloudflare_gets_the_schema_in_the_prompt_and_the_json_is_parsed_out(monkeypatch):
@@ -247,7 +247,9 @@ def test_dashboard_numbers(db, monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "naming-stats-test")  # every /api route needs a session or the service token since auth
     s = TestClient(app, headers={"X-Admin-Token": "naming-stats-test"}).get("/api/naming/stats").json()
     assert {"products", "named", "unknown", "needs_review", "errors", "queue_rules", "queue_ai", "avg_confidence", "providers"} <= set(s)
-    assert set(s["providers"]) == {"groq", "cerebras"} and s["providers"]["groq"]["model"] == "openai/gpt-oss-20b"
+    text = {n for n, p in s["providers"].items() if "text" in p["roles"]}
+    assert text == {"groq", "cerebras"} and s["providers"]["groq"]["model"] == P.config("groq")["model"]
+    assert "ocr" in s["providers"]["groq:qwen/qwen3.8-27b"]["roles"] and "transcript" in s["providers"]["groq:whisper-large-v3-turbo"]["roles"]
 
 
 def test_tiktok_shop_deeplink_is_a_product_ad_not_an_app():

@@ -21,6 +21,8 @@ if __name__ == "__main__":
     migrate()
     from .cluster_migrate import migrate as migrate_clusters
     migrate_clusters()
+    from .llm_migrate import migrate as migrate_llm
+    migrate_llm()
     logging.getLogger("app.worker").info("media: %s lost creatives re-queued", requeue_lost())
     from .preferences import loop as preference_loop
     from .recommend import loop as recommendation_loop

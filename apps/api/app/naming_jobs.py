@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date
 
 from sqlalchemy import select
 
@@ -18,20 +17,12 @@ from .models import Product, ProductAlias
 from .services import llm
 
 log = logging.getLogger(__name__)
-# Gemini free tier = 20 requests / day / model (2026-10-13), shared with ingest's own model pass: naming takes at most
-# this many per day so new ads still get theirs. ponytail: in-process counter, resets with the worker — a restart re-grants it.
+# translate() calls a day at most, counted in the call ledger (kind "translate") — a worker restart re-grants nothing.
 DAILY_CALLS = int(os.getenv("NAMING_LLM_DAILY", "12"))
-_spent = {"day": None, "n": 0}
 
 
 def _budget() -> bool:
-    today = date.today()
-    if _spent["day"] != today:
-        _spent.update(day=today, n=0)
-    if _spent["n"] >= DAILY_CALLS:
-        return False
-    _spent["n"] += 1
-    return True
+    return llm.spent_today("translate") < DAILY_CALLS
 
 
 TRANSLATE_SCHEMA = {
@@ -59,7 +50,7 @@ def translate(db, limit: int = 100) -> dict:
                 "(at most 7 words). Keep brand, model, material, size and the key feature; drop marketing words, prices and "
                 "keyword stuffing. Do not add anything the name does not say. If a line is not a product name, return null. "
                 "Use the number as i."),
-        user=lines, schema=TRANSLATE_SCHEMA, max_tokens=6000)
+        user=lines, schema=TRANSLATE_SCHEMA, max_tokens=6000, kind="translate")
     if not data:
         return {"translated": 0, "skipped": "llm failed"}
     by_i = {r["i"]: (r.get("name_vi") or "").strip() for r in data.get("results", [])}

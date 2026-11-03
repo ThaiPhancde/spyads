@@ -3,15 +3,16 @@
 Only where the extra text can change a decision, and cheapest source first:
   1. metadata the ad already has (caption, headline, and OCR / transcript already on its creatives) — services/creative_text.py;
   2. OCR of the creative's stored thumbnail (≤480 px JPEG, never the video): local Tesseract when installed (CPU only), else one
-     Gemini vision call;
+     free vision-model call (qwen on Groq / Cerebras), Gemini only when neither runs;
   3. transcript — video only, only when the ad is still unreadable after OCR: the already-stored file when ≤ MAX_CLIP, else the
-     source's light (SD) rendition downloaded with a hard byte cap, sent as-is to Gemini. Nothing is re-encoded, nothing is
-     downloaded in full.
+     source's light (SD) rendition downloaded with a hard byte cap, sent as-is to Groq Whisper (Gemini as fallback). Nothing is
+     re-encoded, nothing is downloaded in full.
 The thumbnail outlives the video (most creatives are 'expired' but keep thumb_key), so OCR works on those too.
 Scope: ads of TEST_NOW / TEST products whose copy is too thin (reliability < 0.5) — everything else keeps the metadata signals.
 `ocr_text` / `transcript` = '' means "tried, nothing there" (never retried); NULL = not tried (engine missing / budget spent).
-Gemini free tier is 20 calls/day shared with ingest + naming: CREATIVE_LLM_DAILY (default 6) is this job's share.
-ponytail: in-process day counter (a worker restart re-grants it); one OCR language set per ad, no per-line language switching.
+CREATIVE_LLM_DAILY (default 300) caps this job's model calls a day, counted in the call ledger (kinds ocr + transcript), so a worker
+restart re-grants nothing; Gemini has its own all-feature cap (GEMINI_DAILY, llm.py).
+ponytail: one OCR language set per ad, no per-line language switching.
 """
 from __future__ import annotations
 
@@ -21,7 +22,6 @@ import logging
 import os
 import re
 import shutil
-from datetime import date
 
 import httpx
 from sqlalchemy import or_, select
@@ -33,26 +33,19 @@ from .services.enrichment import classify_creative
 from .storage import DATA_DIR, store
 
 log = logging.getLogger(__name__)
-DAILY_CALLS = int(os.getenv("CREATIVE_LLM_DAILY", "6"))
+DAILY_CALLS = int(os.getenv("CREATIVE_LLM_DAILY", "300"))
 MAX_CLIP = int(os.getenv("CREATIVE_CLIP_MAX_MB", "6")) * 1024 * 1024  # biggest clip we will send for a transcript
 OCR_PER_TICK = int(os.getenv("CREATIVE_OCR_PER_TICK", "10"))
 TRANSCRIPTS_PER_TICK = int(os.getenv("CREATIVE_TRANSCRIPTS_PER_TICK", "2"))
 ADS_PER_PRODUCT = 2
-_spent = {"day": None, "n": 0}
 TESSDATA = DATA_DIR / "tessdata"
 _TL_COUNTRIES, _VI_COUNTRIES, _AR_COUNTRIES = {"PH"}, {"VN"}, {"SA", "AE", "KW", "QA", "OM", "BH", "JO", "EG", "IQ", "LB", "MA", "DZ", "TN", "LY"}
 _NONE = re.compile(r"^\W*none\W*$", re.I)
 
 
-def _llm_budget(peek: bool = False) -> bool:
-    """True when a Gemini call is allowed today; consumes one unless `peek` (used before a download we'd waste)."""
-    today = date.today()
-    if _spent["day"] != today:
-        _spent.update(day=today, n=0)
-    if _spent["n"] >= DAILY_CALLS or not llm.available():
-        return False
-    _spent["n"] += not peek
-    return True
+def _llm_budget(env: str) -> bool:
+    """True when this job may make one more model call of that chain today (the ledger counts the call itself)."""
+    return llm.available(env) and llm.spent_today("ocr", "transcript") < DAILY_CALLS
 
 
 # ------------------------------------------------------------ OCR
@@ -105,8 +98,25 @@ def _clean_ocr(words: list[str]) -> str:
     return re.sub(r"\s+", " ", " ".join(words)).strip()[:600]
 
 
+OCR_ASK = ("Read every piece of text visible in this ad image (captions, prices, slogans) in its original language (Tagalog, Arabic, "
+           "Vietnamese, English, ...). Return only the text, no commentary. If there is no text return NONE.")
+
+
+def _model_ocr(data: bytes, skip: tuple) -> tuple[str | None, str]:
+    if not _llm_budget("VISION_PROVIDERS"):
+        return None, "none"
+    out = llm.read_image(OCR_ASK, data, "image/jpeg", 500, skip=skip)
+    if out is None:
+        return None, "none"
+    return ("" if _NONE.match(out) else _clean_ocr(out.split())), llm.last_provider["name"]
+
+
 def ocr_image(data: bytes, ad: Ad) -> tuple[str | None, str]:
-    """(text, engine). text None = no engine could run (nothing is recorded, a later tick retries); '' = ran, nothing legible."""
+    """(text, engine). text None = no engine could run (nothing is recorded, a later tick retries); '' = ran, nothing legible.
+    Free vision model first (reads busy ad covers far better than Tesseract), then local Tesseract, Gemini last (smallest quota)."""
+    text, eng = _model_ocr(data, skip=("gemini",))
+    if text is not None:
+        return text, eng
     have = tesseract_langs()
     if have is not None:
         try:
@@ -123,13 +133,7 @@ def ocr_image(data: bytes, ad: Ad) -> tuple[str | None, str]:
             return _clean_ocr(words), "tesseract"
         except Exception as e:
             log.warning("tesseract failed: %s", e)
-    if _llm_budget():
-        out = llm.media_text("Read every piece of text visible in this ad image (captions, prices, slogans) in its original language "
-                             "(Tagalog, Arabic, English, ...). Return only the text, no commentary. If there is no text return NONE.",
-                             data, "image/jpeg", 500)
-        if out is not None:
-            return ("" if _NONE.match(out) else _clean_ocr(out.split())), "gemini"
-    return None, "none"
+    return _model_ocr(data, skip=())
 
 
 # ------------------------------------------------------------ transcript
@@ -164,16 +168,14 @@ def _clip(c: Creative) -> tuple[bytes, str] | None:
 
 def transcribe(c: Creative) -> str | None:
     """'' = no speech / too big to afford; None = could not run (retry later)."""
-    if not _llm_budget(peek=True):  # don't fetch a clip we cannot afford to send
+    if not _llm_budget("TRANSCRIBE_PROVIDERS"):  # don't fetch a clip we cannot afford to send
         return None
     clip = _clip(c)
     if clip is None:
         return None
     if not clip[0]:
         return ""
-    if not _llm_budget():
-        return None
-    out = llm.media_text("Transcribe all speech and any burned-in subtitles in this ad video, in the language spoken (Tagalog, Arabic, "
+    out = llm.transcribe("Transcribe all speech and any burned-in subtitles in this ad video, in the language spoken (Tagalog, Arabic, "
                          "English, ...). Return only the transcript. If there is no speech and no subtitles return NONE.",
                          clip[0], clip[1], 1200)
     if out is None:
@@ -233,7 +235,7 @@ def tick(db, limit: int = 30, dry_run: bool = False) -> dict:
                 continue
             text, eng = ocr_image(data, a)
             if text is None:  # no engine / budget: stop OCR for this tick, say why
-                out["skipped"] = "ocr engine unavailable (install Tesseract or set GEMINI_API_KEY)"
+                out["skipped"] = "ocr engine unavailable (set GROQ_API_KEY / CEREBRAS_API_KEY, or install Tesseract)"
                 ocr_left = 0
                 continue
             c.ocr_text, out["engine"], changed = text, eng, True

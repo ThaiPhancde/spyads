@@ -124,6 +124,8 @@ async def _startup():
     migrate_similar()
     from .personalization_migrate import migrate as migrate_personalization
     migrate_personalization()
+    from .llm_migrate import migrate as migrate_llm
+    migrate_llm()
     with SessionLocal() as db:
         ensure_default_connectors(db)
         from sqlalchemy import update

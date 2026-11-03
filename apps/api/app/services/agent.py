@@ -103,10 +103,10 @@ def parse(q: str) -> tuple[dict, str]:
                 "competitors_scaling (advertisers scaling fast), explain_product (why a product has its score). "
                 "Use null for filters not mentioned. limit defaults to 20."
             ),
-            user=q, schema=SPEC_SCHEMA,
+            user=q, schema=SPEC_SCHEMA, timeout=20, kind="agent",
         )
         if spec:
-            return spec, "claude"
+            return spec, llm.last_provider["name"] or "llm"
     return parse_rules(q), "rules"
 
 
@@ -231,6 +231,7 @@ def ask(db: Session, question: str) -> dict:
         summary = llm.complete_text(
             system="Bạn là analyst. Trả lời ngắn gọn bằng tiếng Việt (3-6 câu) dựa CHỈ trên dữ liệu JSON. Không bịa số.",
             user=f"Câu hỏi: {question}\nDữ liệu: {json.dumps(result['rows'][:20], ensure_ascii=False, default=str)}",
+            timeout=30, kind="agent",
         )
         answer = summary or answer
     return {"question": question, "spec": spec, "engine": engine, "answer": answer, **result}
@@ -256,6 +257,7 @@ def explain_product(p: Product) -> str:
                 "opportunity": p.opportunity_score, "recommendation": p.recommendation, "reasons": p.recommendation_reasons, "vector": v,
                 "saturation": p.saturation_score, "confidence": p.confidence_score},
                 "features": {k: v for k, v in f.items() if not k.startswith("_")}}, ensure_ascii=False, default=str),
+            timeout=30, kind="explain",
         )
         if text:
             return text

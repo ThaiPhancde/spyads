@@ -3,8 +3,8 @@
 Layers, cheapest first:
   1. lexicon.py   ~80 hand-made concepts × en / vi / tl / ar / zh — free, instant, exact. Used when it understands every word.
   2. query_intents cache   a keyword the model already explained: free, forever.
-  3. one model call (Gemini / Claude via llm.py) for a keyword the lexicon cannot read — e.g. "kính mắt" (eyeglasses) or
-     "organizador de maquillaje" — cached afterwards. Budget QUERY_LLM_DAILY calls / day (the free Gemini tier is 20, shared).
+  3. one model call (llm.py's free chain) for a keyword the lexicon cannot read — e.g. "kính mắt" (eyeglasses) or
+     "organizador de maquillaje" — cached afterwards. Budget QUERY_LLM_DAILY calls / day, counted in the call ledger.
 No answer (model off, budget spent) → the keyword is matched as written, never guessed.
 
 expand() has the shape of lexicon.expand(), so keyword_tiers / name matching in routers/intel.py use either unchanged.
@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -27,8 +26,7 @@ from . import lexicon
 from . import llm
 
 log = logging.getLogger(__name__)
-DAILY_CALLS = int(os.getenv("QUERY_LLM_DAILY", "8"))
-_spent = {"day": None, "n": 0}
+DAILY_CALLS = int(os.getenv("QUERY_LLM_DAILY", "200"))  # one call per new keyword (cached for good), counted in the call ledger
 _mem: dict[str, dict | None] = {}   # process cache over the table (None = asked, not a product)
 _failed: dict[str, float] = {}        # key → until when not to ask again (the model failed / was rate limited)
 RETRY_AFTER_S = 600
@@ -57,13 +55,7 @@ SYSTEM = (
 
 
 def _budget() -> bool:
-    today = date.today()
-    if _spent["day"] != today:
-        _spent.update(day=today, n=0)
-    if _spent["n"] >= DAILY_CALLS or not llm.available():
-        return False
-    _spent["n"] += 1
-    return True
+    return llm.available() and llm.spent_today("query_intent") < DAILY_CALLS
 
 
 def _clean(items, limit: int) -> list[str]:
@@ -89,7 +81,7 @@ def lookup(db: Session, query: str, ask: bool = True) -> dict | None:
     if not ask or len(key) < 2 or len(key) > 80 or _failed.get(key, 0) > time.time() or not _budget():
         return None
     # a search request waits on this: one try, short timeout (a 429 used to hold /api/ads?q= for ~20 s while the client retried)
-    got = llm.complete_json(SYSTEM, f"Keyword: {query}", SCHEMA, max_tokens=900, retries=1, timeout=8)
+    got = llm.complete_json(SYSTEM, f"Keyword: {query}", SCHEMA, max_tokens=900, retries=1, timeout=8, kind="query_intent")
     if not got:   # transient failure (rate limit / timeout): not cached in the table, not asked again for RETRY_AFTER_S
         _failed[key] = time.time() + RETRY_AFTER_S
         return None

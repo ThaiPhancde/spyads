@@ -453,7 +453,7 @@ class Alert(Base):
 class LlmProviderState(Base):
     """What each LLM provider told us about its limits (rate-limit headers), shared by API + worker (services/llm_providers.py)."""
     __tablename__ = "llm_provider_state"
-    provider: Mapped[str] = mapped_column(String(24), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(64), primary_key=True)  # "groq:openai/gpt-oss-20b" (app/llm_migrate.py)
     limits: Mapped[dict] = mapped_column(JSON, default=dict)  # {requests_day: {limit, remaining, reset_s}, tokens_minute: {...}}
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
