@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 from typing import Iterator
 
-from ..base import BaseConnector, ConnectorError, FetchParams, NotConfigured, RateLimit
+from ..base import BaseConnector, Blocked, ConnectorError, FetchParams, NotConfigured, RateLimit, RateLimited
 from ..contract import AdRecord, MediaItem
 
 _PLACEHOLDER = re.compile(r"\{\{[^}]+\}\}")
@@ -100,7 +100,7 @@ def ssr_search(query: str, country: str, active_only: bool, page_ids: list[str] 
         r = ses.get(url, params=params, timeout=30)
         m = _CHALLENGE.search(r.text)  # stop at access challenges
         if m:
-            raise ConnectorError("Meta access challenge; user action required")
+            raise Blocked("Meta access challenge; user action required")
     blob = _balanced(r.text, '"search_results_connection":')
     r.raise_for_status()
     if not blob:
@@ -267,7 +267,9 @@ class MetaLibraryConnector(BaseConnector):
             except Exception as e2:
                 raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}; SSR: {type(e2).__name__}: {e2}") from e
             resp, cursor = {"ads": raw_ads, "page_info": {"has_next_page": False}, "ssr_only": True}, None
-        if not isinstance(resp, dict) or any(resp.get(k) for k in ("error", "errors", "rate_limited", "session_expired")):
+        if isinstance(resp, dict) and resp.get("rate_limited"):
+            raise RateLimited("Meta Ad Library rate limit")
+        if not isinstance(resp, dict) or any(resp.get(k) for k in ("error", "errors", "session_expired")):
             raise ConnectorError("Meta source returned an error, rate limit, or expired session")
         if not isinstance(resp.get("ads"), list):
             raise ConnectorError("Meta advertiser response missing ads list")

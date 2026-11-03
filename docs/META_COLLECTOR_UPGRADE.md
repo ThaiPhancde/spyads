@@ -1,7 +1,7 @@
 # Meta Collector Upgrade
 
 Spec: [Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md](Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md).
-Trạng thái: **Phase 1, 2, 3 xong** (2026-11-03). Phase 4–5 chưa làm.
+Trạng thái: **Phase 1, 2, 3, 4 xong** (2026-11-03). Phase 5 chưa làm.
 
 ## Phase 1 — Meta Collector Reliability
 
@@ -206,3 +206,62 @@ Chỉ tạo 2 bảng mới (`checkfirst`), không đụng bảng cũ. Tự chạ
 | `tsc --noEmit` (apps/web) | không lỗi ở `data/page.tsx` |
 
 Test failure-recovery: worker chết giữa chừng → `recover` đánh dấu run `lost`, job retry ngay, worker mới claim token mới, token cũ không ghi được heartbeat / finish / fail; lease hết hạn được thu hồi kể cả khi chưa có lượt `recover`; backoff 1 → 2 → 4 phút rồi `error`, thành công đặt lại; exception trong job không để lại lease kẹt; 8 thread claim cùng 1 key mới trên PG → đúng 1 thắng; dòng đang bị khoá → `SKIP LOCKED` trả `None` ngay, không chờ; heartbeat thật gia hạn lease; checkpoint trước/sau lưu đúng; nút "Sync" khi worker đang giữ lease → `already_running`. Mutation check: bỏ kiểm tra token trong `finish` → test fencing fail; bỏ kiểm tra lease còn hạn trong `claim` → 2 test fail.
+
+## Phase 4 — Browser Collector
+
+### Audit: hiện trạng trước khi sửa
+
+3 chỗ tự mở Edge/Chrome qua Playwright, mỗi chỗ chép lại cùng đoạn launch: `TikTokTopAdsHeadlessConnector._scrape` (Top Ads công khai), `.video` (lấy link video mới khi CDN hết hạn, `media.refresh_source`), `harvest_cc_headers` (profile Creative Center). Tất cả chạy **trong thread của API/worker**:
+
+- Không giới hạn số trình duyệt chạy cùng lúc (scheduler, media refresh, nhiều quốc gia…).
+- Chỉ `goto` có timeout 60 s; tổng thời gian không giới hạn. Thread treo không kill được → trình duyệt treo theo.
+- Lỗi nguồn không phân loại: CAPTCHA, 403, 429 đều thành `ConnectorError` chung hoặc kết quả rỗng.
+
+### Thiết kế — `app/browser_worker.py`
+
+- **Process riêng mỗi tác vụ**: `run(task, args)` → `python -m app.browser_worker <task> <in.json> <out.json>`. Kết quả trao qua file JSON.
+- **Hạn chót cứng**: `TIMEOUTS` theo tác vụ (health 60 s, top ads 240 s, video 90 s, headers 120 s). Quá hạn → **kill cả cây process** (`taskkill /F /T` trên Windows, `killpg` trên POSIX) — gồm Playwright driver và mọi process Edge/Chrome. `proc.kill()` đơn thuần để lại process cháu (đã kiểm chứng bằng mutation test).
+- **Giới hạn concurrency**: `capacity()` = min(`BROWSER_MAX_CONCURRENCY` (2), CPU/2, RAM trống / `BROWSER_RAM_MB` (700)), tối thiểu 1; RAM đọc bằng stdlib (`GlobalMemoryStatusEx` / `/proc/meminfo`). Không có slot sau 30 s → `BROWSER_BUSY`.
+- **Dọn tài nguyên**: trình duyệt đóng trong `finally` của process con; parent luôn `kill_tree` + xoá file tạm, kể cả khi lỗi.
+- **Trạng thái**: `ok` / `blocked` / `rate_limited` / `timeout` / `busy` / `not_configured` / `error`. `Blocked` và `RateLimited` (mới, trong `collector/base.py`) là lớp con của `ConnectorError`, nên mọi chỗ bắt lỗi cũ vẫn chạy.
+- **Không vượt kiểm soát truy cập**: trang có CAPTCHA / verify / challenge form, hoặc tài liệu chính trả 401/403 → `blocked`, dừng. Source API trả 429 mà chưa có dữ liệu → `rate_limited`.
+- **Chỉ nguồn được phép**: chỉ chạy tác vụ trong `TASKS` (`health` + 3 tác vụ Creative Center công khai); không nhận URL tuỳ ý.
+- **Áp vào connector**: `Connector.health` = `blocked` / `rate_limited`. Crawl job (Phase 3) bị `blocked` → trạng thái `blocked`, **không retry nhanh** (gõ lại challenge không làm nó biến mất), lịch thường thử lại; `rate_limited` đi đường retry + backoff.
+- Meta (Phase 1) dùng cùng loại lỗi: access challenge → `Blocked`, payload `rate_limited` → `RateLimited`.
+- Không cần mẹo `ThreadPoolExecutor(1)` nữa (sync Playwright trong thread asyncio) vì Playwright chạy ở process khác.
+
+### File thay đổi
+
+| File | Thay đổi |
+|------|----------|
+| `apps/api/app/browser_worker.py` | Mới — parent (`run`, `capacity`, `kill_tree`) + child (`launch`, `challenge`, `Watch`, `TASKS`, `main`) |
+| `apps/api/app/collector/adapters/ad_libraries.py` | `_scrape`, `video`, `harvest_cc_headers` gọi `browser_worker.run`; xoá 3 bản launch trùng |
+| `apps/api/app/collector/base.py` | `Blocked`, `RateLimited` |
+| `apps/api/app/collector/adapters/meta.py` | Challenge → `Blocked`, rate limit → `RateLimited` |
+| `apps/api/app/realtime.py` | health `blocked` / `rate_limited`; truyền `blocked` cho crawl queue |
+| `apps/api/app/crawl_queue.py` | `fail(blocked=True)` → trạng thái `blocked` |
+| `apps/api/tests/test_browser_worker.py` | Mới — 12 test |
+
+### Cấu hình
+
+| Env | Mặc định | Ý nghĩa |
+|-----|----------|---------|
+| `BROWSER_MAX_CONCURRENCY` | 2 | Trần số trình duyệt mỗi process |
+| `BROWSER_RAM_MB` | 700 | RAM dự trù cho mỗi trình duyệt |
+| `BROWSER_CHANNEL` | (Edge → Chrome) | Ép channel; `chromium` = bản Playwright (dùng trong test) |
+
+### Giới hạn đã biết
+
+- Trần concurrency tính **theo process**: API và worker mỗi bên tối đa `capacity()`. Cần trần chung thì dùng pool advisory lock trên PG.
+- `scripts/tiktok_login.py` (đăng nhập tay một lần, có giao diện) vẫn tự mở trình duyệt — đó là bước người dùng thao tác, không phải collector.
+- Mỗi tác vụ tốn thêm ~1–2 s để khởi động process Python con; không đáng kể so với 10–60 s của một lần tải trang.
+
+### Kết quả kiểm thử (2026-11-03, chạy thật)
+
+| Bộ test | Kết quả |
+|---------|---------|
+| `tests/test_browser_worker.py` | 12 passed |
+| `browser_worker.run("health")` với **Edge đã cài trên máy** | `{'browser': '156.0.4314.58', 'text': 'ok'}`, capacity 2 |
+| Toàn bộ `apps/api/tests` | 482 passed, 4 skipped |
+
+Test gồm: process con chạy Chromium thật; quá hạn 3 s → process cháu (giả lập trình duyệt) bị kill thật (kiểm tra PID bằng `OpenProcess`); con trả `blocked` / `rate_limited` / `error` → đúng loại exception; con crash không có kết quả → `BROWSER_ERROR` kèm stderr; hết slot → `BROWSER_BUSY`; tác vụ không đăng ký bị từ chối; trang thật có 429 → `RateLimited`, có phần tử CAPTCHA → `Blocked`; connector bị `Blocked` → health `blocked`, crawl job `blocked` không lên lịch retry; Meta `rate_limited` → `RateLimited`. Mutation: thay `taskkill /T` bằng `proc.kill()` → test kill cây process fail.

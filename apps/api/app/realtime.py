@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from .collector.base import AuthExpired, ConnectorError, FetchParams, NotConfigured
+from .collector.base import AuthExpired, Blocked, ConnectorError, FetchParams, NotConfigured, RateLimited
 from .collector.factory import ConnectorFactory
 from .db import SessionLocal, ingest_lock
 from .events import publish
@@ -125,7 +125,8 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                     db.rollback()
                     time.sleep(2)
             c.status = "not_configured" if isinstance(e, NotConfigured) else "error"
-            c.health = "auth_expired" if isinstance(e, AuthExpired) else ("unknown" if isinstance(e, NotConfigured) else "error")
+            c.health = ("auth_expired" if isinstance(e, AuthExpired) else "unknown" if isinstance(e, NotConfigured)
+                        else "blocked" if isinstance(e, Blocked) else "rate_limited" if isinstance(e, RateLimited) else "error")
             c.last_error = "adapter removed" if isinstance(e, KeyError) else _redact(f"{type(e).__name__}: {e}")[:500]
             c.last_sync_at = datetime.utcnow()
             c.last_sync_count, c.last_duration_ms = 0, int((time.perf_counter() - t0) * 1000)
@@ -137,7 +138,7 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
             except OperationalError:
                 log.exception("connector %s: could not even record the failure (sqlite busy)", cid)
                 db.rollback()
-            result["error"] = c.last_error
+            result["error"], result["health"] = c.last_error, c.health
             publish("CONNECTOR_FAILED", result)
         return result
 
@@ -561,7 +562,7 @@ def _job_wrapper(key, cid, q, token):
             with _slots:
                 r = run_connector(cid, query=q)
         if r.get("error"):
-            crawl_queue.fail(key, token, r["error"])
+            crawl_queue.fail(key, token, r["error"], blocked=r.get("health") == "blocked")
         else:
             cursor = None
             if q:

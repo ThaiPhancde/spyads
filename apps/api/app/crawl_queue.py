@@ -40,7 +40,7 @@ class CrawlJob(Base):
     kind: Mapped[str] = mapped_column(String(8))  # c = connector sync, q = tracked query
     connector_id: Mapped[int | None] = mapped_column(Integer, index=True)
     query_id: Mapped[int | None] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(16), default="idle", index=True)  # idle / running / retry_wait / error
+    status: Mapped[str] = mapped_column(String(16), default="idle", index=True)  # idle / running / retry_wait / error / blocked
     run_token: Mapped[str | None] = mapped_column(String(48))
     lease_owner: Mapped[str | None] = mapped_column(String(128))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime, index=True)
@@ -179,8 +179,9 @@ def finish(key: str, token: str, result: dict | None = None, checkpoint: dict | 
     return True
 
 
-def fail(key: str, token: str, error: str, now: datetime | None = None) -> bool:
-    """Retry with backoff up to MAX_RETRIES, then `error` (the regular schedule runs it again; a success resets the count)."""
+def fail(key: str, token: str, error: str, now: datetime | None = None, blocked: bool = False) -> bool:
+    """Retry with backoff up to MAX_RETRIES, then `error` (the regular schedule runs it again; a success resets the count).
+    `blocked` (access challenge): no fast retries — hammering a challenge never clears it; the regular schedule tries again."""
     now = now or datetime.utcnow()
     with SessionLocal.begin() as db:
         job = db.scalar(select(CrawlJob).where(CrawlJob.key == key).with_for_update())
@@ -188,7 +189,9 @@ def fail(key: str, token: str, error: str, now: datetime | None = None) -> bool:
             return False
         job.retry_count += 1
         job.last_error = (error or "")[:1000]
-        if job.retry_count <= MAX_RETRIES:
+        if blocked:
+            job.status, job.next_retry_at = "blocked", None
+        elif job.retry_count <= MAX_RETRIES:
             job.status, job.next_retry_at = "retry_wait", now + backoff(job.retry_count)
         else:
             job.status, job.next_retry_at, job.retry_count = "error", None, 0

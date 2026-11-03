@@ -304,98 +304,26 @@ class TikTokTopAdsHeadlessConnector(BaseConnector):
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
           "Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0")  # default headless UA says "HeadlessChrome"
 
-    @staticmethod
-    def _launch(p):
-        for ch in ("msedge", "chrome"):
-            try:
-                return p.chromium.launch(channel=ch, headless=True)
-            except Exception as e:
-                err = e
-        raise NotConfigured(f"cần cài Microsoft Edge hoặc Google Chrome trên máy chạy API ({err})")
-
     def video(self, material_id: str) -> dict:
         """Fresh signed `video_info` of one ad (CDN links die within hours): the public detail page makes its own
-        /top_ads/v2/detail call — no login, no cookie. ~10 s."""
-        from playwright.sync_api import sync_playwright
+        /top_ads/v2/detail call — no login, no cookie. ~10 s, in the browser worker (app/browser_worker.py)."""
+        from ...browser_worker import run
 
-        got: dict = {}
-
-        def on_response(r):
-            if "/top_ads/v2/detail" in r.url and r.status == 200:
-                try:
-                    got.update((r.json().get("data") or {}).get("video_info") or {})
-                except Exception:
-                    pass
-
-        with sync_playwright() as p:
-            b = self._launch(p)
-            try:
-                pg = b.new_context(locale="en-US", user_agent=self.UA).new_page()
-                pg.on("response", on_response)
-                pg.goto(f"https://ads.tiktok.com/business/creativecenter/topads/{material_id}/pc/en",
-                        wait_until="domcontentloaded", timeout=60000)
-                for _ in range(30):
-                    if got:
-                        break
-                    pg.wait_for_timeout(500)
-            finally:
-                b.close()
-        return got
+        return run("tiktok_video", {"material_id": material_id}) or {}
 
     def _scrape(self, country: str, period: str) -> list[dict]:
-        from playwright.sync_api import sync_playwright
+        from ...browser_worker import run
 
-        seen: list[dict] = []
-
-        def on_response(r):
-            if "/top_ads/v2/list" in r.url and r.status == 200:
-                try:
-                    seen.append(r.json())
-                except Exception:
-                    pass
-
-        with sync_playwright() as p:
-            b = self._launch(p)
-            try:
-                pg = b.new_context(locale="en-US", viewport={"width": 1400, "height": 900}, user_agent=self.UA).new_page()
-                pg.on("response", on_response)
-                try:
-                    pg.goto(self.URL.format(period=period, country=country), wait_until="domcontentloaded", timeout=60000)
-                except Exception as e:
-                    log.warning("tiktok_top_ads_headless %s: %s", country, str(e).splitlines()[0])
-                pg.wait_for_timeout(8000)
-                pg.keyboard.press("Escape")  # promo popup covers the page
-                for _ in range(8):  # the list pages with a "View More" button; the login wall ends it
-                    btn = pg.get_by_text("View More", exact=False)
-                    if not btn.count():
-                        break
-                    before = len(seen)
-                    try:
-                        btn.first.click(timeout=8000)
-                    except Exception:  # promo modal re-opened over the button: close it, retry once, keep what we have
-                        pg.keyboard.press("Escape")
-                        try:
-                            btn.first.click(timeout=8000)
-                        except Exception:
-                            break
-                    pg.wait_for_timeout(3500)
-                    if len(seen) == before:
-                        break
-            finally:
-                b.close()
-        return seen
+        return run("tiktok_top_ads", {"country": country, "period": period}) or []
 
     def fetch_ads(self, params: FetchParams) -> Iterator[AdRecord]:
-        from concurrent.futures import ThreadPoolExecutor
-
         cfg = self.config
         countries = [c.upper() for c in params.countries or [] if c.upper() != "ALL"] or _csv(cfg.get("countries"), "PH")
         objectives = set(_csv(cfg.get("objectives"), "conversion,lead_generation,traffic,product_sales,shop_purchases"))
         done: set[str] = set()
         for country in countries:
             self.bucket.take()
-            with ThreadPoolExecutor(1) as ex:  # sync Playwright refuses to run inside an asyncio loop thread
-                pages = ex.submit(self._scrape, country, str(cfg.get("period") or 180)).result()
+            pages = self._scrape(country, str(cfg.get("period") or 180))
             for page in pages:
                 for m in (page.get("data") or {}).get("materials") or []:
                     if m["id"] in done or str(m.get("objective_key") or "").replace("campaign_objective_", "") not in objectives:
@@ -412,38 +340,11 @@ _cc_lock = threading.Lock()
 
 def harvest_cc_headers() -> dict:
     """Request headers (cookie, user-sign, timestamp, anonymous-user-id…) of the Creative Center page's own
-    /top_ads/v2/list call, read in a headless browser on TIKTOK_PROFILE. Logged in (tiktok_login.py run once): every
-    page, ≤ 500 ads / country; anonymous: page 1 only. Each visit lets TikTok renew that profile's session cookies."""
-    from playwright.sync_api import sync_playwright
+    /top_ads/v2/list call, read in a headless browser on TIKTOK_PROFILE (browser worker). Logged in (tiktok_login.py run
+    once): every page, ≤ 500 ads / country; anonymous: page 1 only. Each visit lets TikTok renew that profile's cookies."""
+    from ...browser_worker import run
 
-    got: dict = {}
-
-    def on_request(r):
-        if "/top_ads/v2/list" in r.url and not got:
-            got.update({k: v for k, v in r.all_headers().items()
-                        if not k.startswith(":") and k not in ("host", "content-length", "accept-encoding")})
-
-    TIKTOK_PROFILE.mkdir(parents=True, exist_ok=True)
-    with sync_playwright() as p:
-        for ch in ("msedge", "chrome"):
-            try:
-                ctx = p.chromium.launch_persistent_context(str(TIKTOK_PROFILE), channel=ch, headless=True, locale="en-US",
-                                                           user_agent=TikTokTopAdsHeadlessConnector.UA)
-                break
-            except Exception as e:
-                err = e
-        else:
-            raise NotConfigured(f"cần Microsoft Edge / Google Chrome trên máy chạy API ({err})")
-        try:
-            pg = ctx.new_page()
-            pg.on("request", on_request)
-            pg.goto(CC_PAGE, wait_until="domcontentloaded", timeout=60000)
-            for _ in range(40):
-                if got:
-                    break
-                pg.wait_for_timeout(500)
-        finally:
-            ctx.close()
+    got = run("tiktok_cc_headers") or {}
     if not got:
         raise ConnectorError("UPSTREAM_CHANGED: Creative Center không gọi /top_ads/v2/list — trang đổi?")
     if "sessionid" not in got.get("cookie", ""):
@@ -455,10 +356,7 @@ def auto_cc_headers(fresh: bool = False) -> dict:
     """Harvested headers, reused for 20 min (one browser launch per run, not per request)."""
     with _cc_lock:  # one browser at a time on the profile
         if fresh or time.time() - _cc_cache.get("at", 0) > 1200:
-            from concurrent.futures import ThreadPoolExecutor
-
-            with ThreadPoolExecutor(1) as ex:  # sync Playwright refuses to run inside an asyncio loop thread
-                _cc_cache.update(h=ex.submit(harvest_cc_headers).result(), at=time.time())
+            _cc_cache.update(h=harvest_cc_headers(), at=time.time())
         return _cc_cache["h"]
 
 
