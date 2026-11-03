@@ -83,11 +83,20 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                 c.status, c.last_error, c.last_sync_at = "ok", None, datetime.utcnow()
                 db.commit()
                 return {**result, "skipped": "chỉ chạy khi tìm từ khoá (Tìm sản phẩm) hoặc khi cấu hình keywords"}
-            recs = []
+            recs, fetch_error = [], None
             for p in plist:
-                for r in connector.fetch_ads(p):
-                    r.matched_query = p.query
-                    recs.append(r)
+                try:
+                    for r in connector.fetch_ads(p):
+                        r.matched_query = p.query
+                        recs.append(r)
+                except Exception as e:
+                    # a later page failed (rate limit, timeout, challenge): keep the pages already fetched — their checkpoint
+                    # (resume_out) stops after the last whole page. Dropping them made a page that always fails lose every
+                    # earlier page on every retry. Nothing fetched yet: the old failure path, nothing to store.
+                    if not recs:
+                        raise
+                    fetch_error = e
+                    break
             with ingest_lock():
                 stats = ingest_batch(db, recs) if c.adapter in HISTORY_ADAPTERS else ingest_ads(db, recs)
                 c = db.get(Connector, cid)
@@ -118,8 +127,12 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                     log.exception("connector %s: re-score after sync failed", cid)
                     db.rollback()
             result.update(fetched=len(recs), pages=getattr(connector, "pages_fetched", None), empty_pages=getattr(connector, "empty_pages", None),
+                          cursor_cycles=getattr(connector, "cursor_cycles", None),
                           **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source",
                                                    "invalid", "excluded_entertainment")})
+            if fetch_error is not None:  # stored up to the last whole page; the run is still a failure (retry, health, KPIs)
+                result["partial"] = True
+                raise fetch_error
             publish("CONNECTOR_SYNCED", result)
         except (NotConfigured, AuthExpired, ConnectorError, Exception) as e:
             if isinstance(e, OperationalError):
@@ -140,7 +153,8 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                         else "blocked" if isinstance(e, Blocked) else "rate_limited" if isinstance(e, RateLimited) else "error")
             c.last_error = "adapter removed" if isinstance(e, KeyError) else _redact(f"{type(e).__name__}: {e}")[:500]
             c.last_sync_at = datetime.utcnow()
-            c.last_sync_count, c.last_duration_ms = 0, int((time.perf_counter() - t0) * 1000)
+            c.last_sync_count = result.get("fetched", 0) if result.get("partial") else 0  # partial: stored up to its last whole page
+            c.last_duration_ms = int((time.perf_counter() - t0) * 1000)
             if query:
                 q = db.get(TrackedQuery, query.id)
                 q.last_run_at, q.last_error = datetime.utcnow(), c.last_error
@@ -252,7 +266,7 @@ def _run_search(job_id: int, more: int = 0):
                                 empty = 0 if recs else empty + 1
                                 got += len(recs)
                                 q.put(("batch", cid, name, recs, key, dict(st), kw))
-                                if empty >= 3 or st.get("page_status") == "partial":
+                                if empty >= 3 or st.get("page_status") in ("partial", "cycle"):
                                     break  # pause, never claim end without source confirmation
                     elif not more:  # single-shot sources (Apify, REST…): only on the first run
                         batch: list = []
@@ -571,13 +585,14 @@ def _job_wrapper(key, cid, q, token):
         with crawl_queue.leased(key, token):
             with _slots:
                 r = run_connector(cid, query=q, lease=(key, token))
+        cursor = None
+        if q and (not r.get("error") or r.get("partial")):  # a partial run committed its pages and their cursor
+            with SessionLocal() as db:
+                cursor = (db.get(TrackedQuery, q.id) or q).cursor
         if r.get("error"):
-            crawl_queue.fail(key, token, r["error"], blocked=r.get("health") == "blocked")
+            crawl_queue.fail(key, token, r["error"], blocked=r.get("health") == "blocked",
+                             result=r if r.get("partial") else None, checkpoint=cursor)
         else:
-            cursor = None
-            if q:
-                with SessionLocal() as db:
-                    cursor = (db.get(TrackedQuery, q.id) or q).cursor
             crawl_queue.finish(key, token, r, checkpoint=cursor)
     except Exception as e:
         log.exception("crawl %s failed", key)
@@ -817,8 +832,8 @@ def verify_liveness(max_advertisers: int = LIVENESS_PAGES_PER_RUN) -> dict:
                     recs_all += recs
                     # only ads Meta reports running count as alive; collation siblings' own status is unknown in this mode
                     seen |= {r.source_ad_id for r in recs if r.active is not False}
-                    if st.get("done") or st.get("page_status") == "partial":
-                        break  # partial = page 1 from the SSR fallback: incomplete, so no misses are counted
+                    if st.get("done") or st.get("page_status") in ("partial", "cycle"):
+                        break  # partial (SSR page 1) / cycle: incomplete, so no misses are counted
             except Exception:
                 out["errors"] += 1
                 continue

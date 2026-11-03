@@ -1,7 +1,8 @@
 # Meta Collector Upgrade
 
 Spec: [Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md](Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md).
-Trạng thái: **Phase 1–5 xong, đã nghiệm thu** (2026-11-03). Kết quả nghiệm thu: mục cuối.
+Trạng thái: **Phase 1–5 xong, đã nghiệm thu** (2026-11-03). Kết quả nghiệm thu: mục "Nghiệm thu toàn bộ".
+Gia cố Phase 1 sau gap audit (nhánh `meta-phase1-hardening`): mục cuối, chi tiết ở [META_RELIABILITY_GAP_AUDIT.md](META_RELIABILITY_GAP_AUDIT.md).
 
 ## Phase 1 — Meta Collector Reliability
 
@@ -369,3 +370,46 @@ Smoke test kiểm tra: extension gửi lại cùng key → cùng receipt, 1 ad; 
 ### Cần quyết định
 
 - **LLM naming trong batch atomic** (phát hiện #7): hiện tắt để không giữ transaction trong lúc gọi mạng, tên sản phẩm được bù bằng `backfill_names --llm`. Nếu cần tên LLM ngay lúc ingest, phải gọi LLM *trước* khi mở transaction — làm được nhưng là thay đổi riêng.
+
+## Phase 1 — gia cố sau gap audit (2026-11-03, nhánh `meta-phase1-hardening`)
+
+Audit lại code Phase 1 theo `docs/TOOLSPY_PROMPT_ADDENDUM.md` (bản cục bộ, chưa đưa vào Git) (P0). Ticket, bước tái hiện và tiêu chí nghiệm thu nằm ở [META_RELIABILITY_GAP_AUDIT.md](META_RELIABILITY_GAP_AUDIT.md). Chỉ sửa phần còn thiếu, không làm lại những gì Phase 1 đã có. P1/P2 của addendum chỉ ghi backlog.
+
+### Đã sửa
+
+| Mã | Lỗi | Sửa |
+|---|---|---|
+| GAP-03 (cao) | `run_connector` gom mọi trang rồi mới ingest: trang N lỗi thì bỏ trang 1…N−1. Lỗi lặp lại được thì truy vấn không bao giờ lưu được gì | Lưu các trang đã lấy cùng checkpoint của trang trọn vẹn cuối cùng, rồi vẫn báo lỗi (health, retry, `partial=True`). Lỗi ngay trang đầu thì đi đường cũ |
+| GAP-01 | Vòng cursor A→B→A: 1 000 request cho 3 quảng cáo trong test; "Tải thêm" lặp mãi | `st["seen"]` (mã băm của 200 cursor gần nhất, lưu cùng checkpoint) → `page_status="cycle"`: giữ quảng cáo của trang đó, tạm dừng, lần sau bắt đầu lại từ trang 1, ghi log và `cursor_cycles` |
+| GAP-02 | Bộ lọc `media_type` làm rỗng mọi trang thì `fetch_ads` đi hết các trang của nguồn | Giới hạn trang `max(5, 3·⌈limit/30⌉)` (hoặc `extra["max_pages"]`), hết giới hạn thì tạm dừng, giữ cursor |
+| GAP-04 | `crawl_queue.fail` không ghi số liệu và checkpoint của lần chạy dở | `fail(result=, checkpoint=)` dùng chung `_counts()` với `finish()` |
+
+Kiểm chứng là đúng, không cần sửa: worker chết sau commit (chạy tiếp từ cursor đã commit, không trùng); extension gửi lại cùng khoá khi request đầu chưa xong (`ingest_lock` xếp tuần tự, 1 biên nhận); cursor lặp ngay lập tức vẫn là lỗi nguồn.
+
+### File thay đổi
+
+| File | Thay đổi |
+|---|---|
+| `apps/api/app/collector/adapters/meta.py` | Phát hiện vòng cursor (`seen`, `cycle`, `cursor_cycles`), `RESUME_KEYS`, giới hạn trang trong `fetch_ads` |
+| `apps/api/app/realtime.py` | `run_connector`: giữ các trang đã lấy khi trang sau lỗi; `_run_search` và liveness tạm dừng khi gặp `cycle`; `_job_wrapper` truyền kết quả và checkpoint của lần chạy dở |
+| `apps/api/app/crawl_queue.py` | `fail(result=, checkpoint=)`, `_counts()` |
+| `apps/api/tests/test_meta_phase1_hardening.py` | Mới: 9 test (vòng cursor ×2, cursor lặp ngay, giới hạn trang, trang sau lỗi ×2, lịch sử chạy dở, worker chết sau commit, gửi lại khi request đầu chưa xong) |
+| `docs/META_RELIABILITY_GAP_AUDIT.md` | Mới: audit P0, ticket, đối chiếu addendum, backlog |
+
+### Migration
+
+Không có thay đổi schema. `seen` nằm trong cột JSON checkpoint đã có (`TrackedQuery.cursor`, `SearchJob.state`, `crawl_jobs.checkpoint`). Checkpoint cũ không có `seen` vẫn chạy bình thường.
+
+### Kết quả kiểm thử (2026-11-03, chạy thật)
+
+| Bộ | Kết quả |
+|---|---|
+| Test mới, **trước khi sửa** (TDD) | 5 failed, 4 passed: đúng 3 lỗi thật (vòng cursor: 1 000 bản ghi; giới hạn trang: đi tới `c500`; trang sau lỗi: lưu 0) |
+| Test mới, sau khi sửa | 9 passed |
+| Toàn bộ `apps/api/tests`, SQLite | **526 passed**, 4 skipped, 0 failed |
+| 5 file độ tin cậy (`test_meta_phase1_hardening`, `test_meta_reliability`, `test_crawl_queue`, `test_collector_review_fixes`, `test_collector_kpis`), PostgreSQL 18 (`toolspy_test_meta`) | **49 passed**, chạy 2 lần |
+| Extension `node --test test/test_outbox.js` | 3 passed |
+| Extension `node test/test_injected.js` (response Meta thật, nhiều dòng / SSR / payload hỏng) | 3 passed |
+
+Chưa kiểm thử: Meta thật và extension cài trong Chrome thật; chạy tải 24–72 giờ. **Chưa nói là sẵn sàng cho production.**
+

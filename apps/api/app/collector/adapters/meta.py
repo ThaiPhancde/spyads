@@ -10,12 +10,18 @@
 """
 from __future__ import annotations
 
+import hashlib
+import logging
+import math
 import re
 from datetime import datetime, timezone
 from typing import Iterator
 
 from ..base import BaseConnector, Blocked, ConnectorError, FetchParams, NotConfigured, RateLimit, RateLimited
 from ..contract import AdRecord, MediaItem
+
+log = logging.getLogger(__name__)
+RESUME_KEYS = ("cursor", "sid", "tok", "seen")  # what a resumed traversal carries between runs
 
 _PLACEHOLDER = re.compile(r"\{\{[^}]+\}\}")
 
@@ -212,10 +218,12 @@ class MetaLibraryConnector(BaseConnector):
         """Scheduled / single-shot path = fetch_page in a loop: the collector's own `search()` rejects country 'ALL'
         (tracked queries on 'ALL' failed every run) and skipped the token bucket."""
         resume, out = params.extra.get("resume") or {}, params.extra.setdefault("resume_out", {})
+        # pages the media filter empties never raise `got`: without a budget the loop walked every page the source had
+        budget = params.extra.get("max_pages") or max(5, 3 * math.ceil(params.limit / 30))
         for country in params.countries or ["ALL"]:
-            st = {k: v for k, v in (resume.get(country) or {}).items() if k in ("cursor", "sid", "tok")}  # continue deeper
-            resumed, got, empty = bool(st.get("cursor")), 0, 0
-            while got < params.limit and not st.get("done"):
+            st = {k: v for k, v in (resume.get(country) or {}).items() if k in RESUME_KEYS}  # continue deeper
+            resumed, got, empty, pages = bool(st.get("cursor")), 0, 0, 0
+            while got < params.limit and not st.get("done") and pages < budget:
                 try:
                     recs, st = self.fetch_page(params, country, st)
                 except (Blocked, RateLimited):
@@ -225,9 +233,10 @@ class MetaLibraryConnector(BaseConnector):
                         raise
                     st, resumed = {}, False  # Meta refused the stored cursor (expired session): start over from page 1
                     continue
-                out[country] = {k: st.get(k) for k in ("cursor", "sid", "tok", "done")}
+                pages += 1
+                out[country] = {k: st.get(k) for k in (*RESUME_KEYS, "done")}
                 empty = 0 if recs else empty + 1  # Meta sends empty pages mid-stream; pause after several; only page_info declares the end
-                stop = empty >= 3 or st.get("page_status") == "partial"
+                stop = empty >= 3 or st.get("page_status") in ("partial", "cycle")
                 for rec in recs:
                     if params.media_type and rec.creative_type != params.media_type:
                         continue
@@ -291,11 +300,21 @@ class MetaLibraryConnector(BaseConnector):
         has_next = info.get("has_next_page", info.get("hasNextPage", bool(cursor)))
         if has_next and (not cursor or cursor == st.get("cursor")):
             raise ConnectorError("Meta pagination did not advance")
+        self.pages_fetched = getattr(self, "pages_fetched", 0) + 1  # Data & Connectors KPIs (crawl_runs.pages)
+        self.empty_pages = getattr(self, "empty_pages", 0) + (not recs)
+        # A → B → A: following an earlier cursor repeats the same pages for ever (1,000 requests for 3 ads, measured in a test).
+        # This page's ads are good; the traversal pauses and the next run starts over — never "the end".
+        seen = st.get("seen") or []
+        mark = hashlib.sha1(cursor.encode()).hexdigest()[:12] if has_next and cursor else None
+        if mark and mark in seen:
+            self.cursor_cycles = getattr(self, "cursor_cycles", 0) + 1
+            log.warning("Meta pagination cycle (%s, %s): pausing, next run starts from page 1", params.query or params.page_ids, country)
+            st.update(cursor=None, done=False, page_status="cycle", seen=[])
+            return recs, st
+        st["seen"] = (seen + [mark])[-200:] if mark else seen  # ponytail: last 200 cursors, a longer cycle hits the page budget
         st["cursor"] = cursor
         st["done"] = not has_next
         st["page_status"] = "end" if st["done"] else "page" if recs else "empty"
-        self.pages_fetched = getattr(self, "pages_fetched", 0) + 1  # Data & Connectors KPIs (crawl_runs.pages)
-        self.empty_pages = getattr(self, "empty_pages", 0) + (not recs)
         return recs, st
 
     def health_check(self) -> dict:

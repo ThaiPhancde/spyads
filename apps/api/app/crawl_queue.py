@@ -201,17 +201,22 @@ def finish(key: str, token: str, result: dict | None = None, checkpoint: dict | 
         if checkpoint is not None:
             job.checkpoint = checkpoint
         db.execute(update(CrawlRun).where(CrawlRun.run_token == token).values(
-            status="ok", finished_at=now, fetched=result.get("fetched"), new_ads=result.get("new_ads"),
-            pages=result.get("pages"), empty_pages=result.get("empty_pages"), invalid=result.get("invalid"),
-            excluded=result.get("excluded_entertainment"), duplicates=result.get("updated_ads"),
-            accepted=(result.get("new_ads") or 0) + (result.get("updated_ads") or 0) if "new_ads" in result else None,
-            checkpoint_after=checkpoint if checkpoint is not None else job.checkpoint))
+            status="ok", finished_at=now, checkpoint_after=checkpoint if checkpoint is not None else job.checkpoint, **_counts(result)))
     return True
 
 
-def fail(key: str, token: str, error: str, now: datetime | None = None, blocked: bool = False) -> bool:
+def _counts(result: dict) -> dict:
+    """crawl_runs columns from a run_connector result (Data & Connectors KPIs)."""
+    return dict(fetched=result.get("fetched"), new_ads=result.get("new_ads"), pages=result.get("pages"), empty_pages=result.get("empty_pages"),
+                invalid=result.get("invalid"), excluded=result.get("excluded_entertainment"), duplicates=result.get("updated_ads"),
+                accepted=(result.get("new_ads") or 0) + (result.get("updated_ads") or 0) if "new_ads" in result else None)
+
+
+def fail(key: str, token: str, error: str, now: datetime | None = None, blocked: bool = False, result: dict | None = None,
+         checkpoint: dict | None = None) -> bool:
     """Retry with backoff up to MAX_RETRIES, then `error` (the regular schedule runs it again; a success resets the count).
-    `blocked` (access challenge): no fast retries — hammering a challenge never clears it; the regular schedule tries again."""
+    `blocked` (access challenge): no fast retries — hammering a challenge never clears it; the regular schedule tries again.
+    `result` / `checkpoint`: a partial run that committed its earlier pages — the history keeps what it stored and where it stopped."""
     now = now or datetime.utcnow()
     with SessionLocal.begin() as db:
         job = db.scalar(select(CrawlJob).where(CrawlJob.key == key).with_for_update())
@@ -226,6 +231,8 @@ def fail(key: str, token: str, error: str, now: datetime | None = None, blocked:
         else:
             job.status, job.next_retry_at, job.retry_count = "error", None, 0
         job.run_token, job.lease_owner, job.lease_until, job.updated_at = None, None, None, now
+        if checkpoint is not None:
+            job.checkpoint = checkpoint
         db.execute(update(CrawlRun).where(CrawlRun.run_token == token).values(
-            status="error", finished_at=now, error=job.last_error, checkpoint_after=job.checkpoint))
+            status="error", finished_at=now, error=job.last_error, checkpoint_after=job.checkpoint, **(_counts(result) if result else {})))
     return True
