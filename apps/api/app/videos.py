@@ -3,8 +3,8 @@ first creative share one `product_images.video_key` (= that first creative's pHa
 Trivial hashes (blank / single-bit frames) get no key. Facts per key: every ad (active or not), distinct pages, earliest
 sighting, pages a source re-confirmed (adsignals.verified_live), and the pages in order of arrival.
 
-ponytail: cover frame only — a re-upload with a new cover splits into another video; upgrade = hash several frames of the SD
-rendition (Creative.sd_source_url, already streamed). Leader buckets (compare to each group's first hash, no transitive merge):
+ponytail: cover frame only — a re-upload with a new cover splits into another video. Stored videos now carry a 3-frame
+fingerprint (Creative.video_fp, media.video_fingerprint) used by creative families; upgrade = let it join / split keys here. Leader buckets (compare to each group's first hash, no transitive merge):
 two groups whose leaders sit 7+ bits apart stay apart even if their members touch.
 
 CLI:  python -m app.videos backfill     (additive: only rows without a key are written)

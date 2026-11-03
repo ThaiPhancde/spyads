@@ -150,8 +150,16 @@ def _shrink_image(path: Path) -> str | None:
 
 
 def _probe(path: Path) -> dict:
-    if not FFPROBE:
-        return {}
+    if not FFPROBE:  # imageio_ffmpeg ships no ffprobe: read the same facts from ffmpeg's input banner
+        if not FFMPEG:
+            return {}
+        try:
+            err = subprocess.run([FFMPEG, "-hide_banner", "-i", str(path)], capture_output=True, text=True, timeout=30).stderr
+        except Exception:
+            return {}
+        d, wh = re.search(r"Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)", err), re.search(r"Video:.*?, (\d{2,5})x(\d{2,5})", err)
+        return {"width": int(wh[1]) if wh else None, "height": int(wh[2]) if wh else None,
+                "duration": int(d[1]) * 3600 + int(d[2]) * 60 + float(d[3]) if d else None}
     try:
         out = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
                               "stream=width,height:format=duration", "-of", "default=nw=1", str(path)],
@@ -164,15 +172,44 @@ def _probe(path: Path) -> dict:
         return {}
 
 
-def _frame(path: Path) -> bytes | None:
+def _frame(path: Path, at: float = 1) -> bytes | None:
     if not FFMPEG:
         return None
-    try:
-        r = subprocess.run([FFMPEG, "-v", "error", "-ss", "1", "-i", str(path), "-frames:v", "1", "-f", "image2", "-"],
+    try:  # decodes one frame to a JPEG: never re-encodes the video
+        r = subprocess.run([FFMPEG, "-v", "error", "-ss", f"{at:.3f}", "-i", str(path), "-frames:v", "1", "-f", "image2", "-"],
                            capture_output=True, timeout=60)
         return r.stdout or None
     except Exception:
         return None
+
+
+FP_POINTS = (0.2, 0.5, 0.8)
+
+
+def video_fingerprint(path: Path, duration: float | None) -> tuple[str | None, float | None]:
+    """dHash of the frames at 20 / 50 / 80 % of a video already on disk → ("h20:h50:h80", share of usable frames).
+    A blank / black frame (fade, letterbox) leaves its slot empty instead of matching every other blank frame."""
+    if not duration or duration <= 0:
+        return None, None
+    hashes = []
+    for p in FP_POINTS:
+        jpg = _frame(path, duration * p)
+        try:
+            h = dhash(jpg)[0] if jpg else ""
+        except Exception:
+            h = ""
+        hashes.append(h if h and 2 < bin(int(h, 16)).count("1") < 62 else "")
+    n = sum(1 for h in hashes if h)
+    return (":".join(hashes), round(n / len(FP_POINTS), 2)) if n else (None, None)
+
+
+def same_video(a: str | None, b: str | None) -> bool | None:
+    """Frame-by-frame verdict on two fingerprints: True / False once 2+ positions are usable on both, else None (unknown).
+    A supporting dedup signal for creative families only — product clustering never reads it."""
+    pairs = [(x, y) for x, y in zip((a or "").split(":"), (b or "").split(":")) if x and y]
+    if len(pairs) < 2:
+        return None
+    return all(hamming(x, y) <= FAMILY_DISTANCE for x, y in pairs)
 
 
 def source_alive(url: str | None, margin_s: int = 600) -> bool:
@@ -204,7 +241,7 @@ def _strip(url: str | None) -> str:
 
 
 _SHARED = ("storage_key", "thumb_key", "sha256", "phash", "mime", "size_bytes", "width", "height", "duration_sec", "family_id",
-           "stored_bytes")
+           "stored_bytes", "video_fp", "video_fp_confidence")
 
 
 def _twin(db, c: Creative, cond) -> Creative | None:
@@ -291,6 +328,7 @@ def _process(cid: int):
                 else:
                     meta = _probe(tmp)
                     c.width, c.height, c.duration_sec = meta.get("width"), meta.get("height"), meta.get("duration")
+                    c.video_fp, c.video_fp_confidence = video_fingerprint(tmp, c.duration_sec)
                     if c.preview_source_url:
                         try:
                             pr = safe_get(c.preview_source_url, max_bytes=20 * 1024 * 1024, headers=HEADERS, timeout=60)
@@ -370,10 +408,16 @@ def assign_family(db, c: Creative) -> int:
         same = db.scalar(select(Creative.family_id).where(Creative.sha256 == c.sha256, Creative.family_id.is_not(None), Creative.id != c.id))
         if same:
             return same
+    if c.video_fp:  # same frames at 20/50/80 %: one video even when the cover differs
+        for fid, fp in db.execute(select(Creative.family_id, Creative.video_fp).where(
+                Creative.video_fp.is_not(None), Creative.family_id.is_not(None), Creative.id != c.id)):
+            if same_video(fp, c.video_fp):
+                return fid
     if c.phash:
-        for fid, ph in db.execute(select(Creative.family_id, Creative.phash).where(
+        for fid, ph, fp in db.execute(select(Creative.family_id, Creative.phash, Creative.video_fp).where(
                 Creative.phash.is_not(None), Creative.family_id.is_not(None), Creative.id != c.id, Creative.type == c.type)):
-            if hamming(ph, c.phash) <= FAMILY_DISTANCE:
+            # same cover, but the frames say another video (one thumbnail reused for several cuts): not one family
+            if hamming(ph, c.phash) <= FAMILY_DISTANCE and same_video(fp, c.video_fp) is not False:
                 return fid
     return c.id
 

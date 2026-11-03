@@ -286,6 +286,8 @@ class Creative(Base):
     height: Mapped[int | None] = mapped_column(Integer)
     duration_sec: Mapped[float | None] = mapped_column(Float)
     family_id: Mapped[int | None] = mapped_column(Integer, index=True)  # creative family (discovery §6)
+    video_fp: Mapped[str | None] = mapped_column(String(50))  # dHash at 20/50/80 % "h20:h50:h80" (media.video_fingerprint)
+    video_fp_confidence: Mapped[float | None] = mapped_column(Float)  # usable frames / 3
     transcript: Mapped[str | None] = mapped_column(Text)
     ocr_text: Mapped[str | None] = mapped_column(Text)
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime)

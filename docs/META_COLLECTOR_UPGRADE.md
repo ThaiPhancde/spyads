@@ -1,7 +1,7 @@
 # Meta Collector Upgrade
 
 Spec: [Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md](Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md).
-Trạng thái: **Phase 1 xong** (2026-11-03). Phase 2–5 chưa làm.
+Trạng thái: **Phase 1, 2 xong** (2026-11-03). Phase 3–5 chưa làm.
 
 ## Phase 1 — Meta Collector Reliability
 
@@ -95,3 +95,51 @@ Các test failure-recovery chính:
 - outbox: offline → giữ row, backoff; mất ACK → gửi lại cùng key; browser restart → row còn
 
 Chưa kiểm thử: chạy live với Meta thật và extension cài trong Chrome thật (cần đăng nhập + thao tác tay).
+
+## Phase 2 — Video Fingerprint
+
+### Audit: hiện trạng trước khi sửa
+
+- `media.dhash()` chỉ hash **1 poster** (ảnh preview của nguồn, hoặc frame ở giây thứ 1). `assign_family` gộp creative theo poster dHash ≤ 10 bit → nhiều bản cắt khác nhau dùng chung 1 thumbnail bị gộp thành 1 family; cùng video nhưng đổi cover thì bị tách.
+- `videos.py` (nhóm "cùng video" giữa các page) dựa trên pHash ảnh cover — ghi chú `ponytail` đã nêu hướng nâng cấp là hash nhiều frame.
+- **Lỗi phát hiện thêm:** máy chỉ có ffmpeg của `imageio_ffmpeg`, không có `ffprobe` → `_probe()` trả `{}`; video đã lưu không có `duration_sec` / `width` / `height`.
+
+### Thiết kế
+
+- `media.video_fingerprint(path, duration)` → `"h20:h50:h80"` (dHash 64-bit tại 20 / 50 / 80 % thời lượng) và `confidence` = số frame dùng được / 3. Frame trắng/đen (popcount ≤ 2 hoặc ≥ 62) để trống, không thành bằng chứng.
+- `media.same_video(a, b)` → `True` / `False` khi có ≥ 2 vị trí dùng được ở cả hai (mỗi vị trí ≤ `FAMILY_DISTANCE` bit), ngược lại `None` (chưa biết).
+- `assign_family`: fingerprint khớp → cùng family (kể cả khác cover); poster giống nhưng fingerprint **khẳng định khác** → tách family; thiếu fingerprint → poster quyết như cũ.
+- **Không tải thêm, không re-encode:** fingerprint chỉ được tính trong `_process`, đúng lúc file video đã tải theo luồng hiện có (`VIDEO_DOWNLOAD=1` hoặc lưu theo yêu cầu `POST /api/creatives/{id}/retry`). ffmpeg chỉ decode 1 frame ra JPEG mỗi vị trí. Không mở URL nguồn bằng ffmpeg (sẽ bỏ qua kiểm tra SSRF của `netsafe`). Video chưa tải giữ tín hiệu poster như trước.
+- **Không gộp sản phẩm:** fingerprint chỉ vào `Creative.family_id` (dùng để đếm creative khác nhau *trong* 1 sản phẩm: `discovery`, `product_evidence`, `hidden`). Product clustering (`services/clustering.py`) đọc `ProductImage.phash`, không đọc fingerprint. Test khẳng định 2 sản phẩm vẫn là 2 sau khi creative của chúng cùng family.
+- `_probe()` fallback: không có ffprobe thì đọc `Duration` / kích thước từ banner `ffmpeg -i`.
+- Bản sao cùng sha256 (`_SHARED`) copy luôn fingerprint.
+
+### File thay đổi
+
+| File | Thay đổi |
+|------|----------|
+| `apps/api/app/media.py` | `video_fingerprint`, `same_video`, `_frame(at=)`, `_probe` fallback, `assign_family`, `_SHARED`, gọi trong `_process` |
+| `apps/api/app/models.py` | `Creative.video_fp` (VARCHAR 50), `Creative.video_fp_confidence` (FLOAT) |
+| `apps/api/app/meta_collector_migrate.py` | Thêm 2 cột nullable vào `creatives` nếu chưa có |
+| `apps/api/app/videos.py` | Cập nhật ghi chú `ponytail` |
+| `apps/api/tests/test_video_fingerprint.py` | Mới — 5 test |
+
+### Migration
+
+Additive: `ALTER TABLE creatives ADD COLUMN video_fp VARCHAR(50)`, `video_fp_confidence FLOAT` (nullable, không rewrite bảng trên PG). Tự chạy khi API/worker khởi động, hoặc `python -m app.meta_collector_migrate`. Rollback: `ALTER TABLE creatives DROP COLUMN video_fp, DROP COLUMN video_fp_confidence;`.
+
+### Đánh đổi / chưa làm
+
+- Video đã nằm trong vault từ trước chưa có fingerprint. Chưa viết backfill vì trên R2 việc đó = tải lại hàng loạt; với vault local có thể thêm CLI đọc file đã lưu khi cần.
+- `videos.py` (`video_key` giữa các page) vẫn dựa trên cover; chưa dùng fingerprint để nối / tách key.
+- `assign_family` vẫn quét tuyến tính mọi creative có hash (như trước). Đủ cho vài chục nghìn video; lớn hơn thì cần index (BK-tree / bucket theo prefix).
+
+### Kết quả kiểm thử (2026-11-03, chạy thật)
+
+| Bộ test | Kết quả |
+|---------|---------|
+| `tests/test_video_fingerprint.py` trên SQLite | 5 passed |
+| Phase 1 + 2 trên PostgreSQL 18 (`toolspy_test_meta`) | 21 passed |
+| Toàn bộ `apps/api/tests` | 462 passed, 3 skipped |
+
+Test dùng video tạo bằng ffmpeg `lavfi` (`testsrc2` 5 s): cùng video ở độ phân giải khác → khớp; video lật → khác; video đen → không fingerprint; không có duration → không fingerprint; poster giống + frame khác → tách family; cover khác + frame giống → cùng family, sản phẩm vẫn tách; `_process` lưu fingerprint với đúng 1 lần tải; migration thêm cột vào bảng cũ có dữ liệu, chạy 2 lần không lỗi. Mutation check: gỡ điều kiện phủ quyết poster → test family fail.
