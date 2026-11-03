@@ -1,7 +1,7 @@
 """AI Enrichment (blueprint §2, §15-17, §20): unstructured → structured.
 
-Rule-based classifiers ship by default (vi + en lexicons). When an Anthropic key
-is configured, comment ABSA is upgraded to Claude via structured outputs, in batches.
+Rule-based classifiers ship by default (vi + en lexicons). When a free model of llm.py's
+chain is configured, comment ABSA is upgraded to it via structured outputs, in batches.
 """
 import hashlib
 import re
@@ -194,7 +194,7 @@ def analyze_comments(texts: list[str]) -> tuple[list[dict], str]:
                     "opinion about it. Return one result per numbered comment, using its number as `i`."
                 ),
                 user=numbered,
-                schema=_ABSA_SCHEMA,
+                schema=_ABSA_SCHEMA, kind="absa",
             )
             if not data:
                 out = []
@@ -212,7 +212,7 @@ def analyze_comments(texts: list[str]) -> tuple[list[dict], str]:
                     "is_question": r["is_question"],
                 })
         if out:
-            return out, "claude"
+            return out, llm.last_provider["name"] or "llm"
     return [analyze_comment_rules(t) for t in texts], "rules"
 
 
@@ -432,7 +432,7 @@ def extract_products(items: list[dict]) -> list[dict] | None:
                     "events, real estate, courses, and also for anything that cannot be imported from China as a "
                     "generic product: food, drinks, supplements, medicine, and branded goods sold only by the brand "
                     "(an iPhone is not importable, an iPhone case is). Use the number as i."),
-            user=lines, schema=_PRODUCT_SCHEMA,
+            user=lines, schema=_PRODUCT_SCHEMA, kind="extract",
         )
         if not data:
             return None

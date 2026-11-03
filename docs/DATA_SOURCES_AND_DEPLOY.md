@@ -117,7 +117,7 @@ Chạy **1 API + 1 worker**. Event bus (SSE) nằm trong bộ nhớ API: tiến 
 
 App gồm 3 tiến trình + Postgres, không phụ thuộc nhà cung cấp nào (VPS, Docker host, PaaS). Docker không bắt buộc: một VPS cài Postgres + Python + Node là đủ.
 
-1. **API** (`apps/api`, `Dockerfile` có sẵn ffmpeg, lắng nghe `$PORT`, mặc định 8000). Biến môi trường tối thiểu: `ADMIN_TOKEN`, `INGEST_TOKEN`, `WEB_ORIGIN`; `DATABASE_URL` (Postgres), `DISABLE_SCHEDULER=1`; `STORAGE_BACKEND=r2` cùng các biến `R2_*` để lưu video lên Cloudflare (hoặc gắn ổ đĩa bền vào `DATA_DIR` và để `STORAGE_BACKEND=local`); `ANTHROPIC_API_KEY` (tuỳ chọn).
+1. **API** (`apps/api`, `Dockerfile` có sẵn ffmpeg, lắng nghe `$PORT`, mặc định 8000). Biến môi trường tối thiểu: `ADMIN_TOKEN`, `INGEST_TOKEN`, `WEB_ORIGIN`; `DATABASE_URL` (Postgres), `DISABLE_SCHEDULER=1`; `STORAGE_BACKEND=r2` cùng các biến `R2_*` để lưu video lên Cloudflare (hoặc gắn ổ đĩa bền vào `DATA_DIR` và để `STORAGE_BACKEND=local`); AI miễn phí (tuỳ chọn): `CEREBRAS_API_KEY`, `GROQ_API_KEY` — xem `docs/LLM_FREE_PROVIDERS.md`.
 2. **Web** (`apps/web`, `Dockerfile` có sẵn). Đặt `API_URL=<địa chỉ API mà web gọi tới>` **lúc build** và `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` nếu muốn khoá bản demo.
    Chỉ cần một domain công khai trỏ vào Web; Web chuyển `/api/*` sang API. Extension gọi `https://<domain>/api/ingest/...` kèm header `X-Ingest-Token`.
 3. **Cloudflare R2**: tạo bucket và API token (Object Read & Write). Muốn link video công khai và nhanh thì gắn custom domain hoặc bật r2.dev rồi đặt `R2_PUBLIC_URL`; nếu không, app dùng presigned URL có hạn 1 giờ.
@@ -135,7 +135,7 @@ Không cần gửi key qua chat. Hãy nhập vào biến môi trường của m�
 | **Tìm sản phẩm thật** | Không cần gì thêm (Meta Ad Library public đã chạy). Volume lớn: `APIFY_TOKEN` và/hoặc proxy | Tìm kiếm, theo dõi từ khoá, theo dõi page đối thủ |
 | **TikTok** | `APIFY_TOKEN` + actor TikTok bạn chọn, hoặc quyền TikTok Commercial Content API | Quảng cáo TikTok |
 | **Spy tool** | Pipiads/Minea: key Enterprise, hoặc chỉ cần file export | Gộp dữ liệu nhiều nguồn |
-| **AI** (tuỳ chọn) | `ANTHROPIC_API_KEY` | Tên sản phẩm chuẩn, lọc quảng cáo dịch vụ, phân tích comment |
+| **AI** (tuỳ chọn, miễn phí) | `CEREBRAS_API_KEY`, `GROQ_API_KEY` (+ `CLOUDFLARE_API_TOKEN`, `GEMINI_API_KEY` dự phòng) — `docs/LLM_FREE_PROVIDERS.md` | Tên sản phẩm, lọc quảng cáo dịch vụ, hiểu từ khoá đa ngôn ngữ, AI Agent, OCR, trích lời video, phân tích comment |
 
 ### 5b. EU Market (`apps/api/app/eu_market/`, menu **EU Market**)
 

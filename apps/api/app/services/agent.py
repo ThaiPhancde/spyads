@@ -35,11 +35,11 @@ SPEC_SCHEMA = {
         "category": {"type": ["string", "null"], "enum": ["beauty", "health", "home", "gadgets", "fashion", "pets", None]},
         "max_advertisers": {"type": ["integer", "null"]},
         "min_opportunity": {"type": ["number", "null"]},
-        "fast_growing": {"type": "boolean"},
-        "hidden_winner": {"type": "boolean"},
+        "fast_growing": {"type": ["boolean", "null"]},  # null = not mentioned (the prompt says so; Groq rejects a null in a plain boolean)
+        "hidden_winner": {"type": ["boolean", "null"]},
         "days": {"type": ["integer", "null"]},
         "product_query": {"type": ["string", "null"]},
-        "limit": {"type": "integer"},
+        "limit": {"type": ["integer", "null"]},
     },
     "required": ["intent", "country", "category", "max_advertisers", "min_opportunity",
                  "fast_growing", "hidden_winner", "days", "product_query", "limit"],
@@ -101,12 +101,12 @@ def parse(q: str) -> tuple[dict, str]:
                 "product database. Intents: product_search (find products by filters), top_complaints (complaints of one product — put "
                 "its name/code in product_query), market_hidden_winners (which market has most hidden winners), "
                 "competitors_scaling (advertisers scaling fast), explain_product (why a product has its score). "
-                "Use null for filters not mentioned. limit defaults to 20."
+                "Use null for every filter not mentioned, including fast_growing, hidden_winner and limit (null limit means 20)."
             ),
-            user=q, schema=SPEC_SCHEMA,
+            user=q, schema=SPEC_SCHEMA, timeout=20, kind="agent",
         )
         if spec:
-            return spec, "claude"
+            return spec, llm.last_provider["name"] or "llm"
     return parse_rules(q), "rules"
 
 
@@ -231,6 +231,7 @@ def ask(db: Session, question: str) -> dict:
         summary = llm.complete_text(
             system="Bạn là analyst. Trả lời ngắn gọn bằng tiếng Việt (3-6 câu) dựa CHỈ trên dữ liệu JSON. Không bịa số.",
             user=f"Câu hỏi: {question}\nDữ liệu: {json.dumps(result['rows'][:20], ensure_ascii=False, default=str)}",
+            timeout=30, kind="agent",
         )
         answer = summary or answer
     return {"question": question, "spec": spec, "engine": engine, "answer": answer, **result}
@@ -256,6 +257,7 @@ def explain_product(p: Product) -> str:
                 "opportunity": p.opportunity_score, "recommendation": p.recommendation, "reasons": p.recommendation_reasons, "vector": v,
                 "saturation": p.saturation_score, "confidence": p.confidence_score},
                 "features": {k: v for k, v in f.items() if not k.startswith("_")}}, ensure_ascii=False, default=str),
+            timeout=30, kind="explain",
         )
         if text:
             return text

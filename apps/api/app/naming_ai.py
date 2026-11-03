@@ -4,8 +4,8 @@ Pass 1 — rules (no AI, every tick, cheap): pricing/naming_hints.candidates() r
   schema.org (JSON-LD) metadata of the landing page, shop-page slug, listing title, caption / headline (naming.best), OCR of the thumbnail,
   a named near-duplicate product (CLIP), Lens titles. A candidate from a trustworthy source names the product (AUTO_CONFIRMED ≥ 0.85, else
   SUGGESTED for MKT to confirm). Checkpoint: products.naming_checked_at.
-Pass 2 — AI (batches of 10–30 products per request, sized from the provider's live token headroom): GroqCloud gpt-oss-20b, then Cerebras,
-  Cloudflare Workers AI, Gemini (llm.py chain). The model must name the product TYPE in English from the ad's own words, say how sure it is
+Pass 2 — AI (batches of 10–30 products per request, sized from the provider's live token headroom): the free text chain of llm.py
+  (Cerebras gpt-oss-120b, Groq gpt-oss-120b / 20b, Cloudflare Workers AI, Gemini). The model must name the product TYPE in English from the ad's own words, say how sure it is
   and which words prove it. An answer is accepted only when it is grounded in the ad (naming.grounded), is not a shop / CTA / advertiser
   (naming.is_bad_name), and is confident; a weak answer is kept as a low-confidence hint and the product goes to MKT review
   (name_source = "needs_review"); no product at all → "llm_none". Checkpoint: name_source + naming_attempts (≤ MAX_ATTEMPTS on errors).
@@ -110,9 +110,8 @@ SCHEMA = {
             "confidence": {"type": "number"},
             "evidence": {"type": "string"},
             "is_physical_product": {"type": "boolean"},
-            "category": {"type": "string", "enum": ["beauty", "health", "home", "gadgets", "fashion", "pets", "kids", "food", "other", "service"]},
         },
-        "required": ["i", "product_name", "product_type", "confidence", "evidence", "is_physical_product", "category"],
+        "required": ["i", "product_name", "product_type", "confidence", "evidence", "is_physical_product"],
         "additionalProperties": False}}},
     "required": ["results"], "additionalProperties": False,
 }
@@ -148,7 +147,7 @@ def batch_size(per_item_tokens: int) -> int:
     from .services import llm_providers as P
 
     for name in llm.chain():
-        room = P.headroom(name) if name in ("groq", "cerebras", "cloudflare") else None
+        room = P.headroom(name) if P.is_openai(name) else None
         if room is None:
             return 20
         fit = (room - 900) // max(1, per_item_tokens)
@@ -189,12 +188,14 @@ def ai_pass(db, batches: int = 2, lock=None) -> dict:
             items.append((p, ads, _context(p, ads, adv)))
         lines = "\n".join(f"{i}. {ctx}" for i, (_, _, ctx) in enumerate(items))
         db.commit()
-        data = llm.complete_json(SYSTEM, lines, SCHEMA, max_tokens=min(8000, 220 * len(items) + 1200), timeout=60)
+        data = llm.complete_json(SYSTEM, lines, SCHEMA, max_tokens=min(8000, 220 * len(items) + 1200), timeout=60, kind="naming")
         out["requests"] += 1
         out["asked"] += len(items)
         if not data or not isinstance(data.get("results"), list):
+            # every provider down / rate limited is not these products' fault: only a batch the providers could take but not answer
+            # counts against them (≤ MAX_ATTEMPTS keeps a poison batch from blocking the queue head forever)
             for p, _, _ in items:
-                p.naming_attempts = (p.naming_attempts or 0) + 1
+                p.naming_attempts = (p.naming_attempts or 0) + (1 if llm.available() else 0)
             out["failed"] += len(items)
             db.flush()
             break
@@ -269,17 +270,19 @@ def stats(db) -> dict:
     by_source = dict(db.execute(select(func.coalesce(Product.name_source, "—"), func.count()).group_by(Product.name_source)).all())
     conf = dict(db.execute(select(func.coalesce(Product.name_status, "LEGACY"), func.avg(Product.name_confidence)).group_by(Product.name_status)).all())
     providers = {}
-    for name in P.providers():
-        st = (P._state_rows().get(name) or {}) if name in ("groq", "cerebras", "cloudflare") else {}
-        ready, why = (P.ready(name) if name in ("groq", "cerebras", "cloudflare") else ((llm._gemini(), None) if name == "gemini" else (llm._claude(), None)))
-        try:
-            today = P.usage_today(name)
-        except Exception:  # noqa: BLE001
-            today = {}
-        providers[name] = {"configured": (P.config(name) is not None) if name in ("groq", "cerebras", "cloudflare") else (llm._gemini() or bool(os.getenv("GEMINI_API_KEY"))) if name == "gemini" else llm._claude(),
-                           "model": (P.config(name) or {}).get("model") if name in ("groq", "cerebras", "cloudflare") else (llm.GEMINI_MODEL if name == "gemini" else llm.CLAUDE_MODEL),
-                           "ready": ready, "why": why, "limits": st.get("limits") or {}, "cooldown_until": st.get("cooldown_until"),
-                           "last_error": st.get("last_error"), "today": today}
+    for env, role in (("LLM_PROVIDERS", "text"), ("VISION_PROVIDERS", "ocr"), ("TRANSCRIBE_PROVIDERS", "transcript")):
+        for name in P.providers(env):
+            st = P._state_rows().get(name) or {}
+            ready, why = P.ready(name) if P.is_openai(name) else (llm._gemini(), None if llm._gemini() else "no key / cooldown / GEMINI_DAILY used")
+            try:
+                today = P.usage_today(name)
+            except Exception:  # noqa: BLE001
+                today = {}
+            p = providers.setdefault(name, {"configured": P.config(name) is not None if P.is_openai(name) else bool(os.getenv("GEMINI_API_KEY")),
+                                            "model": (P.config(name) or {}).get("model") if P.is_openai(name) else llm.GEMINI_MODEL, "roles": [],
+                                            "ready": ready, "why": why, "limits": st.get("limits") or {}, "cooldown_until": st.get("cooldown_until"),
+                                            "last_error": st.get("last_error"), "today": today})
+            p["roles"].append(role)
     return {
         "products": q(), "named": q(Product.name_status.in_(["VERIFIED", "AUTO_CONFIRMED", "SUGGESTED"])), "unknown": by_status.get("UNKNOWN", 0),
         "verified": by_status.get("VERIFIED", 0), "auto_confirmed": by_status.get("AUTO_CONFIRMED", 0), "suggested": by_status.get("SUGGESTED", 0),

@@ -62,8 +62,8 @@ class ExternalApiCall(Base):
     """Every call (and cache hit) toward a paid external API — the quota ledger (ImageSearchQuotaManager)."""
     __tablename__ = "external_api_calls"
     id: Mapped[int] = mapped_column(primary_key=True)
-    provider: Mapped[str] = mapped_column(String(24), index=True)
-    kind: Mapped[str] = mapped_column(String(16), index=True)  # search | upload | account | cache_hit | refused
+    provider: Mapped[str] = mapped_column(String(64), index=True)  # serpapi_lens … / llm_<entry> (app/llm_migrate.py)
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # search | upload | account | cache_hit | refused · llm: the feature (naming, ocr…)
     counted: Mapped[bool] = mapped_column(Boolean, default=False)  # consumes the provider's monthly quota
     ok: Mapped[bool | None] = mapped_column(Boolean)
     http_status: Mapped[int | None] = mapped_column(Integer)

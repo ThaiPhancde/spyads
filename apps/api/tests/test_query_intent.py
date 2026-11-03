@@ -28,13 +28,13 @@ def db():
         s.query(QueryIntent).delete()
         s.commit()
         query_intent._mem.clear()
-        query_intent._spent.update(day=None, n=0)
         yield s
 
 
 def fake_model(monkeypatch, answer, calls):
     monkeypatch.setattr(llm, "available", lambda: True)
     monkeypatch.setattr(llm, "complete_json", lambda *a, **k: calls.append(a[1]) or answer)
+    monkeypatch.setattr(llm, "spent_today", lambda *kinds: len(calls))  # the call ledger, as the real calls would have filled it
 
 
 # ---------------------------------------------------------------- the dictionary

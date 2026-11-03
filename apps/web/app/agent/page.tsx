@@ -40,7 +40,7 @@ export default function Agent() {
   };
   return (
     <div>
-      <PageHeader title="AI Agent" subtitle={`Hỏi bằng ngôn ngữ tự nhiên — câu hỏi được dịch thành truy vấn có cấu trúc; số liệu lấy từ database. Engine: ${meta.data?.llm ? `AI (${meta.data.llm_model})` : "rule-based parser (đặt GEMINI_API_KEY để dùng AI)"}`} />
+      <PageHeader title="AI Agent" subtitle={`Hỏi bằng ngôn ngữ tự nhiên — câu hỏi được dịch thành truy vấn có cấu trúc; số liệu lấy từ database. Engine: ${meta.data?.llm ? `AI (${meta.data.llm_model})` : "rule-based parser (đặt CEREBRAS_API_KEY / GROQ_API_KEY miễn phí để dùng AI)"}`} />
       <Card className="mb-4">
         <div className="flex items-end gap-2">
           <Textarea className="min-h-10 min-w-0 flex-1" rows={2} value={q} onChange={(e) => setQ(e.target.value)}
