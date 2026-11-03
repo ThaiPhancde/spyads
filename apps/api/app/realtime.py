@@ -13,6 +13,8 @@ import queue
 import re
 import threading
 import time
+import uuid
+from copy import deepcopy
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -24,6 +26,7 @@ from .collector.factory import ConnectorFactory
 from .db import SessionLocal, ingest_lock
 from .events import publish
 from .ingest import ingest_ads
+from .collector.batches import ingest_batch
 from .models import Connector, SearchJob, TrackedQuery
 
 log = logging.getLogger(__name__)
@@ -63,8 +66,6 @@ def _params_from(c: Connector, q: TrackedQuery | None = None) -> FetchParams:
 
 def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchParams | None = None) -> dict:
     """Fetch → ingest → incremental score. Runs in a worker thread."""
-    from .services.engine import rescore_products
-
     t0 = time.perf_counter()
     with SessionLocal() as db:
         c = db.get(Connector, cid)
@@ -86,8 +87,8 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                     r.matched_query = p.query
                     recs.append(r)
             with ingest_lock():
-                stats = ingest_ads(db, recs)
-                rescore_products(db, stats["product_ids"])
+                stats = (ingest_batch(db, recs, "scheduled:" + str(uuid.uuid4()))
+                         if c.adapter in HISTORY_ADAPTERS else ingest_ads(db, recs))
                 c = db.get(Connector, cid)
                 c.status, c.health, c.last_error = "ok", "healthy", None
                 if not recs and c.adapter == "export":
@@ -108,6 +109,7 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                     if pages is not None:  # paging state for the next run (see _params_from)
                         q.cursor = {"at": datetime.utcnow().isoformat(), "pages": pages}
                 db.commit()
+            after_business_events(db, set(stats["product_ids"]))
             result.update(fetched=len(recs), **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source")})
             publish("CONNECTOR_SYNCED", result)
         except (NotConfigured, AuthExpired, ConnectorError, Exception) as e:
@@ -208,6 +210,12 @@ def _run_search(job_id: int, more: int = 0):
         # "a | b | c" = several keywords: each one is searched on every source (OR), results merge into one job
         kws = [k.strip() for k in (job.query or "").split("|") if k.strip()]
         plist = [(kw, FetchParams(query=kw, countries=countries, limit=target, media_type=job.media_type or None)) for kw in kws]
+        for c in conns:
+            if c.adapter == "meta_library":
+                for kw, _ in plist:
+                    suffix = f":{kw}" if len(plist) > 1 else ""
+                    for country in countries:
+                        state.setdefault(f"{c.id}:{country}{suffix}", {"done": False})
         db.commit()  # close the read transaction before network calls
 
         # Every source fetches in its own thread (they used to run one after another: Meta's ~3 s pages held up the
@@ -229,10 +237,10 @@ def _run_search(job_id: int, more: int = 0):
                                 # Meta returns empty pages mid-stream while the cursor goes on (filtered results):
                                 # stopping at the first one lost about half the ads — only a run of them means the end
                                 empty = 0 if recs else empty + 1
-                                if empty >= 3:
-                                    st["done"] = True
                                 got += len(recs)
                                 q.put(("batch", cid, name, recs, key, dict(st), kw))
+                                if empty >= 3:
+                                    break  # pause, never claim end without source confirmation
                     elif not more:  # single-shot sources (Apify, REST…): only on the first run
                         batch: list = []
                         for rec in connector.fetch_ads(params):
@@ -272,6 +280,7 @@ def _run_search(job_id: int, more: int = 0):
             sources.setdefault(c.name, {"network": connector_network(c.adapter, c.config), "fetched": 0, "new": 0, "failed": 0})
             sources[c.name]["error"] = None
         pending = len(conns)
+        failed_sources = set()
         # job.found = distinct ads stored, not rows received: one ad comes back from several pages / sources / countries
         # ponytail: the set lives for this run only — "load more" can re-count an ad seen in the first run
         seen_ads: set[int] = set()
@@ -279,7 +288,7 @@ def _run_search(job_id: int, more: int = 0):
             kind, cid, name, *rest = q.get()
             if kind == "end":
                 pending -= 1
-                err = _redact(rest[0])
+                err = _redact(rest[0]) or sources[name].get("error")
                 if err:
                     errors.append(f"{name}: {err}")
                     sources[name]["error"] = err[:300]
@@ -289,13 +298,15 @@ def _run_search(job_id: int, more: int = 0):
                     mark(cid, got_by[cid], err and err[:500])
                 continue
             recs, key, st, kw = rest
-            if key:
-                state[key] = st
+            if cid in failed_sources:
+                continue  # never checkpoint a later page after a failed batch
+            previous = (deepcopy(sources), set(seen_ads), set(pids), dict(got_by))
             with ingest_lock():
                 try:
                     for r in recs:
                         r.matched_query = kw
-                    res = ingest_ads(db, recs)
+                    res = (ingest_batch(db, recs, "search:" + str(uuid.uuid4()))
+                           if adapter_by.get(cid) in HISTORY_ADAPTERS else ingest_ads(db, recs))
                     if res["errors"] and not (res["new_ads"] or res["updated_ads"]):
                         errors.append(f"{name}: lưu vào kho lỗi — {_redact(res['errors'][0])[:200]}")
                     s = sources[name]
@@ -312,14 +323,23 @@ def _run_search(job_id: int, more: int = 0):
                     job.new_ads += res["new_ads"]
                     got_by[cid] += len(recs)
                     pids.update(res["product_ids"])
-                    job.state = dict(state)
+                    next_state = dict(state)
+                    if key:
+                        next_state[key] = st
+                    job.state = next_state
                     job.product_ids = sorted(pids)
                     db.commit()
+                    state = next_state
                 except Exception as e:
                     if isinstance(e, OperationalError):
                         log.exception("search job %s: %s lost a batch of %d (sqlite busy)", job_id, name, len(recs))
-                        lost_primary |= "meta" in (adapter_by.get(cid) or "")
+                    sources, seen_ads, pids, got_by = previous
+                    failed_sources.add(cid)
+                    lost_primary |= "meta" in (adapter_by.get(cid) or "")
                     db.rollback()
+                    pids = set(db.get(SearchJob, job_id).product_ids or [])
+                    if key:
+                        state.setdefault(key, {"done": False})
                     job = db.get(SearchJob, job_id)
                     db.commit()  # db.get opened a write transaction (BEGIN IMMEDIATE): never hold it outside the lock
                     msg = _redact(f"{name}: {type(e).__name__}: {e}")[:300]

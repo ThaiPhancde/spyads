@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, func, literal, not_, or_, select
 from sqlalchemy.orm import Session
 
@@ -1356,25 +1356,34 @@ def list_ads(q: str | None = None, country: str | None = None, funnel: str | Non
 
 # ============================================================ Ingest from the browser extension (no API needed)
 class MetaItemsIn(BaseModel):
-    items: list[dict]  # raw Ad Library items (collated_results[]) captured from the page the user is browsing
+    items: list[dict] = Field(max_length=500)
     country: str | None = None
     saved_by: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 @router.post("/api/ingest/meta-library", dependencies=[Depends(require_token)])
 def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
-    """The extension forwards what Meta's own Ad Library page loaded for the user. Mapped with the same
-    code path as the server-side connector, so ads dedupe against it (same ad_archive_id)."""
     from ..collector.adapters.meta import map_library_ad
+    from ..collector.batches import ingest_batch, digest, BatchConflict
 
-    recs = []
-    for it in body.items[:500]:
-        if isinstance(it, dict) and it.get("ad_archive_id"):
-            recs.append(map_library_ad(it, "meta_library", (body.country or "").upper() or None))
-    with ingest_lock():  # serialize writers (see realtime.py)
-        stats = ingest_ads(db, recs, saved_by=body.saved_by)
+    payload = body.model_dump(exclude={"idempotency_key"})
+    key = "extension:" + (body.idempotency_key or digest(payload))
+    if any(not it.get("ad_archive_id") for it in body.items):
+        raise HTTPException(422, "Every item needs ad_archive_id")
+    recs = [map_library_ad(it, "meta_library", (body.country or "").upper() or None) for it in body.items]
+    with ingest_lock():
+        try:
+            stats = ingest_batch(db, recs, key, saved_by=body.saved_by, payload=payload)
+            db.commit()
+        except BatchConflict as e:
+            db.rollback()
+            raise HTTPException(409, str(e)) from e
+        except Exception:
+            db.rollback()
+            raise
     realtime.after_business_events(db, set(stats["product_ids"]))
-    return stats
+    return {**stats, "idempotency_key": key.removeprefix("extension:")}
 
 
 # ============================================================ Storage retention

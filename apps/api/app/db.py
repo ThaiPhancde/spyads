@@ -117,6 +117,7 @@ def scheduler_lock():
 def migrate_all():
     """Every additive startup migration — shared by the API (main._startup) and the worker so both see one schema."""
     from .cluster_migrate import migrate as migrate_clusters
+    from .meta_collector_migrate import migrate as migrate_meta_collector
     from .personalization_migrate import migrate as migrate_personalization
     from .similar import migrate as migrate_similar
     from .workspace.migrate import migrate
@@ -125,6 +126,7 @@ def migrate_all():
     migrate_clusters()
     migrate_similar()
     migrate_personalization()
+    migrate_meta_collector()
 
 
 @contextmanager

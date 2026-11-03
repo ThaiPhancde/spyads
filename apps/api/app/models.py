@@ -552,3 +552,19 @@ from . import behavior  # noqa: E402,F401 — Phase 3 per-MKT behavior history (
 from . import preferences  # noqa: E402,F401 — Phase 4 MKT preference profiles
 from . import recommend  # noqa: E402,F401 — Phase 5 personalized recommendation cache
 from . import interest  # noqa: E402,F401 — app_settings (soft-dedup penalty knobs)
+
+
+class IngestBatch(Base):
+    __tablename__ = "collector_ingest_batches"
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    result: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class MetaCollation(Base):
+    __tablename__ = "meta_collations"
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    page_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    collation_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    ad_id: Mapped[int] = mapped_column(ForeignKey("ads.id", ondelete="CASCADE"), index=True)

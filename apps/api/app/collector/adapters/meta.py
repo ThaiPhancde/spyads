@@ -98,13 +98,13 @@ def ssr_search(query: str, country: str, active_only: bool, page_ids: list[str] 
             h, po, *cred = proxy.split(":")
             ses.proxies = {"https": f"http://{':'.join(cred[:1])}:{':'.join(cred[1:])}@{h}:{po}" if cred else f"http://{h}:{po}"}
         r = ses.get(url, params=params, timeout=30)
-        m = _CHALLENGE.search(r.text)  # anti-bot: POST the one-off verify URL, then retry
+        m = _CHALLENGE.search(r.text)  # stop at access challenges
         if m:
-            ses.post("https://www.facebook.com" + m.group(1), timeout=30)
-            r = ses.get(url, params=params, timeout=30)
+            raise ConnectorError("Meta access challenge; user action required")
     blob = _balanced(r.text, '"search_results_connection":')
+    r.raise_for_status()
     if not blob:
-        return []
+        raise ConnectorError("Meta SSR response missing search results")
     out = []
     for edge in json.loads(blob).get("edges", []):
         node = edge.get("node", {})
@@ -224,7 +224,7 @@ class MetaLibraryConnector(BaseConnector):
                     st, resumed = {}, False  # Meta refused the stored cursor (expired session): start over from page 1
                     continue
                 out[country] = {k: st.get(k) for k in ("cursor", "sid", "tok", "done")}
-                empty = 0 if recs else empty + 1  # Meta sends empty pages mid-stream; a run of them is the end
+                empty = 0 if recs else empty + 1  # Meta sends empty pages mid-stream; pause after several; only page_info declares the end
                 if empty >= 3:
                     break
                 for rec in recs:
@@ -232,8 +232,7 @@ class MetaLibraryConnector(BaseConnector):
                         continue
                     got += 1
                     yield rec
-                    if got >= params.limit:
-                        break
+                    # Finish the whole fetched page before exposing its next cursor.
 
     def fetch_page(self, params: FetchParams, country: str, state: dict | None = None) -> tuple[list[AdRecord], dict]:
         """One page (~10 ads) with a resume cursor, so the UI can 'load more' from where it stopped.
@@ -267,20 +266,23 @@ class MetaLibraryConnector(BaseConnector):
                                      params.media_type, self.config.get("proxy") or None)
             except Exception as e2:
                 raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}; SSR: {type(e2).__name__}: {e2}") from e
-            if not raw_ads:
-                raise ConnectorError(f"Meta Ad Library: {type(e).__name__}: {e}") from e
-            resp, cursor = {"ads": raw_ads}, None
-        if params.extra.get("competitor_strict") and not isinstance(resp.get("ads"), list):
+            resp, cursor = {"ads": raw_ads, "page_info": {"has_next_page": False}, "ssr_only": True}, None
+        if not isinstance(resp, dict) or any(resp.get(k) for k in ("error", "errors", "rate_limited", "session_expired")):
+            raise ConnectorError("Meta source returned an error, rate limit, or expired session")
+        if not isinstance(resp.get("ads"), list):
             raise ConnectorError("Meta advertiser response missing ads list")
-        items = resp.get("ads") or extract_ads(resp.get("raw"))
-        # Meta shows one card per collation group (the first item carries collation_count); siblings are the same creative
-        # ponytail: dedupe within a page only — siblings split across pages become extra ads
-        seen: set = set()
-        keep = [r for r in items if not (r.get("collation_id") and (r["collation_id"] in seen or seen.add(r["collation_id"])))]
-        st["siblings"] = [str(r.get("ad_archive_id")) for r in items if r not in keep]  # still running: liveness counts them as seen
-        recs = [map_library_ad(raw, self.key, country) for raw in keep]
+        items = resp["ads"]
+        if not resp.get("page_info"):
+            raise ConnectorError("Meta response missing pagination metadata")
+        # collation siblings are kept as records: ingest maps them onto one ad via meta_collations (across pages and jobs)
+        recs = [map_library_ad(raw, self.key, country) for raw in items]
+        info = resp.get("page_info") or {}
+        has_next = info.get("has_next_page", info.get("hasNextPage", bool(cursor)))
+        if has_next and (not cursor or cursor == st.get("cursor")):
+            raise ConnectorError("Meta pagination did not advance")
         st["cursor"] = cursor
-        st["done"] = not cursor or not (resp.get("page_info") or {}).get("has_next_page", bool(cursor))
+        st["done"] = not has_next
+        st["page_status"] = "end" if st["done"] else "page" if recs else "empty"
         return recs, st
 
     def health_check(self) -> dict:
