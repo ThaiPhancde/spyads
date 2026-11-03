@@ -28,7 +28,9 @@ class ConnectorFactory:
     def get(cls, adapter: str, config: dict | None = None) -> BaseConnector:
         if adapter not in cls.connectors:
             raise KeyError(f"unknown connector adapter '{adapter}'")
-        return cls.connectors[adapter](config or {})
+        from ..secrets_box import unseal_config
+
+        return cls.connectors[adapter](unseal_config(config or {}))  # sealed secrets (P5) are opened only here
 
     @classmethod
     def catalogue(cls) -> list[dict]:

@@ -1105,8 +1105,10 @@ def add_connector(body: CollectorIn, db: Session = Depends(get_db)):
                                        for c in db.scalars(select(Connector).where(Connector.adapter == "export"))):
         raise HTTPException(409, "Nguồn này đã có connector nhập file; dùng cấu hình hiện có để tránh đọc trùng thư mục")
     brand = connector_identity(body.adapter, body.config)
+    from ..secrets_box import seal_config
+
     c = Connector(name=body.name or (brand["name"] if brand else cls.name), provider=brand["provider"] if brand else body.adapter, adapter=body.adapter, kind=cls.kind, group=cls.group,
-                  config=body.config, enabled=body.enabled, every_minutes=body.every_minutes, tier=body.tier, status="ready")
+                  config=seal_config(body.adapter, body.config), enabled=body.enabled, every_minutes=body.every_minutes, tier=body.tier, status="ready")
     db.add(c)
     db.commit()
     return {"id": c.id}
@@ -1135,7 +1137,9 @@ def patch_connector(cid: int, body: CollectorPatch, db: Session = Depends(get_db
         if c.adapter == "export" and any(str((other.config or {}).get("source") or "").strip().lower() == merged.get("source")
                                          for other in db.scalars(select(Connector).where(Connector.adapter == "export", Connector.id != cid))):
             raise HTTPException(409, "Nguồn đã được connector khác theo dõi; không dùng chung thư mục nhập file")
-        c.config = merged
+        from ..secrets_box import seal_config
+
+        c.config = seal_config(c.adapter, merged)  # secret fields encrypted at rest when CREDENTIALS_KEY is set (P5)
         brand = connector_identity(c.adapter, merged)
         if brand:
             c.provider, c.name = brand["provider"], brand["name"]
@@ -1368,6 +1372,7 @@ class MetaItemsIn(BaseModel):
     schema_version: str | None = Field(default=None, max_length=32)
     cursor_before: str | None = Field(default=None, max_length=512)
     cursor_after: str | None = Field(default=None, max_length=512)
+    outbox_backlog: int | None = Field(default=None, ge=0, le=1_000_000)  # P5: batches still queued in the extension
 
 
 @router.post("/api/ingest/meta-library", dependencies=[Depends(require_token)])
@@ -1375,7 +1380,7 @@ def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
     from ..collector.adapters.meta import map_library_ad
     from ..collector.batches import ingest_batch, digest, BatchConflict
 
-    payload = body.model_dump(exclude={"idempotency_key"})
+    payload = body.model_dump(exclude={"idempotency_key", "outbox_backlog"})  # the backlog changes between retries of one batch
     key = "extension:" + (body.idempotency_key or digest(payload))
     valid = [it for it in body.items if it.get("ad_archive_id")]
     if not valid:  # nothing to store: a permanent rejection, the extension stops retrying this batch
@@ -1386,7 +1391,8 @@ def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
             fetched = body.fetched_at.astimezone(timezone.utc).replace(tzinfo=None) if body.fetched_at and body.fetched_at.tzinfo else body.fetched_at
             stats = ingest_batch(db, recs, key, saved_by=body.saved_by, payload=payload, envelope={
                 "source": "extension", "job_id": body.job_id, "batch_id": body.batch_id, "fetched_at": fetched,
-                "schema_version": body.schema_version, "cursor_before": body.cursor_before, "cursor_after": body.cursor_after})
+                "schema_version": body.schema_version, "cursor_before": body.cursor_before, "cursor_after": body.cursor_after,
+                "outbox_backlog": body.outbox_backlog})
             db.commit()
         except BatchConflict as e:
             db.rollback()

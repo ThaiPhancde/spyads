@@ -11,6 +11,8 @@ AdRecord[] (from any connector, the Chrome extension or POST /ingest/ads)
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import re
 from datetime import datetime
 from urllib.parse import urlparse
@@ -28,6 +30,8 @@ from .platforms import channel_of, network_of
 from .services import content_filter
 from .services import enrichment as E
 from .services import naming, shop_naming, product_identity
+
+log = logging.getLogger(__name__)
 from .services.connectors import _advertiser, _dt, _store
 from .services.entity_resolution import resolve_product
 from .storage import write_raw_batch
@@ -209,6 +213,7 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
         if errs:
             stats["invalid"] += 1
             stats["errors"].append(f"{rec.source}:{rec.source_ad_id}: {'; '.join(errs)}")
+            _quarantine(db, rec, f"invalid: {'; '.join(errs)}")
             continue
         try:
             with db.begin_nested():
@@ -238,6 +243,7 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
             if atomic and not isinstance(e, (IntegrityError, DataError, ValueError)):
                 raise
             stats["errors"].append(f"{rec.source}:{rec.source_ad_id}: {type(e).__name__}: {e}")
+            _quarantine(db, rec, f"{type(e).__name__}: {e}")
     db.flush()
     from .services import adsignals
 
@@ -423,6 +429,21 @@ def bare_url(u: str | None) -> str:
     """CDN URL without its signature (fbcdn signs in the query and rotates hosts; tiktokcdn signs in the query and the first two path segments)."""
     path = _TT_SIG.sub(r"/", (u or "").split("#", 1)[0].split("?", 1)[0])
     return re.sub(r"^https?://[^/]*", "", path)  # fbcdn rotates hosts (scontent-sin6-1 …) for the same file
+
+
+def _quarantine(db: Session, rec: AdRecord, reason: str) -> None:
+    """P5: a record ingest refused, kept (credentials scrubbed, ≤ 20 KB) so it can be inspected; TTL in retention.py."""
+    from .models import IngestQuarantine
+    from .storage import scrub
+
+    try:
+        payload = scrub(rec.to_dict())
+        if len(json.dumps(payload, default=str)) > 20_000:
+            payload = {"truncated": True, "keys": sorted(payload)[:60]}
+        with db.begin_nested():
+            db.add(IngestQuarantine(source=rec.source, source_ad_id=(rec.source_ad_id or "")[:128], reason=reason[:500], payload=payload))
+    except Exception:  # the quarantine never fails the batch
+        log.exception("quarantine write failed")
 
 
 def _attach_creatives(db: Session, ad: Ad, rec: AdRecord) -> list[int]:

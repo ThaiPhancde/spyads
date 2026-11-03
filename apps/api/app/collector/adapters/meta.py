@@ -216,6 +216,15 @@ class MetaLibraryConnector(BaseConnector):
         {"key": "max_per_query", "label": "Số ad tối đa mỗi từ khoá (mặc định 60)"},
     ]
 
+    def market_bucket(self, country: str):
+        """P5: one market cannot spend the whole budget — MARKET_RPM requests / minute per country, shared by every crawl
+        (scheduled, live search, liveness) in this process, on top of the adapter's global bucket."""
+        import os
+
+        from ..base import TokenBucket, _buckets
+
+        return _buckets.setdefault(f"{self.key}:market:{(country or 'ALL').upper()}", TokenBucket(float(os.getenv("MARKET_RPM", "10"))))
+
     def authenticate(self):
         try:
             import meta_ads_collector  # noqa: F401
@@ -276,6 +285,7 @@ class MetaLibraryConnector(BaseConnector):
             col = self._col = self._collector()
             col.client.initialize()
         self.bucket.take()
+        self.market_bucket(country).take()
         self.requests = getattr(self, "requests", 0) + 1  # every attempt, failed ones too (KPIs: requests vs pages)
         try:
             resp, cursor = col.client.search_ads(

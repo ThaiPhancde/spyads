@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -160,12 +161,29 @@ def store():
     return _store
 
 
+_CREDENTIAL_KEY = re.compile(r"^(cookie|set-cookie|authorization|proxy-authorization|x-csrf-?token|fb_dtsg|lsd|jazoest|"
+                             r"access_token|api_?key|token|password|passwd|secret|client_secret|sessionid|session_?token|user-sign)$", re.I)
+_CREDENTIAL_PARAM = re.compile(r"([?&](?:access_token|api_?key|token|password|sessionid)=)[^&#\s]+", re.I)
+
+
+def scrub(obj):
+    """Credentials out (P5): keys that hold cookies / tokens / auth headers are dropped, credential query parameters in
+    URLs masked. Used for everything archived: the raw lake and the quarantine."""
+    if isinstance(obj, dict):
+        return {k: scrub(v) for k, v in obj.items() if not (isinstance(k, str) and _CREDENTIAL_KEY.match(k))}
+    if isinstance(obj, list):
+        return [scrub(v) for v in obj]
+    if isinstance(obj, str) and "=" in obj:
+        return _CREDENTIAL_PARAM.sub(r"\1***", obj)
+    return obj
+
+
 def write_raw_batch(source: str, entity_type: str, records: list[dict]) -> str:
-    """Raw data layer: /raw/<source>/<YYYY-MM-DD>/<entity>_<HHMMSSffffff>.jsonl — reprocessable later."""
+    """Raw data layer: /raw/<source>/<YYYY-MM-DD>/<entity>_<HHMMSSffffff>.jsonl — reprocessable later. Credentials scrubbed."""
     now = datetime.utcnow()
     import gzip
 
     key = f"raw/{source}/{now:%Y-%m-%d}/{entity_type}_{now:%H%M%S%f}.jsonl.gz"  # gzip: raw lake ~10x smaller
-    body = gzip.compress("\n".join(json.dumps(r, ensure_ascii=False, default=str) for r in records).encode(), 6)
+    body = gzip.compress("\n".join(json.dumps(scrub(r), ensure_ascii=False, default=str) for r in records).encode(), 6)
     store().put(key, body, "application/gzip")
     return key

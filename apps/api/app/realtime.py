@@ -111,6 +111,7 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                 if not recs and c.adapter != "export":  # an empty watch folder is normal; blueprint §7: an empty result never means "no ads" — flag it, keep previous data untouched
                     c.health = "degraded"
                     c.last_error = "Nguồn trả về 0 kết quả — có thể bị chặn / đổi API; dữ liệu cũ được giữ nguyên"
+                    publish("SOURCE_ZERO_RESULTS", {"connector": c.name, "query": query.query if query else None}, db=db)  # P5 alert
                 if stats["errors"] and not (stats["new_ads"] or stats["updated_ads"]):  # fetched fine, stored nothing
                     c.health, c.last_error = "error", _redact(stats["errors"][0])[:500]
                 c.last_sync_at, c.last_sync_count = datetime.utcnow(), len(recs)

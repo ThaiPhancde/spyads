@@ -60,7 +60,8 @@ let draining = null;
 function drainOutbox() {
   if (draining) return draining;
   draining = ToolSpyOutbox.drain(ToolSpyOutbox.store, async (row) => {
-    const res = await post("/api/ingest/meta-library", row.body, row.endpoint);
+    const { pending } = await ToolSpyOutbox.stats(ToolSpyOutbox.store); // P5: the server sees how much is still queued here
+    const res = await post("/api/ingest/meta-library", { ...row.body, outbox_backlog: Math.max(0, pending - 1) }, row.endpoint);
     if (res.idempotency_key !== row.id) throw new Error("Missing batch acknowledgement; upgrade API");
     const counters = await chrome.storage.local.get({ total: 0, lastCountedBatch: "" });
     if (counters.lastCountedBatch !== row.id) await chrome.storage.local.set({

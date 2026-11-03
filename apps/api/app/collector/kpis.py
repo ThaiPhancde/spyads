@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..crawl_queue import CrawlJob, CrawlRun
-from ..models import Connector, Creative, SearchJob
+from ..models import Connector, Creative, IngestBatch, IngestQuarantine, SearchJob
 from ..platforms import connector_network
 
 COUNTS = ("pages", "empty_pages", "fetched", "accepted", "new_ads", "duplicates", "invalid", "excluded",
@@ -25,6 +25,27 @@ def cursor_summary(checkpoint: dict | None) -> dict | None:
     st = [v for v in pages.values() if isinstance(v, dict)]
     return {"countries": len(st), "resumable": sum(1 for v in st if v.get("cursor") and not v.get("done")),
             "done": sum(1 for v in st if v.get("done")), "at": (checkpoint or {}).get("at")}
+
+
+def fp_mismatch_rate(db: Session, sample: int = 500) -> float | None:
+    """Share of creative-family member pairs where video fingerprint v1 and v2 (both known) disagree — high = v1 is
+    splitting or merging what v2 sees differently (P3). ponytail: first `sample` creatives with both, pairs within a family."""
+    from ..media import same_video, same_video_v2
+
+    rows = db.execute(select(Creative.family_id, Creative.video_fp, Creative.video_fp_v2).where(
+        Creative.family_id.is_not(None), Creative.video_fp.is_not(None), Creative.video_fp_v2.is_not(None)).limit(sample)).all()
+    fams: dict[int, list] = defaultdict(list)
+    for fid, v1, v2 in rows:
+        fams[fid].append((v1, v2))
+    compared = differ = 0
+    for members in fams.values():
+        for i, (a1, a2) in enumerate(members):
+            for b1, b2 in members[i + 1:]:
+                x, y = same_video(a1, b1), same_video_v2(a2, b2)
+                if x is not None and y is not None:
+                    compared += 1
+                    differ += x != y
+    return round(differ / compared, 3) if compared else None
 
 
 def collector_kpis(db: Session, hours: int = 24, now: datetime | None = None) -> dict:
@@ -60,6 +81,8 @@ def collector_kpis(db: Session, hours: int = 24, now: datetime | None = None) ->
         out.append({
             "id": c.id, "name": c.name, "adapter": c.adapter, "network": connector_network(c.adapter, c.config), "enabled": c.enabled,
             "health": c.health, "status": c.status, "last_error": c.last_error, "last_sync_at": c.last_sync_at,
+            # P5 data freshness: minutes since the source last synced (None = never)
+            "freshness_min": round((now - c.last_sync_at).total_seconds() / 60) if c.last_sync_at else None,
             "scheduled": dict(runs[c.id]), "live_search": dict(live[c.name]) if c.name in live else None,
             "jobs": [{"key": j.key, "status": j.status, "retry_count": j.retry_count, "next_retry_at": j.next_retry_at,
                       "lease_owner": j.lease_owner, "heartbeat_at": j.heartbeat_at, "last_error": j.last_error,
@@ -81,6 +104,16 @@ def collector_kpis(db: Session, hours: int = 24, now: datetime | None = None) ->
     totals["retry_wait"] = sum(r["retry_wait"] for r in out)
     totals["blocked_jobs"] = sum(r["blocked_jobs"] for r in out)
     totals["outcomes"] = dict(outcomes)
+    # P5 operations: yield, duplicates, extension backlog, fingerprint disagreement, credentials still in plaintext
+    totals["ad_yield"] = round(totals["accepted"] / totals["pages"], 2) if totals["pages"] else None  # ads kept per source page
+    totals["duplicate_ratio"] = round(totals["duplicates"] / totals["fetched"], 3) if totals["fetched"] else None
+    last = db.scalar(select(IngestBatch.outbox_backlog).where(IngestBatch.source == "extension", IngestBatch.outbox_backlog.is_not(None))
+                     .order_by(IngestBatch.created_at.desc()).limit(1))
+    totals["outbox_backlog"] = last
+    totals["fp_mismatch_rate"] = fp_mismatch_rate(db)
+    from ..secrets_box import exposed
+    totals["credentials_unencrypted"] = sum(exposed(c.adapter or "", c.config) for c in conns)
+    totals["quarantined"] = db.scalar(select(func.count()).select_from(IngestQuarantine).where(IngestQuarantine.created_at >= since)) or 0
     return {"window_hours": hours, "generated_at": now, "totals": totals, "connectors": out, "media": dict(media)}
 
 

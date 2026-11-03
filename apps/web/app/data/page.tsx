@@ -280,6 +280,12 @@ function MonitoringCard({ byKey }: { byKey: any }) {
           <Metric label="Nguồn không khoẻ" value={fmt.n(t.unhealthy)}
             sub={fmt.n(t.schema_drift) + " trang đổi cấu trúc · " + fmt.n(t.cursor_cycles) + " vòng cursor · " + fmt.n(t.cursor_restarts) + " lần quay lại trang 1"} />
         </div>
+        <div className="mt-3 text-xs text-muted-foreground">
+          Vận hành: {t.ad_yield ?? "—"} ad/trang · trùng {t.duplicate_ratio != null ? Math.round(t.duplicate_ratio * 100) + "%" : "—"} ·
+          outbox extension chờ {t.outbox_backlog ?? "—"} batch · lệch vân tay v1/v2 {t.fp_mismatch_rate != null ? Math.round(t.fp_mismatch_rate * 100) + "%" : "—"} ·
+          {" "}{fmt.n(t.quarantined)} bản ghi bị cách ly
+          {t.credentials_unencrypted ? <span className="text-destructive"> · {t.credentials_unencrypted} secret chưa mã hoá (đặt CREDENTIALS_KEY)</span> : null}
+        </div>
         {t.outcomes && Object.keys(t.outcomes).length > 0 && (
           <div className="mt-3 text-xs text-muted-foreground">
             Kết quả lượt chạy: {Object.entries(t.outcomes).map(([k, n]: any) => `${OUTCOME[k] || k} ${n}`).join(" · ")}

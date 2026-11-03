@@ -6,7 +6,7 @@ from sqlalchemy import inspect, text
 from .db import engine
 from .crawl_queue import CrawlJob, CrawlRun
 from .creative_reuse import CreativeReuseObservation
-from .models import IngestBatch, MetaCollation
+from .models import IngestBatch, IngestQuarantine, MetaCollation
 
 log = logging.getLogger(__name__)
 
@@ -17,7 +17,8 @@ COLUMNS = {"creatives": (("video_fp", "VARCHAR(50)"), ("video_fp_confidence", "F
            + (("outcome", "VARCHAR(16)"), ("schema_version", "VARCHAR(32)")),  # P1 outcome taxonomy
            "collector_ingest_batches": (("source", "VARCHAR(32)"), ("job_id", "VARCHAR(80)"), ("batch_id", "VARCHAR(160)"),  # P1 envelope
                                         ("fetched_at", "TIMESTAMP"), ("schema_version", "VARCHAR(32)"),
-                                        ("cursor_before", "VARCHAR(512)"), ("cursor_after", "VARCHAR(512)"))}
+                                        ("cursor_before", "VARCHAR(512)"), ("cursor_after", "VARCHAR(512)"),
+                                        ("outbox_backlog", "INTEGER"))}  # P5
 # P1: the database guarantees one row per source id / one receipt per (job, batch) — created only when no old duplicate exists
 UNIQUE = (("uq_ads_source_external", "ads", ("source", "external_id")),
           ("uq_ad_sources_source_ad", "ad_sources", ("source", "source_ad_id")),
@@ -28,7 +29,7 @@ def migrate(bind=None):
     with (bind or engine).begin() as conn:
         if conn.dialect.name == "postgresql":
             conn.execute(text("SELECT pg_advisory_xact_lock(727004)"))
-        for model in (IngestBatch, MetaCollation, CrawlJob, CrawlRun, CreativeReuseObservation):
+        for model in (IngestBatch, MetaCollation, CrawlJob, CrawlRun, CreativeReuseObservation, IngestQuarantine):
             model.__table__.create(conn, checkfirst=True)
         insp = inspect(conn)
         for table, cols in COLUMNS.items():

@@ -582,6 +582,18 @@ class IngestBatch(Base):
     schema_version: Mapped[str | None] = mapped_column(String(32))
     cursor_before: Mapped[str | None] = mapped_column(String(512))
     cursor_after: Mapped[str | None] = mapped_column(String(512))
+    outbox_backlog: Mapped[int | None] = mapped_column(Integer)  # P5: batches still waiting in the extension's outbox when it sent this one
+
+
+class IngestQuarantine(Base):
+    """P5: records ingest refused (validation / database), credentials scrubbed — inspect, fix the parser, replay."""
+    __tablename__ = "ingest_quarantine"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str | None] = mapped_column(String(64), index=True)
+    source_ad_id: Mapped[str | None] = mapped_column(String(128))
+    reason: Mapped[str] = mapped_column(String(500))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 
 class MetaCollation(Base):
