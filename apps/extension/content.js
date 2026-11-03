@@ -1,6 +1,9 @@
 // Hand each captured batch to the durable background outbox immediately.
 (() => {
   const seen = new Set();
+  const JOB = crypto.randomUUID(); // one browsing session of this tab = one job (batch envelope, UNIQUE(job_id, batch_id))
+  const SCHEMA = "adlib-capture-1"; // bump when injected.js changes what it extracts
+  let lastCursor = null;
   let queued = 0, error = "", badge;
   function render() {
     if (!badge && document.documentElement) {
@@ -35,7 +38,13 @@
       if (!it?.ad_archive_id || seen.has(String(it.ad_archive_id))) return false;
       seen.add(String(it.ad_archive_id)); return true;
     });
-    for (let i = 0; i < items.length; i += 20) handoff({ type: "ads", items: items.slice(i, i + 20),
-      country: new URL(location.href).searchParams.get("country"), idempotency_key: crypto.randomUUID() });
+    const before = lastCursor, after = typeof e.data.cursor === "string" ? e.data.cursor : null;
+    lastCursor = after || lastCursor;
+    for (let i = 0; i < items.length; i += 20) {
+      const key = crypto.randomUUID();
+      handoff({ type: "ads", items: items.slice(i, i + 20), country: new URL(location.href).searchParams.get("country"),
+        idempotency_key: key, job_id: JOB, batch_id: key, fetched_at: new Date().toISOString(), schema_version: SCHEMA,
+        cursor_before: before, cursor_after: after });
+    }
   });
 })();

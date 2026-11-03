@@ -140,6 +140,8 @@ class Store(Base):
 
 class Ad(Base):
     __tablename__ = "ads"
+    # one row per source id, enforced by the database (P1) — the ingest lookup under ingest_lock is no longer the only guard
+    __table_args__ = (Index("uq_ads_source_external", "source", "external_id", unique=True),)
     id: Mapped[int] = mapped_column(primary_key=True)
     external_id: Mapped[str] = mapped_column(String(128), index=True)
     source: Mapped[str] = mapped_column(String(64))  # minea / meta_ad_library / internal ...
@@ -247,6 +249,7 @@ def ad_in_country(code: str):
 class AdSource(Base):
     """Source provenance (discovery §5): every provider that reported this ad, and when."""
     __tablename__ = "ad_sources"
+    __table_args__ = (Index("uq_ad_sources_source_ad", "source", "source_ad_id", unique=True),)  # P1: one provenance row per source id
     id: Mapped[int] = mapped_column(primary_key=True)
     ad_id: Mapped[int] = mapped_column(ForeignKey("ads.id"), index=True)
     source: Mapped[str] = mapped_column(String(64))
@@ -558,11 +561,21 @@ from . import crawl_queue  # noqa: E402,F401 — Phase 3 persistent crawl jobs (
 
 
 class IngestBatch(Base):
+    """Receipt of one delivered batch (idempotent ACK) + its envelope (P1): which job / batch, where its cursor stood
+    before and after, when it was captured and with which extractor version. UNIQUE(job_id, batch_id)."""
     __tablename__ = "collector_ingest_batches"
+    __table_args__ = (Index("uq_ingest_batches_job_batch", "job_id", "batch_id", unique=True),)
     key: Mapped[str] = mapped_column(String(200), primary_key=True)
     payload_hash: Mapped[str] = mapped_column(String(64))
     result: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    source: Mapped[str | None] = mapped_column(String(32))  # extension | …
+    job_id: Mapped[str | None] = mapped_column(String(80))  # extension: one browsing session of a tab
+    batch_id: Mapped[str | None] = mapped_column(String(160))
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime)
+    schema_version: Mapped[str | None] = mapped_column(String(32))
+    cursor_before: Mapped[str | None] = mapped_column(String(512))
+    cursor_after: Mapped[str | None] = mapped_column(String(512))
 
 
 class MetaCollation(Base):

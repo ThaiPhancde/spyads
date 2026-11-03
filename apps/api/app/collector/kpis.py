@@ -36,7 +36,10 @@ def collector_kpis(db: Session, hours: int = 24, now: datetime | None = None) ->
         jobs[j.connector_id].append(j)
     key_cid = {j.key: j.connector_id for lst in jobs.values() for j in lst}
     runs: dict[int, dict] = defaultdict(lambda: {"runs": 0, "ok": 0, "error": 0, "lost": 0, "running": 0, **{k: 0 for k in COUNTS}})
+    outcomes: dict[str, int] = defaultdict(int)  # P1: complete / partial / rate_limited / schema_changed / auth_required / blocked / failed / cancelled
     for r in db.scalars(select(CrawlRun).where(CrawlRun.started_at >= since)):
+        if r.outcome:
+            outcomes[r.outcome] += 1
         agg = runs[key_cid.get(r.job_key)]
         agg["runs"] += 1
         agg[r.status if r.status in ("ok", "error", "lost", "running") else "error"] += 1
@@ -77,6 +80,7 @@ def collector_kpis(db: Session, hours: int = 24, now: datetime | None = None) ->
     totals["unhealthy"] = sum(1 for r in out if r["enabled"] and r["health"] not in (None, "healthy", "unknown", "waiting_file", "configured"))
     totals["retry_wait"] = sum(r["retry_wait"] for r in out)
     totals["blocked_jobs"] = sum(r["blocked_jobs"] for r in out)
+    totals["outcomes"] = dict(outcomes)
     return {"window_hours": hours, "generated_at": now, "totals": totals, "connectors": out, "media": dict(media)}
 
 

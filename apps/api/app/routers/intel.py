@@ -7,7 +7,7 @@ import os
 import re
 import time
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
@@ -1361,6 +1361,13 @@ class MetaItemsIn(BaseModel):
     country: str | None = None
     saved_by: str | None = None
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
+    # P1 batch envelope (extension ≥ 0.3); older extensions send none of it
+    job_id: str | None = Field(default=None, max_length=80)
+    batch_id: str | None = Field(default=None, max_length=160)
+    fetched_at: datetime | None = None
+    schema_version: str | None = Field(default=None, max_length=32)
+    cursor_before: str | None = Field(default=None, max_length=512)
+    cursor_after: str | None = Field(default=None, max_length=512)
 
 
 @router.post("/api/ingest/meta-library", dependencies=[Depends(require_token)])
@@ -1376,7 +1383,10 @@ def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
     recs = [map_library_ad(it, "meta_library", (body.country or "").upper() or None) for it in valid]
     with ingest_lock():
         try:
-            stats = ingest_batch(db, recs, key, saved_by=body.saved_by, payload=payload)
+            fetched = body.fetched_at.astimezone(timezone.utc).replace(tzinfo=None) if body.fetched_at and body.fetched_at.tzinfo else body.fetched_at
+            stats = ingest_batch(db, recs, key, saved_by=body.saved_by, payload=payload, envelope={
+                "source": "extension", "job_id": body.job_id, "batch_id": body.batch_id, "fetched_at": fetched,
+                "schema_version": body.schema_version, "cursor_before": body.cursor_before, "cursor_after": body.cursor_after})
             db.commit()
         except BatchConflict as e:
             db.rollback()

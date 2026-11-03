@@ -9,6 +9,13 @@ async function saveSettings() {
   await chrome.storage.sync.set({ api: $("api").value.trim() || DEFAULTS.api, token: $("token").value.trim(), user: $("user").value.trim() });
 }
 $("save").onclick = async () => { await saveSettings(); msg("Đã lưu cài đặt."); };
+const showQueue = (r) => { if (r && r.ok) $("queue").textContent = "Hàng đợi: " + r.pending + " batch chờ gửi · " + r.dead + " bị server từ chối"; };
+chrome.runtime.sendMessage({ type: "outbox_status" }).then(showQueue).catch(() => {});
+$("retry").onclick = async () => {
+  const r = await chrome.runtime.sendMessage({ type: "outbox_retry" });
+  showQueue(r);
+  msg(r && r.ok ? "Đã gửi lại " + r.retried + " batch." : "Không gửi lại được: " + ((r && r.error) || "lỗi"));
+};
 $("test").onclick = async () => {
   await saveSettings();
   const r = await chrome.runtime.sendMessage({ type: "health" });

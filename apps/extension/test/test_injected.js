@@ -42,6 +42,8 @@ function makeSandbox(responseText) {
   await new Promise((r) => setTimeout(r, 20));
   const n1 = t.posted.reduce((a, m) => a + m.items.length, 0);
   check("fetch(/api/graphql/) → items forwarded", n1 === expected, `${n1}/${expected}`);
+  const endc = JSON.parse(sample.replace(/^for \(;;\);/, "")).data.ad_library_main.search_results_connection.page_info.end_cursor;
+  check("batch carries the response's end_cursor (envelope)", t.posted[0].cursor === endc);
   check("items keep video urls", t.posted[0].items.some((i) => JSON.stringify(i).includes("video_hd_url") || JSON.stringify(i).includes("original_image_url")));
 
   // 2) unrelated fetch is ignored

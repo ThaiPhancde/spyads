@@ -162,7 +162,8 @@ def test_product_query_parameters_are_preserved_and_tracking_is_ignored(db):
 
 def test_duplicate_ads_are_identity_links_and_originals_are_retained(db):
     a, b, x, y = same_product(db)
-    y.external_id = x.external_id
+    # the same Facebook ad id reported by a second source (UNIQUE(source, external_id) forbids a twin within one source)
+    y.external_id, y.source = x.external_id, "t-other"
     db.flush()
     before = originals(db)
     C.run(db)
@@ -183,7 +184,8 @@ def test_same_creative_across_shops_with_different_ad_ids_is_not_duplicate_ad(db
 def test_duplicate_ad_identifier_groups_even_without_images_or_names(db):
     a, b = product(db), product(db)
     x, y = ad(db, a), ad(db, b)
-    y.external_id = x.external_id
+    # the same Facebook ad id reported by a second source (UNIQUE(source, external_id) forbids a twin within one source)
+    y.external_id, y.source = x.external_id, "t-other"
     db.flush()
     C.run(db)
     assert len(roots(db)) == 1 and db.scalar(select(DuplicateAdLink))

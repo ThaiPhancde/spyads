@@ -24,6 +24,10 @@ import { NetworkBadge, usePlatforms } from "@/components/platforms";
 import { cn } from "@/lib/utils";
 
 const CHANNEL_ORDER: [string, string][] = [["ads", "Thư viện quảng cáo"], ["commerce", "Nguồn hàng & store"]];
+const OUTCOME: Record<string, string> = {
+  complete: "Đủ", partial: "Một phần", rate_limited: "Rate limited", schema_changed: "Đổi cấu trúc", auth_required: "Cần đăng nhập",
+  blocked: "Bị chặn", failed: "Lỗi", cancelled: "Huỷ (mất lease)",
+};
 const HEALTH: Record<string, [Tone, string]> = {
   healthy: ["good", "Healthy"], slow: ["warn", "Slow"], auth_expired: ["bad", "Auth expired"], error: ["bad", "Error"],
   degraded: ["warn", "Degraded"], unknown: ["neutral", "Chưa chạy"],
@@ -276,6 +280,12 @@ function MonitoringCard({ byKey }: { byKey: any }) {
           <Metric label="Nguồn không khoẻ" value={fmt.n(t.unhealthy)}
             sub={fmt.n(t.schema_drift) + " trang đổi cấu trúc · " + fmt.n(t.cursor_cycles) + " vòng cursor · " + fmt.n(t.cursor_restarts) + " lần quay lại trang 1"} />
         </div>
+        {t.outcomes && Object.keys(t.outcomes).length > 0 && (
+          <div className="mt-3 text-xs text-muted-foreground">
+            Kết quả lượt chạy: {Object.entries(t.outcomes).map(([k, n]: any) => `${OUTCOME[k] || k} ${n}`).join(" · ")}
+            {" "}— “Đủ” chỉ khi nguồn báo hết trang; “Một phần” là mẫu, chưa phủ hết.
+          </div>
+        )}
       </Card>
       <Card title="Theo nguồn" pad={false} className="mb-4">
         <ScrollArea className="w-full">

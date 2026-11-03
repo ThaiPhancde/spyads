@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Market Intelligence — Save to Intelligence",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Bắt quảng cáo trên Meta Ad Library khi bạn duyệt và lưu vào kho Market Intelligence OS (kèm video). Có nút lưu trang sản phẩm bất kỳ.",
   "permissions": [
     "storage",

@@ -20,10 +20,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const c = await cfg();
       if (msg.type === "ads") {
         const id = msg.idempotency_key || crypto.randomUUID();
-        await ToolSpyOutbox.store.enqueue({ id, endpoint: base(c), attempts: 0, nextAt: 0,
-          body: { items: msg.items, country: msg.country, saved_by: c.user || null, idempotency_key: id } });
+        const env = {};
+        for (const k of ["job_id", "batch_id", "fetched_at", "schema_version", "cursor_before", "cursor_after"]) if (msg[k]) env[k] = msg[k];
+        await ToolSpyOutbox.queue(ToolSpyOutbox.store, { id, endpoint: base(c), attempts: 0, nextAt: 0,
+          body: { items: msg.items, country: msg.country, saved_by: c.user || null, idempotency_key: id, ...env } });
         sendResponse({ ok: true, queued: true, idempotency_key: id });
         void drainOutbox();
+      } else if (msg.type === "outbox_status") {
+        sendResponse({ ok: true, ...(await ToolSpyOutbox.stats(ToolSpyOutbox.store)) });
+      } else if (msg.type === "outbox_retry") {
+        const n = await ToolSpyOutbox.retry(ToolSpyOutbox.store);
+        await drainOutbox();
+        sendResponse({ ok: true, retried: n, ...(await ToolSpyOutbox.stats(ToolSpyOutbox.store)) });
       } else if (msg.type === "drift") {
         // an alert, not data: best effort, at most one report per 10 minutes
         const { lastDriftAt = 0 } = await chrome.storage.local.get({ lastDriftAt: 0 });

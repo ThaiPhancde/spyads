@@ -76,6 +76,10 @@ class CrawlRun(Base):
     cursor_cycles: Mapped[int | None] = mapped_column(Integer)
     cursor_restarts: Mapped[int | None] = mapped_column(Integer)
     schema_drift: Mapped[int | None] = mapped_column(Integer)
+    # P1 outcome: complete | partial (sampled: some cursor left) | rate_limited | schema_changed | auth_required | blocked | failed |
+    # cancelled (lease expired: the run was abandoned and is retried)
+    outcome: Mapped[str | None] = mapped_column(String(16))
+    schema_version: Mapped[str | None] = mapped_column(String(32))  # the source parser's version for this run
     error: Mapped[str | None] = mapped_column(Text)
     checkpoint_before: Mapped[dict | None] = mapped_column(JSON)
     checkpoint_after: Mapped[dict | None] = mapped_column(JSON)
@@ -93,7 +97,7 @@ def _lose(db, job: CrawlJob, now: datetime):
     backs off like any failure, and after MAX_RETRIES waits RETRY_CAP_S — its last_sync_at never moved, so the regular
     schedule alone would pick it again on every tick."""
     db.execute(update(CrawlRun).where(CrawlRun.run_token == job.run_token, CrawlRun.status == "running")
-               .values(status="lost", finished_at=now, error=LOST))
+               .values(status="lost", outcome="cancelled", finished_at=now, error=LOST))
     job.retry_count += 1
     job.last_error = LOST
     if job.retry_count <= MAX_RETRIES:
@@ -207,7 +211,8 @@ def finish(key: str, token: str, result: dict | None = None, checkpoint: dict | 
         if checkpoint is not None:
             job.checkpoint = checkpoint
         db.execute(update(CrawlRun).where(CrawlRun.run_token == token).values(
-            status="ok", finished_at=now, checkpoint_after=checkpoint if checkpoint is not None else job.checkpoint, **_counts(result)))
+            status="ok", outcome=result.get("coverage") or "complete", schema_version=result.get("schema_version"),
+            finished_at=now, checkpoint_after=checkpoint if checkpoint is not None else job.checkpoint, **_counts(result)))
     return True
 
 
@@ -220,8 +225,12 @@ def _counts(result: dict) -> dict:
                 accepted=(result.get("new_ads") or 0) + (result.get("updated_ads") or 0) if "new_ads" in result else None)
 
 
+# a failed run's outcome, from the source health run_connector recorded
+OUTCOME = {"rate_limited": "rate_limited", "schema_changed": "schema_changed", "auth_expired": "auth_required", "blocked": "blocked"}
+
+
 def fail(key: str, token: str, error: str, now: datetime | None = None, blocked: bool = False, result: dict | None = None,
-         checkpoint: dict | None = None) -> bool:
+         checkpoint: dict | None = None, health: str | None = None) -> bool:
     """Retry with backoff up to MAX_RETRIES, then `error` (the regular schedule runs it again; a success resets the count).
     `blocked` (access challenge): no fast retries — hammering a challenge never clears it; the regular schedule tries again.
     `result` / `checkpoint`: a partial run that committed its earlier pages — the history keeps what it stored and where it stopped."""
@@ -242,5 +251,6 @@ def fail(key: str, token: str, error: str, now: datetime | None = None, blocked:
         if checkpoint is not None:
             job.checkpoint = checkpoint
         db.execute(update(CrawlRun).where(CrawlRun.run_token == token).values(
-            status="error", finished_at=now, error=job.last_error, checkpoint_after=job.checkpoint, **(_counts(result) if result else {})))
+            status="error", outcome=OUTCOME.get(health, "blocked" if blocked else "failed"), finished_at=now, error=job.last_error,
+            checkpoint_after=job.checkpoint, **(_counts(result) if result else {})))
     return True

@@ -13,6 +13,15 @@
     for (const k in node) collect(node[k], out, depth + 1);
   }
 
+  // page_info.end_cursor of the response (batch envelope: where the page's cursor stood after it)
+  function endCursor(node, depth) {
+    if (!node || typeof node !== "object" || depth > 40) return null;
+    if (Array.isArray(node)) { for (const x of node) { const c = endCursor(x, depth + 1); if (c) return c; } return null; }
+    if (node.page_info && typeof node.page_info.end_cursor === "string") return node.page_info.end_cursor.slice(0, 512);
+    for (const k in node) { const c = endCursor(node[k], depth + 1); if (c) return c; }
+    return null;
+  }
+
   // Key names of the first object carrying ad_archive_id — a schema-drift report never sends values (nothing the user saw).
   function adKeys(node, depth) {
     if (!node || typeof node !== "object" || depth > 40) return null;
@@ -36,7 +45,7 @@
       }
     }
     for (const p of parsed) collect(p, items, 0);
-    if (items.length) { window.postMessage({ [MARK]: true, items }, "*"); return; }
+    if (items.length) { window.postMessage({ [MARK]: true, items, cursor: endCursor(parsed, 0) }, "*"); return; }
     // valid JSON that mentions ad_archive_id, yet no ad we can read: Meta changed the shape — report it, never a quiet zero
     const keys = parsed.length ? adKeys(parsed, 0) : null;
     if (keys) window.postMessage({ [DRIFT]: true, keys }, "*");

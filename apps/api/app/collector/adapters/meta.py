@@ -202,6 +202,7 @@ def map_library_ad(raw: dict, source: str, country: str | None) -> AdRecord:
 
 class MetaLibraryConnector(BaseConnector):
     key = "meta_library"
+    schema_version = "adlib-graphql-1"  # bump when the response shape the parser expects changes (crawl_runs.schema_version)
     name = "Meta Ad Library (public)"
     kind = "browser"
     group = "transparency"

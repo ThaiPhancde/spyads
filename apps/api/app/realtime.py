@@ -138,6 +138,10 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                           **{k: getattr(connector, k, None) for k in DIAGNOSTICS},
                           **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source",
                                                    "invalid", "excluded_entertainment")})
+            # P1 outcome: "complete" only when the source said the end for every cursor of the run; otherwise a sample
+            outs = [v for p in plist for v in (p.extra.get("resume_out") or {}).values()]
+            result["coverage"] = "partial" if any(not v.get("done") for v in outs) else "complete"
+            result["schema_version"] = getattr(connector, "schema_version", None)
             if fetch_error is not None:  # stored up to the last whole page; the run is still a failure (retry, health, KPIs)
                 result["partial"] = True
                 raise fetch_error
@@ -605,7 +609,7 @@ def _job_wrapper(key, cid, q, token):
             with SessionLocal() as db:
                 cursor = (db.get(TrackedQuery, q.id) or q).cursor
         if r.get("error"):
-            crawl_queue.fail(key, token, r["error"], blocked=r.get("health") == "blocked",
+            crawl_queue.fail(key, token, r["error"], blocked=r.get("health") == "blocked", health=r.get("health"),
                              result=r if r.get("partial") else None, checkpoint=cursor)
         else:
             crawl_queue.finish(key, token, r, checkpoint=cursor)
