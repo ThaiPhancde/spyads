@@ -426,6 +426,8 @@ def bare_url(u: str | None) -> str:
 
 
 def _attach_creatives(db: Session, ad: Ad, rec: AdRecord) -> list[int]:
+    from .media import efg_claims
+
     have = {bare_url(c.source_url): c for c in db.scalars(select(Creative).where(Creative.ad_id == ad.id))}
     out = []
     for i, m in enumerate(rec.media[:6]):
@@ -440,7 +442,8 @@ def _attach_creatives(db: Session, ad: Ad, rec: AdRecord) -> list[int]:
         c = Creative(ad_id=ad.id, product_id=ad.product_id, type=m.type, position=i, source=rec.source,
                      source_platform=rec.platform, network=ad.network, source_ad_id=rec.source_ad_id, source_url=m.url,
                      preview_source_url=m.preview_url, sd_source_url=m.sd_url, width=m.width, height=m.height, duration_sec=m.duration_sec,
-                     first_seen_at=ad.first_seen_at)
+                     first_seen_at=ad.first_seen_at,
+                     media_claims=efg_claims(m.url) if m.type == "video" else None)  # unverified third-party claim (P3), never scored
         db.add(c)
         db.flush()
         out.append(c.id)

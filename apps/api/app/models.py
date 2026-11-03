@@ -291,6 +291,11 @@ class Creative(Base):
     family_id: Mapped[int | None] = mapped_column(Integer, index=True)  # creative family (discovery §6)
     video_fp: Mapped[str | None] = mapped_column(String(50))  # dHash at 20/50/80 % "h20:h50:h80" (media.video_fingerprint)
     video_fp_confidence: Mapped[float | None] = mapped_column(Float)  # usable frames / 3
+    # P3: versioned fingerprint {algorithm: cellmean-dhash, version: 2, frame_positions, frame_hashes, duration, source, observed_at}.
+    # Compared only with the same algorithm + version; video_fp (v1) and phash (poster) are never rewritten.
+    video_fp_v2: Mapped[dict | None] = mapped_column(JSON)
+    # P3: third-party claims read off the media URL (efg: asset_age_days …) — unverified, with when we saw them; never scored
+    media_claims: Mapped[dict | None] = mapped_column(JSON)
     transcript: Mapped[str | None] = mapped_column(Text)
     ocr_text: Mapped[str | None] = mapped_column(Text)
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime)

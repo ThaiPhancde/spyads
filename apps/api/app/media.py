@@ -14,6 +14,7 @@ import base64
 import hashlib
 import io
 import itertools
+import json
 import logging
 import os
 import re
@@ -28,7 +29,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import OperationalError
 
 from .db import SessionLocal, read_only
@@ -186,14 +187,18 @@ def _frame(path: Path, at: float = 1) -> bytes | None:
 FP_POINTS = (0.2, 0.5, 0.8)
 
 
-def video_fingerprint(path: Path, duration: float | None) -> tuple[str | None, float | None]:
+def _fp_frames(path: Path, duration: float | None) -> list[bytes | None]:
+    """The frames at 20 / 50 / 80 % — decoded once, hashed by v1 and v2."""
+    return [_frame(path, duration * p) for p in FP_POINTS] if duration and duration > 0 else []
+
+
+def video_fingerprint(path: Path, duration: float | None, frames: list[bytes | None] | None = None) -> tuple[str | None, float | None]:
     """dHash of the frames at 20 / 50 / 80 % of a video already on disk → ("h20:h50:h80", share of usable frames).
     A blank / black frame (fade, letterbox) leaves its slot empty instead of matching every other blank frame."""
     if not duration or duration <= 0:
         return None, None
     hashes = []
-    for p in FP_POINTS:
-        jpg = _frame(path, duration * p)
+    for jpg in frames if frames is not None else _fp_frames(path, duration):
         try:
             h = dhash(jpg)[0] if jpg else ""
         except Exception:
@@ -201,6 +206,122 @@ def video_fingerprint(path: Path, duration: float | None) -> tuple[str | None, f
         hashes.append(h if h and 2 < bin(int(h, 16)).count("1") < 62 else "")
     n = sum(1 for h in hashes if h)
     return (":".join(hashes), round(n / len(FP_POINTS), 2)) if n else (None, None)
+
+
+# ------------------------------------------------------------ video fingerprint v2 (P3)
+# v1 above: PIL resize to 9x8, then adjacent pixels. v2: the frame split into a 9x8 grid, each cell's MEAN luminance, adjacent
+# cells compared — 64 bits per frame. Different algorithm, different bits: a v1 and a v2 hash are never compared.
+VIDEO_FP_V2 = {"algorithm": "cellmean-dhash", "version": 2, "grid": [9, 8]}
+V2_DISTANCE = 10  # bits of 64 per frame: tests/test_video_fp_v2.py (edits stay within, different frames above); bench: scripts/bench_video_fp.py
+
+
+def cellmean_hash(img_bytes: bytes) -> str | None:
+    """64-bit cell-mean difference hash of one frame (hex), or None when the frame is blank / unreadable."""
+    import numpy as np
+    from PIL import Image
+
+    try:
+        a = np.asarray(Image.open(io.BytesIO(img_bytes)).convert("L"), dtype=np.float64)
+    except Exception:
+        return None
+    if a.ndim != 2 or a.shape[0] < 8 or a.shape[1] < 9:
+        return None
+    rows = np.array_split(np.arange(a.shape[0]), 8)
+    cols = np.array_split(np.arange(a.shape[1]), 9)
+    cells = np.array([[a[r[0]:r[-1] + 1, c[0]:c[-1] + 1].mean() for c in cols] for r in rows])
+    bits = 0
+    for b in (cells[:, :-1] > cells[:, 1:]).flatten():
+        bits = (bits << 1) | int(b)
+    ones = bin(bits).count("1")
+    return f"{bits:016x}" if 2 < ones < 62 else None  # a flat / black frame says nothing
+
+
+def video_fp_v2(frames: list[bytes | None], duration: float | None, source: str, observed_at: datetime | None = None) -> dict | None:
+    """{algorithm, version, grid, frame_positions, frame_hashes, duration, source, observed_at, confidence}; None when no
+    frame is usable. `source`: stored_file (our copy) | sd_rendition (the light file the source serves)."""
+    hashes = [cellmean_hash(f) if f else None for f in frames]
+    n = sum(1 for h in hashes if h)
+    if not n:
+        return None
+    return {**VIDEO_FP_V2, "frame_positions": list(FP_POINTS), "frame_hashes": hashes, "duration": duration, "source": source,
+            "observed_at": (observed_at or datetime.utcnow()).replace(microsecond=0).isoformat(), "confidence": round(n / len(FP_POINTS), 2)}
+
+
+def same_video_v2(a: dict | None, b: dict | None) -> bool | None:
+    """True / False once 2+ positions are usable on both; None when unknown OR the two are not the same algorithm + version."""
+    if not a or not b or (a.get("algorithm"), a.get("version")) != (b.get("algorithm"), b.get("version")):
+        return None
+    pairs = [(x, y) for x, y in zip(a.get("frame_hashes") or [], b.get("frame_hashes") or []) if x and y]
+    if len(pairs) < 2:
+        return None
+    return all(hamming(x, y) <= V2_DISTANCE for x, y in pairs)
+
+
+def efg_claims(url: str | None, observed_at: datetime | None = None) -> dict | None:
+    """`efg=` in a Meta video URL is base64 JSON the CDN attaches (asset_age_days, xpv_asset_id, duration_s). Third-party
+    metadata: kept as an *unverified claim* with when we saw it — never a verified upload date, never read by scoring."""
+    if not url or "efg=" not in url:
+        return None
+    from urllib.parse import parse_qs
+
+    try:
+        raw = (parse_qs(urlparse(url).query).get("efg") or [""])[0]
+        if not raw or len(raw) > 4096:
+            return None
+        data = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    age, xpv, dur = data.get("asset_age_days"), data.get("xpv_asset_id"), data.get("duration_s")
+    out = {"age_claim_days": age if isinstance(age, int) and not isinstance(age, bool) and 0 <= age < 36500 else None,
+           "xpv_asset_id": str(xpv)[:64] if isinstance(xpv, (int, str)) and not isinstance(xpv, bool) and xpv != "" else None,
+           "duration_s": float(dur) if isinstance(dur, (int, float)) and not isinstance(dur, bool) and 0 < dur < 86400 else None,
+           "claimed_at": (observed_at or datetime.utcnow()).replace(microsecond=0).isoformat(),
+           "evidence_type": "efg_url_metadata", "confidence": "unverified"}
+    return out if any(out[k] is not None for k in ("age_claim_days", "xpv_asset_id", "duration_s")) else None
+
+
+def _local_copy(c) -> Path | None:
+    """A stored creative as a local file: the vault path (local storage) or a temp copy from our own bucket (R2) — never
+    the source's CDN. The caller removes a temp copy."""
+    try:
+        st = store()
+        if hasattr(st, "root"):
+            path = st.path(c.storage_key)
+            return path if path.is_file() else None
+        fd, name = tempfile.mkstemp(suffix=Path(c.storage_key).suffix or ".mp4")
+        os.close(fd)
+        tmp = Path(name)
+        tmp.write_bytes(st.get(c.storage_key))
+        return tmp
+    except Exception as e:
+        log.warning("creative %s: stored file unreadable for fingerprint v2: %s", c.id, e)
+        return None
+
+
+def fingerprint_v2_backfill(db, limit: int = 20) -> dict:
+    """v2 for stored videos that have none (`python -m app.media --fingerprint-v2 N`). Only our own copies: nothing is
+    fetched from a source, nothing re-encoded; `limit` caps the CPU per call. A row tried with no usable frame gets an empty
+    v2 document (frame_hashes all null) so it is not decoded again."""
+    out = {"fingerprinted": 0, "skipped": 0}
+    rows = db.scalars(select(Creative).where(Creative.type == "video", Creative.status == "stored", Creative.storage_key.is_not(None),
+                                             Creative.video_fp_v2.is_(None)).order_by(Creative.id.desc()).limit(limit)).all()
+    for c in rows:
+        path = _local_copy(c)
+        if path is None:
+            out["skipped"] += 1
+            continue
+        try:
+            fp = video_fp_v2(_fp_frames(path, c.duration_sec), c.duration_sec, "stored_file")
+        finally:
+            if not hasattr(store(), "root"):
+                path.unlink(missing_ok=True)
+        c.video_fp_v2 = fp or {**VIDEO_FP_V2, "frame_positions": list(FP_POINTS), "frame_hashes": [None] * len(FP_POINTS),
+                                "source": "stored_file", "confidence": 0.0}
+        out["fingerprinted" if fp else "skipped"] += 1
+        db.commit()
+    return out
 
 
 def same_video(a: str | None, b: str | None) -> bool | None:
@@ -241,7 +362,7 @@ def _strip(url: str | None) -> str:
 
 
 _SHARED = ("storage_key", "thumb_key", "sha256", "phash", "mime", "size_bytes", "width", "height", "duration_sec", "family_id",
-           "stored_bytes", "video_fp", "video_fp_confidence")
+           "stored_bytes", "video_fp", "video_fp_confidence", "video_fp_v2")
 
 
 def _twin(db, c: Creative, cond) -> Creative | None:
@@ -328,7 +449,9 @@ def _process(cid: int):
                 else:
                     meta = _probe(tmp)
                     c.width, c.height, c.duration_sec = meta.get("width"), meta.get("height"), meta.get("duration")
-                    c.video_fp, c.video_fp_confidence = video_fingerprint(tmp, c.duration_sec)
+                    frames = _fp_frames(tmp, c.duration_sec)
+                    c.video_fp, c.video_fp_confidence = video_fingerprint(tmp, c.duration_sec, frames)
+                    c.video_fp_v2 = video_fp_v2(frames, c.duration_sec, "stored_file")
                     if c.preview_source_url:
                         try:
                             pr = safe_get(c.preview_source_url, max_bytes=20 * 1024 * 1024, headers=HEADERS, timeout=60)
@@ -408,10 +531,12 @@ def assign_family(db, c: Creative) -> int:
         same = db.scalar(select(Creative.family_id).where(Creative.sha256 == c.sha256, Creative.family_id.is_not(None), Creative.id != c.id))
         if same:
             return same
-    if c.video_fp:  # same frames at 20/50/80 %: one video even when the cover differs
-        for fid, fp in db.execute(select(Creative.family_id, Creative.video_fp).where(
-                Creative.video_fp.is_not(None), Creative.family_id.is_not(None), Creative.id != c.id)):
-            if same_video(fp, c.video_fp):
+    if c.video_fp or c.video_fp_v2:  # same frames at 20/50/80 %: one video even when the cover differs
+        for fid, fp, fp2 in db.execute(select(Creative.family_id, Creative.video_fp, Creative.video_fp_v2).where(
+                or_(Creative.video_fp.is_not(None), Creative.video_fp_v2.is_not(None)), Creative.family_id.is_not(None), Creative.id != c.id)):
+            # v2 decides when both have it; else v1 vs v1. A v1 hash is never compared with a v2 hash.
+            verdict = same_video_v2(fp2, c.video_fp_v2) if fp2 and c.video_fp_v2 else same_video(fp, c.video_fp)
+            if verdict:
                 return fid
     if c.phash:
         for fid, ph, fp in db.execute(select(Creative.family_id, Creative.phash, Creative.video_fp).where(
@@ -565,3 +690,14 @@ def enqueue_pending(limit: int = 500) -> int:
         ids += [cid for tier in itertools.zip_longest(*lanes) for cid in tier if cid is not None]
     enqueue(ids)
     return len(ids)
+
+
+if __name__ == "__main__":  # python -m app.media --fingerprint-v2 [N]: v2 for stored videos only (no source download, no re-encode)
+    import sys
+
+    if "--fingerprint-v2" in sys.argv:
+        i = sys.argv.index("--fingerprint-v2")
+        n = int(sys.argv[i + 1]) if len(sys.argv) > i + 1 and sys.argv[i + 1].isdigit() else 20
+        logging.basicConfig(level=logging.INFO)
+        with SessionLocal() as _db:
+            print(fingerprint_v2_backfill(_db, n))

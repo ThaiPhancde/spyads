@@ -9,7 +9,8 @@ from .models import IngestBatch, MetaCollation
 
 log = logging.getLogger(__name__)
 
-COLUMNS = {"creatives": (("video_fp", "VARCHAR(50)"), ("video_fp_confidence", "FLOAT")),  # Phase 2 video fingerprint
+COLUMNS = {"creatives": (("video_fp", "VARCHAR(50)"), ("video_fp_confidence", "FLOAT"),  # Phase 2 video fingerprint
+                         ("video_fp_v2", "JSON"), ("media_claims", "JSON")),  # P3 versioned fingerprint + efg claims
            "crawl_runs": tuple((c, "INTEGER") for c in ("pages", "empty_pages", "accepted", "duplicates", "invalid", "excluded",  # Phase 5
                                                          "requests", "cursor_cycles", "cursor_restarts", "schema_drift"))  # P2 diagnostics
            + (("outcome", "VARCHAR(16)"), ("schema_version", "VARCHAR(32)")),  # P1 outcome taxonomy
