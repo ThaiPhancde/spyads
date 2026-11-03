@@ -111,7 +111,9 @@ def run_connector(cid: int, query: TrackedQuery | None = None, params: FetchPara
                         q.cursor = {"at": datetime.utcnow().isoformat(), "pages": pages}
                 db.commit()
             after_business_events(db, set(stats["product_ids"]))
-            result.update(fetched=len(recs), **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source")})
+            result.update(fetched=len(recs), pages=getattr(connector, "pages_fetched", None), empty_pages=getattr(connector, "empty_pages", None),
+                          **{k: stats[k] for k in ("new_ads", "updated_ads", "new_products", "creatives_queued", "merged_cross_source",
+                                                   "invalid", "excluded_entertainment")})
             publish("CONNECTOR_SYNCED", result)
         except (NotConfigured, AuthExpired, ConnectorError, Exception) as e:
             if isinstance(e, OperationalError):

@@ -285,6 +285,8 @@ class MetaLibraryConnector(BaseConnector):
         st["cursor"] = cursor
         st["done"] = not has_next
         st["page_status"] = "end" if st["done"] else "page" if recs else "empty"
+        self.pages_fetched = getattr(self, "pages_fetched", 0) + 1  # Data & Connectors KPIs (crawl_runs.pages)
+        self.empty_pages = getattr(self, "empty_pages", 0) + (not recs)
         return recs, st
 
     def health_check(self) -> dict:

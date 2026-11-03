@@ -1,7 +1,7 @@
 # Meta Collector Upgrade
 
 Spec: [Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md](Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md).
-Trạng thái: **Phase 1, 2, 3, 4 xong** (2026-11-03). Phase 5 chưa làm.
+Trạng thái: **Phase 1–5 xong** (2026-11-03). Nghiệm thu: mục cuối.
 
 ## Phase 1 — Meta Collector Reliability
 
@@ -265,3 +265,56 @@ Test failure-recovery: worker chết giữa chừng → `recover` đánh dấu r
 | Toàn bộ `apps/api/tests` | 482 passed, 4 skipped |
 
 Test gồm: process con chạy Chromium thật; quá hạn 3 s → process cháu (giả lập trình duyệt) bị kill thật (kiểm tra PID bằng `OpenProcess`); con trả `blocked` / `rate_limited` / `error` → đúng loại exception; con crash không có kết quả → `BROWSER_ERROR` kèm stderr; hết slot → `BROWSER_BUSY`; tác vụ không đăng ký bị từ chối; trang thật có 429 → `RateLimited`, có phần tử CAPTCHA → `Blocked`; connector bị `Blocked` → health `blocked`, crawl job `blocked` không lên lịch retry; Meta `rate_limited` → `RateLimited`. Mutation: thay `taskkill /T` bằng `proc.kill()` → test kill cây process fail.
+
+## Phase 5 — Monitoring
+
+### Audit: hiện trạng trước khi sửa
+
+Trang Data & Connectors chỉ có `health`, `last_error`, `last_sync_count` của lần sync **cuối**. Không biết đã lấy bao nhiêu trang, bao nhiêu ad trùng / không hợp lệ, cursor đang ở đâu, có đang chờ retry không, cũng không biết bao nhiêu media còn xem được. Live search (lượng Meta lớn nhất) chỉ hiện trong từng job.
+
+### Thiết kế
+
+Không thêm bộ đếm mới — đọc lại dữ liệu đã có:
+
+| KPI | Nguồn dữ liệu |
+|-----|---------------|
+| Trang đã lấy / trang rỗng | `MetaLibraryConnector.fetch_page` đếm `pages_fetched`, `empty_pages` → `run_connector` → `crawl_runs.pages`, `empty_pages` |
+| Bản ghi nhận | `crawl_runs.fetched` (+ `search_jobs.sources[*].fetched` cho live search) |
+| Ads chấp nhận | `new_ads + updated_ads` của `ingest_ads` → `crawl_runs.accepted` |
+| Trùng | `updated_ads` (bản ghi hợp lệ của ad đã có trong kho, chỉ cập nhật) → `crawl_runs.duplicates` |
+| Không hợp lệ / bị lọc | `ingest.invalid`, `excluded_entertainment` → `crawl_runs.invalid`, `excluded` |
+| Cursor | `crawl_jobs.checkpoint` → số nước còn trang / đã xong |
+| Retry | `crawl_jobs.status`, `retry_count`, `next_retry_at`, `last_error`; lượt chạy ok / lỗi / mất lease |
+| Health | `Connector.health` (gồm `blocked`, `rate_limited` của Phase 4) |
+| Media availability | `creatives` nhóm theo `network × status`; "xem được" = max(đã lưu file, có ảnh bìa) / tổng |
+
+- `app/collector/kpis.py` — `collector_kpis(db, hours)`; `GET /api/collector/kpis?hours=1..720` (kèm `browser_capacity`).
+- Tab **Giám sát** trên Data & Connectors: 8 ô tổng (chọn 1 giờ / 24 giờ / 7 ngày / 30 ngày), bảng theo nguồn (health + lỗi gần nhất, trang, nhận, chấp nhận, trùng, không hợp lệ, live search, từng job với cursor / retry / lease), bảng media theo nền tảng.
+
+### File thay đổi
+
+| File | Thay đổi |
+|------|----------|
+| `apps/api/app/collector/kpis.py` | Mới |
+| `apps/api/app/routers/intel.py` | `GET /api/collector/kpis` |
+| `apps/api/app/crawl_queue.py` | `CrawlRun.pages`, `empty_pages`, `accepted`, `duplicates`, `invalid`, `excluded`; `finish` ghi các số này |
+| `apps/api/app/realtime.py` | `run_connector` trả số trang + `invalid` / `excluded_entertainment` |
+| `apps/api/app/collector/adapters/meta.py` | Đếm trang / trang rỗng |
+| `apps/api/app/meta_collector_migrate.py` | Thêm 6 cột INTEGER vào `crawl_runs` nếu bảng đã tồn tại |
+| `apps/web/app/data/page.tsx` | Tab Giám sát, nhãn health `blocked` / `rate_limited` |
+| `apps/api/tests/test_collector_kpis.py` | Mới — 5 test |
+
+### Giới hạn đã biết
+
+- Số trang chỉ có với nguồn phân trang (Meta Ad Library); nguồn trả một lần hiện "—".
+- Số liệu live search lấy từ `search_jobs.sources`: có nhận / mới / lỗi, không có trùng / không hợp lệ (job không lưu riêng các số đó).
+- Tổng hợp live search duyệt các search job trong cửa sổ bằng Python (vài trăm job/ngày). Nếu nhiều hơn thì cần bảng rollup.
+
+### Kết quả kiểm thử (2026-11-03, chạy thật)
+
+| Bộ test | Kết quả |
+|---------|---------|
+| `tests/test_collector_kpis.py` | 5 passed |
+| `tsc --noEmit` (apps/web) | không lỗi ở `data/page.tsx` |
+
+Test chạy qua `run_connector` + `ingest_batch` thật: 2 lượt × 3 ad × 2 trang (1 rỗng) → trang 4, rỗng 2, nhận 6, mới 3, chấp nhận 6, trùng 3, không hợp lệ 0, cursor 1/2 nước còn trang; nguồn lỗi → health `error`, job `retry_wait` với `retry_count` 1; live search chỉ đếm job trong cửa sổ (job 3 ngày trước bị loại); media 4 creative → xem được 50 %; endpoint 200 với `hours=168`, 422 với `hours=0`.

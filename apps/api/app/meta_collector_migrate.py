@@ -5,7 +5,8 @@ from .db import engine
 from .crawl_queue import CrawlJob, CrawlRun
 from .models import IngestBatch, MetaCollation
 
-COLUMNS = {"creatives": (("video_fp", "VARCHAR(50)"), ("video_fp_confidence", "FLOAT"))}  # Phase 2 video fingerprint
+COLUMNS = {"creatives": (("video_fp", "VARCHAR(50)"), ("video_fp_confidence", "FLOAT")),  # Phase 2 video fingerprint
+           "crawl_runs": tuple((c, "INTEGER") for c in ("pages", "empty_pages", "accepted", "duplicates", "invalid", "excluded"))}  # Phase 5
 
 
 def migrate(bind=None):

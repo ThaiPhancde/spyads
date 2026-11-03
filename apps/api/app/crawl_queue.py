@@ -62,8 +62,14 @@ class CrawlRun(Base):
     status: Mapped[str] = mapped_column(String(16), default="running")  # running / ok / error / lost
     started_at: Mapped[datetime] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
-    fetched: Mapped[int | None] = mapped_column(Integer)
+    pages: Mapped[int | None] = mapped_column(Integer)  # source pages requested (paging sources only)
+    empty_pages: Mapped[int | None] = mapped_column(Integer)
+    fetched: Mapped[int | None] = mapped_column(Integer)  # records the source returned
     new_ads: Mapped[int | None] = mapped_column(Integer)
+    accepted: Mapped[int | None] = mapped_column(Integer)  # stored: new + refreshed
+    duplicates: Mapped[int | None] = mapped_column(Integer)  # valid records of an ad already in the library
+    invalid: Mapped[int | None] = mapped_column(Integer)  # rejected by ingest validation
+    excluded: Mapped[int | None] = mapped_column(Integer)  # dropped by the content filter (drama / movie / podcast…)
     error: Mapped[str | None] = mapped_column(Text)
     checkpoint_before: Mapped[dict | None] = mapped_column(JSON)
     checkpoint_after: Mapped[dict | None] = mapped_column(JSON)
@@ -175,6 +181,9 @@ def finish(key: str, token: str, result: dict | None = None, checkpoint: dict | 
             job.checkpoint = checkpoint
         db.execute(update(CrawlRun).where(CrawlRun.run_token == token).values(
             status="ok", finished_at=now, fetched=result.get("fetched"), new_ads=result.get("new_ads"),
+            pages=result.get("pages"), empty_pages=result.get("empty_pages"), invalid=result.get("invalid"),
+            excluded=result.get("excluded_entertainment"), duplicates=result.get("updated_ads"),
+            accepted=(result.get("new_ads") or 0) + (result.get("updated_ads") or 0) if "new_ads" in result else None,
             checkpoint_after=checkpoint if checkpoint is not None else job.checkpoint))
     return True
 

@@ -1569,6 +1569,15 @@ def run_liveness(max_advertisers: int = 12):
     return realtime.verify_liveness(max_advertisers=max(1, min(max_advertisers, 50)))
 
 
+@router.get("/api/collector/kpis")
+def collector_kpis(hours: int = Query(24, ge=1, le=24 * 30), db: Session = Depends(get_db)):
+    """Data & Connectors monitoring: pages, accepted / duplicate / invalid ads, cursor, retry, health, media availability."""
+    from ..browser_worker import capacity
+    from ..collector.kpis import collector_kpis as kpis
+
+    return {**kpis(db, hours), "browser_capacity": capacity()}
+
+
 @router.get("/api/collector/scheduler")
 def scheduler_status(db: Session = Depends(get_db)):
     """What the background scheduler is doing right now and what is overdue."""
