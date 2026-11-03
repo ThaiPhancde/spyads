@@ -206,3 +206,12 @@ def test_providers_all_down_do_not_burn_the_products_attempts(monkeypatch):
         out = naming_ai.ai_pass(db, batches=1)
         db.rollback()
     assert out["failed"] == 1 and p.naming_attempts == 0
+
+
+def test_agent_schema_lets_the_model_say_not_mentioned():
+    """Groq gpt-oss-120b answered null for 'not mentioned' (as the prompt asks) and was rejected: fast_growing / hidden_winner / limit were
+    plain booleans / integer. 12 of 13 agent questions fell back to the regex parser (2026-11-03)."""
+    props = P.strict(agent.SPEC_SCHEMA)["properties"]
+    for k in ("fast_growing", "hidden_winner", "limit", "country", "days"):
+        assert "null" in props[k]["type"], k
+    assert agent.SPEC_SCHEMA["properties"]["intent"]["type"] == "string"  # the intent is never optional

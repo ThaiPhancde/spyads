@@ -35,11 +35,11 @@ SPEC_SCHEMA = {
         "category": {"type": ["string", "null"], "enum": ["beauty", "health", "home", "gadgets", "fashion", "pets", None]},
         "max_advertisers": {"type": ["integer", "null"]},
         "min_opportunity": {"type": ["number", "null"]},
-        "fast_growing": {"type": "boolean"},
-        "hidden_winner": {"type": "boolean"},
+        "fast_growing": {"type": ["boolean", "null"]},  # null = not mentioned (the prompt says so; Groq rejects a null in a plain boolean)
+        "hidden_winner": {"type": ["boolean", "null"]},
         "days": {"type": ["integer", "null"]},
         "product_query": {"type": ["string", "null"]},
-        "limit": {"type": "integer"},
+        "limit": {"type": ["integer", "null"]},
     },
     "required": ["intent", "country", "category", "max_advertisers", "min_opportunity",
                  "fast_growing", "hidden_winner", "days", "product_query", "limit"],
@@ -101,7 +101,7 @@ def parse(q: str) -> tuple[dict, str]:
                 "product database. Intents: product_search (find products by filters), top_complaints (complaints of one product — put "
                 "its name/code in product_query), market_hidden_winners (which market has most hidden winners), "
                 "competitors_scaling (advertisers scaling fast), explain_product (why a product has its score). "
-                "Use null for filters not mentioned. limit defaults to 20."
+                "Use null for every filter not mentioned, including fast_growing, hidden_winner and limit (null limit means 20)."
             ),
             user=q, schema=SPEC_SCHEMA, timeout=20, kind="agent",
         )
