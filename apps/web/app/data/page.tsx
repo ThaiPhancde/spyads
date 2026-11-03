@@ -43,7 +43,7 @@ function ConnectorRow({ c, onChange, byKey }: { c: any; onChange: () => void; by
   });
   const toggle = () => act.run(async () => { await api(`/collector/connectors/${c.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !c.enabled }) }); onChange(); });
   const test = () => act.run(async () => { setMsg("Đang kiểm tra…"); const r = await api(`/collector/connectors/${c.id}/test`, { method: "POST" }); setMsg(JSON.stringify(r)); onChange(); });
-  const sync = () => act.run(async () => { await api(`/collector/connectors/${c.id}/sync`, { method: "POST" }); setMsg("Đã đưa vào hàng đợi — kết quả hiện ở feed realtime"); toast(`Đã xếp hàng sync ${c.name}`); });
+  const sync = () => act.run(async () => { const r = await api(`/collector/connectors/${c.id}/sync`, { method: "POST" }); const busy = r?.already_running; setMsg(busy ? "Đang chạy sẵn (worker hoặc lần bấm trước) — chờ kết quả ở feed realtime" : "Đã đưa vào hàng đợi — kết quả hiện ở feed realtime"); toast(busy ? `${c.name} đang chạy sẵn` : `Đã xếp hàng sync ${c.name}`); });
   const [tone, label] = HEALTH[c.health] || HEALTH.unknown;
   const id = `conn-${c.id}`;
   return (
@@ -373,7 +373,7 @@ export default function Collector() {
                         <TableCell className="text-xs">{t.last_error ? <span className="text-critical">{t.last_error.slice(0, 80)}</span> : `${t.last_count} ads · ${t.last_new} mới`}</TableCell>
                         <TableCell className="whitespace-nowrap">
                           <div className="flex gap-1">
-                            <Button variant="outline" size="xs" onClick={async () => { await api(`/collector/queries/${t.id}/run`, { method: "POST" }); toast("Đã chạy — xem feed realtime"); }}><Play />Chạy</Button>
+                            <Button variant="outline" size="xs" onClick={async () => { const r = await api(`/collector/queries/${t.id}/run`, { method: "POST" }); toast(r?.already_running ? "Truy vấn này đang chạy sẵn" : "Đã chạy — xem feed realtime"); }}><Play />Chạy</Button>
                             <AlertDialog>
                               <AlertDialogTrigger asChild><Button variant="outline" size="xs"><Trash2 />Xoá</Button></AlertDialogTrigger>
                               <AlertDialogContent>

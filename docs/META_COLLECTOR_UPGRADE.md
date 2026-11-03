@@ -1,7 +1,7 @@
 # Meta Collector Upgrade
 
 Spec: [Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md](Meta_Collector_Reliability_and_Video_Intelligence_Upgrade.md).
-Trạng thái: **Phase 1, 2 xong** (2026-11-03). Phase 3–5 chưa làm.
+Trạng thái: **Phase 1, 2, 3 xong** (2026-11-03). Phase 4–5 chưa làm.
 
 ## Phase 1 — Meta Collector Reliability
 
@@ -143,3 +143,66 @@ Additive: `ALTER TABLE creatives ADD COLUMN video_fp VARCHAR(50)`, `video_fp_con
 | Toàn bộ `apps/api/tests` | 462 passed, 3 skipped |
 
 Test dùng video tạo bằng ffmpeg `lavfi` (`testsrc2` 5 s): cùng video ở độ phân giải khác → khớp; video lật → khác; video đen → không fingerprint; không có duration → không fingerprint; poster giống + frame khác → tách family; cover khác + frame giống → cùng family, sản phẩm vẫn tách; `_process` lưu fingerprint với đúng 1 lần tải; migration thêm cột vào bảng cũ có dữ liệu, chạy 2 lần không lỗi. Mutation check: gỡ điều kiện phủ quyết poster → test family fail.
+
+## Phase 3 — Persistent Jobs
+
+### Audit: hiện trạng trước khi sửa
+
+| Loại job | Chạy ở đâu | Chống chạy trùng | Retry | Lịch sử |
+|----------|-----------|------------------|-------|---------|
+| Connector sync / tracked query (`c:` / `q:`) | worker `app.worker` | set `_running` trong RAM + advisory lock 1 scheduler/DB | **Không có** — lỗi thì chờ tới lịch kế (`every_minutes`, có thể vài giờ) | Chỉ `last_sync_at` / `last_error` |
+| Nút "Sync" / "Chạy" trên Data & Connectors | API `BackgroundTasks` | **Không có** — chạy song song với worker trên cùng connector / query, cả hai cùng ghi `TrackedQuery.cursor` | Không | Không |
+| Live search (`SearchJob`) | thread trong API | `LIVE_JOBS` (API chạy 1 process) | Người dùng bấm lại | `job.state` (checkpoint từ Phase 1) |
+| Competitor tracker (`ScanJob`) | worker | **đã có** lease + `run_token` + `SKIP LOCKED` | đã có backoff | đã có |
+
+Thêm: `db.scheduler_lock` ghi chú rằng nếu PostgreSQL restart thì advisory lock mất → worker thứ hai có thể chạy cùng lúc; khi đó `_running` (RAM, mỗi process một bản) không ngăn được job trùng.
+
+### Thiết kế
+
+`app/crawl_queue.py` (cùng mẫu với `ScanJob`, engagement / pricing jobs):
+
+- **`crawl_jobs`** — 1 dòng / key scheduler (`c:<connector>:`, `q:<connector>:<query>`): `status` (`idle` / `running` / `retry_wait` / `error`), `run_token`, `lease_owner` (`host:pid`), `lease_until`, `heartbeat_at`, `retry_count`, `next_retry_at`, `last_error`, `checkpoint` (cursor đã commit gần nhất).
+- **`crawl_runs`** — lịch sử từng lần chạy: worker, `attempt`, `status` (`running` / `ok` / `error` / `lost`), `fetched`, `new_ads`, `error`, `checkpoint_before`, `checkpoint_after`.
+- **`claim`**: `SELECT … FOR UPDATE SKIP LOCKED` trên dòng của key; từ chối nếu lease khác còn hạn hoặc đang trong backoff; cấp `run_token` mới, lease `CRAWL_LEASE_S` (120 s). Hai worker cùng chèn dòng đầu tiên → một bên `IntegrityError` → `None`.
+- **Heartbeat**: `leased()` chạy thread gia hạn lease mỗi `LEASE_S/4` trong lúc job chờ slot và chạy.
+- **Fencing**: `heartbeat` / `finish` / `fail` chỉ có hiệu lực với đúng `run_token` đang giữ — worker chết dậy muộn không ghi đè được kết quả của worker mới.
+- **Phục hồi**: `recover()` mỗi tick scheduler (cũng là lúc worker khởi động): job `running` hết lease → run `lost`, job `retry_wait` với `next_retry_at = now`. `claim` cũng tự thu hồi lease hết hạn.
+- **Retry**: `fail` → `retry_count += 1`, `next_retry_at = now + min(1h, 60s·2^(n-1))`; job retry được scheduler coi là due ngay cả trước lịch thường. Quá `CRAWL_MAX_RETRIES` (3) → `error`, lịch thường chạy lại; lần thành công đặt lại về 0.
+- **Checkpoint**: sau khi chạy xong, `TrackedQuery.cursor` (Phase 1 chỉ ghi sau khi batch commit) được chép vào `crawl_jobs.checkpoint` và `crawl_runs.checkpoint_after`.
+- **Nút thủ công**: `POST /api/collector/connectors/{id}/sync`, `/queries/{id}/run`, `/export-upload` đi qua cùng `claim` (`realtime.start_crawl`). Đang chạy → `{"queued": false, "already_running": true}`; trang Data & Connectors báo "đang chạy sẵn".
+- Scheduler vẫn quyết định **khi nào** job tới hạn (`last_sync_at + every_minutes`); queue quyết định **ai** chạy.
+
+### File thay đổi
+
+| File | Thay đổi |
+|------|----------|
+| `apps/api/app/crawl_queue.py` | Mới — models `CrawlJob`, `CrawlRun`; `claim`, `heartbeat`, `leased`, `finish`, `fail`, `recover`, `retry_due`, `backoff` |
+| `apps/api/app/realtime.py` | `scheduler_loop` gọi `recover` / `retry_due` / `claim`; `_job_wrapper` chạy trong lease và ghi kết quả; `job_key`, `claim_crawl`, `start_crawl` |
+| `apps/api/app/routers/intel.py` | 3 endpoint chạy tay đi qua `start_crawl` |
+| `apps/api/app/models.py` | Đăng ký `crawl_queue` |
+| `apps/api/app/meta_collector_migrate.py` | Tạo `crawl_jobs`, `crawl_runs` |
+| `apps/web/app/data/page.tsx` | Hiện trạng thái "đang chạy sẵn" |
+| `apps/api/tests/test_crawl_queue.py` | Mới — 9 test |
+
+### Migration
+
+Chỉ tạo 2 bảng mới (`checkfirst`), không đụng bảng cũ. Tự chạy khi API/worker khởi động. Rollback: `DROP TABLE crawl_runs, crawl_jobs;` — code sẽ cần revert cùng lúc, vì scheduler cần 2 bảng này.
+
+### Giới hạn đã biết
+
+- Fencing áp dụng cho dòng job / lịch sử. Bên trong `run_connector` vẫn ghi trực tiếp `Connector.*` và `TrackedQuery.cursor`. Một lần chạy cũ chỉ ghi đè được khi lease hết hạn trong lúc process **còn sống** (heartbeat lỗi DB liên tục > 120 s). Nâng cấp: truyền token vào `run_connector` và ghi cursor có điều kiện `run_token`.
+- Thread của một lần chạy mất lease không bị kill (Python không kill được thread); nó chạy nốt, kết quả bị bỏ qua.
+- Live search và liveness không đi qua queue: search chạy trong API 1 process (`LIVE_JOBS` đúng), checkpoint đã nằm trong `job.state` → "load more" chạy tiếp. Liveness là job dọn dẹp định kỳ, idempotent.
+- `services/pipeline.run_pipeline` (admin chạy tay toàn bộ pipeline) vẫn gọi `run_connector` trực tiếp.
+- `crawl_runs` chưa có TTL — khoảng 1 dòng / job / lần chạy. Nên dọn trong `retention` khi bảng lớn.
+
+### Kết quả kiểm thử (2026-11-03, chạy thật)
+
+| Bộ test | Kết quả |
+|---------|---------|
+| `tests/test_crawl_queue.py` trên SQLite | 8 passed, 1 skipped (test tranh chấp chỉ chạy trên PG) |
+| Phase 1 + 2 + 3 trên PostgreSQL 18 (`toolspy_test_meta`) | 30 passed |
+| Toàn bộ `apps/api/tests` | 470 passed, 4 skipped |
+| `tsc --noEmit` (apps/web) | không lỗi ở `data/page.tsx` |
+
+Test failure-recovery: worker chết giữa chừng → `recover` đánh dấu run `lost`, job retry ngay, worker mới claim token mới, token cũ không ghi được heartbeat / finish / fail; lease hết hạn được thu hồi kể cả khi chưa có lượt `recover`; backoff 1 → 2 → 4 phút rồi `error`, thành công đặt lại; exception trong job không để lại lease kẹt; 8 thread claim cùng 1 key mới trên PG → đúng 1 thắng; dòng đang bị khoá → `SKIP LOCKED` trả `None` ngay, không chờ; heartbeat thật gia hạn lease; checkpoint trước/sau lưu đúng; nút "Sync" khi worker đang giữ lease → `already_running`. Mutation check: bỏ kiểm tra token trong `finish` → test fencing fail; bỏ kiểm tra lease còn hạn trong `claim` → 2 test fail.

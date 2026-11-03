@@ -1191,9 +1191,9 @@ def connector_test(cid: int, db: Session = Depends(get_db)):
 
 
 @router.post("/api/collector/connectors/{cid}/sync")
-def connector_sync(cid: int, bg: BackgroundTasks):
-    bg.add_task(realtime.run_connector, cid)
-    return {"queued": True}
+def connector_sync(cid: int):
+    started = realtime.start_crawl(cid)
+    return {"queued": started, "already_running": not started}
 
 
 class QueryIn(BaseModel):
@@ -1226,13 +1226,14 @@ def del_query(qid: int, db: Session = Depends(get_db)):
 
 
 @router.post("/api/collector/queries/{qid}/run")
-def run_query(qid: int, bg: BackgroundTasks, db: Session = Depends(get_db)):
+def run_query(qid: int, db: Session = Depends(get_db)):
     q = db.get(TrackedQuery, qid)
     if not q:
         raise HTTPException(404)
+    db.expunge(q)
     db.commit()  # end the request's write transaction: the background run opens its own session and would wait on it
-    bg.add_task(realtime.run_connector, q.connector_id, q)
-    return {"queued": True}
+    started = realtime.start_crawl(q.connector_id, q)
+    return {"queued": started, "already_running": not started}
 
 
 @router.post("/api/collector/export-upload")
@@ -1250,7 +1251,7 @@ async def export_upload(source: str = Form(...), country: str | None = Form(None
                       config={"source": src, "country": country}, enabled=True, every_minutes=5, tier=2, status="ready")
         db.add(c)
     db.commit()  # also ends the read transaction when the connector already existed (see run_query)
-    bg.add_task(realtime.run_connector, c.id)
+    realtime.start_crawl(c.id)  # already running: the file waits in the watch folder for the next run
     return {"connector_id": c.id, "queued": True}
 
 

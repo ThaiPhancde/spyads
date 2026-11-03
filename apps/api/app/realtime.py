@@ -27,6 +27,7 @@ from .db import SessionLocal, ingest_lock
 from .events import publish
 from .ingest import ingest_ads
 from .collector.batches import ingest_batch
+from . import crawl_queue
 from .models import Connector, SearchJob, TrackedQuery
 
 log = logging.getLogger(__name__)
@@ -412,6 +413,8 @@ async def scheduler_loop():
             now = datetime.utcnow()
             from .db import read_only
 
+            crawl_queue.recover(now)  # crawls whose worker died / stalled: lease expired → retried
+            retry = crawl_queue.retry_due(now)  # failed crawls whose backoff is over run before their regular schedule
             with SessionLocal() as db, read_only():
                 due = []
                 for c in db.scalars(select(Connector).where(Connector.enabled.is_(True), Connector.adapter.is_not(None),
@@ -420,21 +423,24 @@ async def scheduler_loop():
                         # watch folder: only "due" when a new file is actually waiting (otherwise it starved real jobs)
                         if _export_has_files(c):
                             due.append((datetime.min, "c", c.id, None))
-                    elif not c.last_sync_at or now - c.last_sync_at >= timedelta(minutes=c.every_minutes):
+                    elif not c.last_sync_at or now - c.last_sync_at >= timedelta(minutes=c.every_minutes) or job_key(c.id) in retry:
                         due.append((c.last_sync_at or datetime.min, "c", c.id, None))
                 for q in db.scalars(select(TrackedQuery).where(TrackedQuery.enabled.is_(True))).all():
-                    if not q.last_run_at or now - q.last_run_at >= timedelta(minutes=q.every_minutes):
+                    if not q.last_run_at or now - q.last_run_at >= timedelta(minutes=q.every_minutes) or job_key(q.connector_id, q) in retry:
                         due.append((q.last_run_at or datetime.min, "q", q.connector_id, q))
                 due.sort(key=lambda x: x[0])  # most overdue first
                 due = [d[1:] for d in due]
             for kind, cid, q in due:
                 if _heavy() >= MAX_PARALLEL_JOBS:
                     break  # the rest run on the next ticks — keeps SQLite writes and Meta rate limits sane
-                key = f"{kind}:{cid}:{q.id if q else ''}"
+                key = job_key(cid, q)
                 if key in _running or cid is None:
                     continue
+                token = claim_crawl(cid, q)
+                if not token:  # another worker holds the lease, or the job is in its retry backoff
+                    continue
                 _running.add(key)
-                asyncio.get_running_loop().run_in_executor(None, _job_wrapper, key, cid, q)
+                asyncio.get_running_loop().run_in_executor(None, _job_wrapper, key, cid, q, token)
             if now - _last_media > timedelta(minutes=2):
                 from .media import enqueue_pending
 
@@ -539,12 +545,44 @@ def _export_has_files(c: Connector) -> bool:
     return folder.is_dir() and any(f.is_file() and f.suffix.lower() in (".csv", ".json", ".xlsx") for f in folder.iterdir())
 
 
-def _job_wrapper(key, cid, q):
+def job_key(cid: int, q: TrackedQuery | None = None) -> str:
+    return f"{'q' if q else 'c'}:{cid}:{q.id if q else ''}"
+
+
+def claim_crawl(cid: int, q: TrackedQuery | None = None) -> str | None:
+    """Lease the crawl (crawl_queue): None while another worker / request runs it or it waits out a retry backoff."""
+    return crawl_queue.claim(job_key(cid, q), "q" if q else "c", cid, q.id if q else None, checkpoint=q.cursor if q else None)
+
+
+def _job_wrapper(key, cid, q, token):
+    """One leased crawl: heartbeat while it waits for a slot and runs, then record the outcome under its token."""
     try:
-        with _slots:
-            run_connector(cid, query=q)
+        with crawl_queue.leased(key, token):
+            with _slots:
+                r = run_connector(cid, query=q)
+        if r.get("error"):
+            crawl_queue.fail(key, token, r["error"])
+        else:
+            cursor = None
+            if q:
+                with SessionLocal() as db:
+                    cursor = (db.get(TrackedQuery, q.id) or q).cursor
+            crawl_queue.finish(key, token, r, checkpoint=cursor)
+    except Exception as e:
+        log.exception("crawl %s failed", key)
+        crawl_queue.fail(key, token, _redact(f"{type(e).__name__}: {e}")[:500])
     finally:
         _running.discard(key)
+
+
+def start_crawl(cid: int, q: TrackedQuery | None = None) -> bool:
+    """Manual "sync now" / "run query": same lease as the scheduler, so a click never runs a crawl the worker is running."""
+    key = job_key(cid, q)
+    token = claim_crawl(cid, q)
+    if not token:
+        return False
+    threading.Thread(target=_job_wrapper, args=(key, cid, q, token), daemon=True, name=f"crawl-{key}").start()
+    return True
 
 
 def _cleanup_job():
