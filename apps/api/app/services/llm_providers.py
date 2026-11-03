@@ -3,6 +3,7 @@
 All three speak the OpenAI chat-completions dialect. A provider entry is "<provider>" (its *_MODEL env) or "<provider>:<model>": Groq and
 Cerebras count their free limits per model, so a second model is a second free quota. Free limits (official docs, checked 2026-11-03):
   cerebras    gpt-oss-120b            5 req/min · 30k tok/min · 1M tok/day        x-ratelimit-remaining-{requests,tokens}-{minute,hour,day}
+  cerebras    qwen-3.8-27b            the same limits again, counted per model (text + images); thinking switched off, see config()
   groq        openai/gpt-oss-120b     30 req/min · 1,000 req/day · 8k tok/min · 200k tok/day — same again for openai/gpt-oss-20b
   cloudflare  @cf/openai/gpt-oss-20b  no headers; usage.neurons per call (free 10,000 neurons/day, reset 00:00 UTC) — counted in our ledger
 Media: qwen-3.8-27b (Cerebras + Groq) reads images (OCR), Groq whisper-large-v3-turbo transcribes audio / video (2,000 req/day, 25 MB).
@@ -35,7 +36,7 @@ def _env(name: str, default: str = "") -> str:
 
 
 OPENAI = ("groq", "cerebras", "cloudflare")
-DEFAULTS = {"LLM_PROVIDERS": "cerebras,groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,cloudflare,gemini",
+DEFAULTS = {"LLM_PROVIDERS": "cerebras,cerebras:qwen-3.8-27b,groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,cloudflare,gemini",
             "VISION_PROVIDERS": "groq:qwen/qwen3.8-27b,cerebras:qwen-3.8-27b,gemini",
             "TRANSCRIBE_PROVIDERS": "groq:whisper-large-v3-turbo,gemini"}
 
@@ -76,7 +77,10 @@ def config(name: str) -> dict | None:
     else:
         return None
     cfg["model"] = model or cfg["model"]
-    cfg["reasoning"] = b != "cloudflare" and "gpt-oss" in cfg["model"]  # reasoning_effort is a gpt-oss parameter (qwen / whisper reject it)
+    cfg["reasoning"] = b != "cloudflare" and "gpt-oss" in cfg["model"]  # reasoning_effort is a gpt-oss parameter (whisper rejects it)
+    # qwen thinks by default and spends the whole max_tokens on it (finish_reason "length", empty answer — measured 2026-11-03, 900 of 900
+    # tokens); each provider switches it off with its own parameter
+    cfg["extra"] = ({"reasoning_effort": "none"} if b == "groq" else {"disable_reasoning": True} if b == "cerebras" else {}) if "qwen" in cfg["model"] else {}
     return cfg
 
 
@@ -343,6 +347,7 @@ def chat(name: str, system: str, user: str, schema: dict | None, max_tokens: int
         body["response_format"] = {"type": "json_schema", "json_schema": {"name": "result", "schema": strict(schema), "strict": True}}
     if cfg["reasoning"]:
         body["reasoning_effort"] = _env("LLM_REASONING_EFFORT", "low")  # gpt-oss: fewer hidden reasoning tokens on a free quota
+    body.update(cfg["extra"])
     r, ms = _post(name, cfg["url"], kind, timeout, json=body)
     if r is None:
         return "error", None

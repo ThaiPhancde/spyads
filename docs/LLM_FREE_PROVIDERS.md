@@ -51,7 +51,7 @@ Kiểm tra ngày 03/11/2026 trên nhánh `llm-free-providers` (tách từ `main`
 Có ba chuỗi; mỗi chuỗi thử lần lượt đến khi một provider trả lời được:
 
 ```
-Văn bản   LLM_PROVIDERS        cerebras → groq:openai/gpt-oss-120b → groq:openai/gpt-oss-20b → cloudflare → gemini
+Văn bản   LLM_PROVIDERS        cerebras → cerebras:qwen-3.8-27b → groq:openai/gpt-oss-120b → groq:openai/gpt-oss-20b → cloudflare → gemini
 Ảnh       VISION_PROVIDERS     groq:qwen/qwen3.8-27b → cerebras:qwen-3.8-27b → (Tesseract cục bộ) → gemini
 Lời nói   TRANSCRIBE_PROVIDERS groq:whisper-large-v3-turbo → gemini
 ```
@@ -154,7 +154,7 @@ notepad .env
 ```
 CEREBRAS_API_KEY=csk-...
 GROQ_API_KEY=gsk_...
-LLM_PROVIDERS=cerebras,groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,cloudflare,gemini
+LLM_PROVIDERS=cerebras,cerebras:qwen-3.8-27b,groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,cloudflare,gemini
 ```
 
 > Trên máy này, dòng `LLM_PROVIDERS` cũ (`groq,cerebras,cloudflare,gemini,claude`) **đã được đổi** sang dòng trên; bản sao lưu nằm trong thư mục scratchpad của phiên làm việc. Dòng `CLOUDFLARE_AI_MODEL=` không có tác dụng (code đọc `CF_AI_MODEL`), có thể xoá.

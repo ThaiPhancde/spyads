@@ -1,5 +1,5 @@
 """LLM access for the whole app — free providers only, three chains (llm_providers.py has the providers and their limits):
-  text        LLM_PROVIDERS         cerebras → groq gpt-oss-120b → groq gpt-oss-20b → cloudflare → gemini   complete_json / complete_text
+  text        LLM_PROVIDERS         cerebras → cerebras qwen → groq gpt-oss-120b → groq gpt-oss-20b → cloudflare → gemini   complete_json / complete_text
   vision      VISION_PROVIDERS      groq qwen3.8-27b → cerebras qwen-3.8-27b → gemini                       read_image (OCR of a thumbnail)
   transcribe  TRANSCRIBE_PROVIDERS  groq whisper-large-v3-turbo → gemini                                    transcribe (speech in a clip)
 

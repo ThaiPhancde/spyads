@@ -71,9 +71,9 @@ def test_an_optional_field_becomes_nullable_not_dropped():
 
 
 def test_default_chains_and_per_model_entries(keys):
-    assert P.providers() == ["cerebras", "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b", "cloudflare", "gemini"]
+    assert P.providers() == ["cerebras", "cerebras:qwen-3.8-27b", "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b", "cloudflare", "gemini"]
     assert P.config("groq:openai/gpt-oss-20b")["model"] == "openai/gpt-oss-20b" and P.config("groq:qwen/qwen3.8-27b")["reasoning"] is False
-    assert llm.chain() == ["cerebras", "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b"]  # no Cloudflare / Gemini key here
+    assert llm.chain() == ["cerebras", "cerebras:qwen-3.8-27b", "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b"]  # no Cloudflare / Gemini key here
     assert llm.chain(env="TRANSCRIBE_PROVIDERS") == ["groq:whisper-large-v3-turbo"]
 
 
@@ -92,7 +92,8 @@ def test_off_schema_answer_is_not_a_provider_outage(keys, monkeypatch):
         return ok(json.dumps({"results": []}))
     calls = fake_http(monkeypatch, handler)
     assert llm.complete_json("s", "u", naming_ai.SCHEMA, kind="naming") == {"results": []}
-    assert [c["url"].split("/")[2] for c in calls] == ["api.cerebras.ai", "api.groq.com"] and llm.last_provider["name"] == "groq:openai/gpt-oss-120b"
+    # both Cerebras entries (gpt-oss, qwen) are tried before the chain moves on to Groq
+    assert [c["url"].split("/")[2] for c in calls] == ["api.cerebras.ai", "api.cerebras.ai", "api.groq.com"] and llm.last_provider["name"] == "groq:openai/gpt-oss-120b"
     P._mem_at["t"] = 0
     assert P.ready("cerebras")[0] is True
     with SessionLocal() as s:
@@ -162,11 +163,11 @@ def test_gemini_has_one_daily_cap_for_every_feature(clean, monkeypatch):
 
 
 # ---------------------------------------------------------------- vision + transcribe chains
-def test_ocr_sends_the_image_to_the_free_vision_model_without_reasoning_effort(keys, monkeypatch):
+def test_ocr_sends_the_image_to_the_free_vision_model_with_thinking_off(keys, monkeypatch):
     calls = fake_http(monkeypatch, lambda url, body: ok("BUY 1 TAKE 1 bracelet"))
     assert llm.read_image("read it", b"\xff\xd8jpg", "image/jpeg", kind="ocr") == "BUY 1 TAKE 1 bracelet"
     b = calls[0]["body"]
-    assert b["model"] == "qwen/qwen3.8-27b" and "reasoning_effort" not in b
+    assert b["model"] == "qwen/qwen3.8-27b" and b["reasoning_effort"] == "none"
     assert b["messages"][1]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
 
@@ -215,3 +216,15 @@ def test_agent_schema_lets_the_model_say_not_mentioned():
     for k in ("fast_growing", "hidden_winner", "limit", "country", "days"):
         assert "null" in props[k]["type"], k
     assert agent.SPEC_SCHEMA["properties"]["intent"]["type"] == "string"  # the intent is never optional
+
+
+def test_qwen_is_asked_not_to_think_with_each_providers_own_parameter(keys, monkeypatch):
+    """qwen-3.8-27b spent all 900 max_tokens on reasoning and returned an empty answer: Cerebras naming 0/60, keyword meaning 1/6."""
+    calls = fake_http(monkeypatch, lambda url, body: ok(json.dumps({"results": []})))
+    P.chat("groq:qwen/qwen3.8-27b", "s", "u", {"type": "object"}, 100)
+    P.chat("cerebras:qwen-3.8-27b", "s", "u", {"type": "object"}, 100)
+    P.chat("cerebras", "s", "u", {"type": "object"}, 100)
+    g, c, gpt = (x["body"] for x in calls)
+    assert g["reasoning_effort"] == "none" and "disable_reasoning" not in g
+    assert c["disable_reasoning"] is True and "reasoning_effort" not in c
+    assert gpt["reasoning_effort"] == "low" and "disable_reasoning" not in gpt
