@@ -464,3 +464,47 @@ Các ca kiểm thử bắt buộc của addendum:
 
 Chưa kiểm thử với Meta thật hay extension cài trong Chrome thật; chưa chạy tải 24–72 giờ.
 
+## P1 (phần còn thiếu), P3, P4, P5 — 2026-11-03, nhánh `meta-p1-p5`
+
+Chồng lên `meta-p2-graphql-health`. Mỗi phần một commit:
+
+| Commit | Phần |
+|---|---|
+| `b9a8f13` | P1: envelope của batch, UNIQUE ở DB, outcome của lần chạy, outbox có giới hạn / jitter / nút gửi lại |
+| `7f59924` | P3: fingerprint video v2 có version, claim `efg` |
+| `3e4d3fb` | P4: quan sát tái sử dụng video và chỉ số thử nghiệm |
+| `82b8e86` | P5: secret mã hoá khi lưu, lọc raw lake, cách ly, hạn mức theo thị trường, KPI vận hành |
+
+Thiết kế, lý do và giới hạn: [META_RELIABILITY_GAP_AUDIT.md](META_RELIABILITY_GAP_AUDIT.md) mục 7–11.
+
+### Migration
+
+Tất cả là thay đổi cộng thêm, nằm trong `python -m app.meta_collector_migrate`, tự chạy khi API/worker khởi động:
+
+| Bảng | Thay đổi |
+|---|---|
+| `collector_ingest_batches` | thêm `source`, `job_id`, `batch_id`, `fetched_at`, `schema_version`, `cursor_before`, `cursor_after`, `outbox_backlog` |
+| `crawl_runs` | thêm `outcome`, `schema_version` |
+| `creatives` | thêm `video_fp_v2`, `media_claims` |
+| Bảng mới | `creative_reuse_observations`, `ingest_quarantine` |
+| UNIQUE index | `uq_ads_source_external`, `uq_ad_sources_source_ad`, `uq_ingest_batches_job_batch`. Có bản ghi trùng thì migration bỏ qua kèm cảnh báo, không bao giờ xoá dữ liệu. DB thật đã kiểm tra: 0 bản ghi trùng |
+
+Đã chạy 2 lần liên tiếp trên PostgreSQL test: đủ bảng, cột và index, không lỗi.
+
+**Dependency mới:** `cryptography>=42` (Fernet), chỉ dùng cho `secrets_box`.
+
+**Biến môi trường mới:** `CREDENTIALS_KEY`, `MARKET_RPM` (10), `REUSE_EVERY_MIN` (60).
+
+### Kết quả kiểm thử (2026-11-03, chạy thật)
+
+| Bộ | Kết quả |
+|---|---|
+| Test mới viết trước khi cài đặt (TDD) | P1, P5: lỗi import hoặc thất bại; outbox: 3 failed; P3: lỗi import; ca extension đổi cấu trúc với code cũ: FAIL |
+| Toàn bộ `apps/api/tests`, SQLite | **590 passed**, 4 skipped, 0 failed |
+| 12 file test của P0–P5 và độ tin cậy, PostgreSQL 18 | **146 passed** |
+| Extension `test_outbox.js` / `test_injected.js` | 6/6 · 10/10 |
+| `tsc --noEmit` apps/web | 0 lỗi |
+| `scripts/verify_collector_browser.py` (API + Next + trình duyệt thật, SQLite tạm) | **22/22**: tab Giám sát hiển thị dòng "Vận hành" và "Kết quả lượt chạy", không lỗi trang |
+
+Chưa kiểm thử: Meta thật, extension trong Chrome thật, bench FP/FN trên video thật, chạy tải 24–72 giờ. Chưa gọi là sẵn sàng production.
+

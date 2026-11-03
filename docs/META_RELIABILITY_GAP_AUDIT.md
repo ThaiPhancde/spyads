@@ -130,14 +130,11 @@ Ba trường hợp khác đã kiểm chứng là **đúng, không cần sửa**,
 
 ## 5. Backlog (chưa triển khai)
 
-**P1 — ingest transaction và checkpoint bền vững:**
-- Mỗi batch có thêm `job_id`, `page_cursor_before/after`, `batch_id`, `fetched_at`, `schema_version`; ràng buộc UNIQUE(`job_id`, `batch_id`). Hiện idempotency dựa trên khoá batch và biên nhận `IngestBatch`.
-- Bảng trạng thái đầy đủ: `complete/partial/rate_limited/schema_changed/auth_required/blocked/failed/cancelled`. Hiện có `page/empty/end/partial/cycle` và health `blocked/rate_limited/error`.
-- Outbox của extension: jitter, giới hạn dung lượng, nút thử lại cho batch `dead` trên popup, gzip.
+**P1 — ingest transaction và checkpoint bền vững:** ✅ phần còn thiếu đã làm ở nhánh `meta-p1-p5`, xem mục 7.
 
 **P2 — phân trang GraphQL và theo dõi cấu trúc:** ✅ đã làm ở nhánh `meta-p2-graphql-health`, xem mục 6.
 
-**P3–P5:** xem addendum. Gồm `video_fp_v2` dạng cell-mean có version, efg chỉ là metadata không xác minh, `creative_reuse_observations`, worker kiểm tra URL, hạn mức theo thị trường, alert khi nguồn âm thầm trả 0.
+**P3–P5:** ✅ đã làm ở nhánh `meta-p1-p5`, xem các mục 8–10.
 
 ## 6. P2 — GraphQL schema health và chẩn đoán phân trang (nhánh `meta-p2-graphql-health`)
 
@@ -155,4 +152,63 @@ Chưa làm trong P2:
 - Phía server chưa tự parse JSON nhiều dòng (việc đó nằm trong thư viện), mới chỉ phát hiện và dùng SSR cho trang 1.
 - Chưa ghi chuỗi trang rỗng liên tiếp riêng; `empty_pages` là tổng.
 - Chưa gửi cảnh báo ra ngoài (email/Slack); hiện chỉ có health, bảng `events` và tab Giám sát.
+
+## 7. P1 — phần còn thiếu (nhánh `meta-p1-p5`)
+
+Đánh giá lại ngày 03/11/2026: Phase 1 cũ đã làm **phần lõi** của P1 nhưng chưa đủ. Ở lượt trước tôi bỏ qua P1 theo chỉ dẫn "P1/P2 chỉ đưa vào backlog" mà không đối chiếu code; lượt này đã đối chiếu lại.
+
+| Yêu cầu P1 | Đã có từ Phase 1 | Bổ sung |
+|---|---|---|
+| Batch có `job_id`, `page_cursor_before/after`, `batch_id`, `source`, `fetched_at`, `schema_version` | Crawl phía server: `crawl_runs` (`job_key`, `run_token`, `checkpoint_before/after`, `started_at`). Extension: chỉ có khoá idempotency | Biên nhận `collector_ingest_batches` lưu đủ các trường. Extension 0.3.0 gửi `job_id` (một phiên tab), `batch_id`, `fetched_at`, `schema_version` (`adlib-capture-1`), `cursor_before/after` (lấy từ `page_info.end_cursor` của chính response). `crawl_runs.schema_version` (`adlib-graphql-1`) |
+| Lưu ads + nguồn + ACK + checkpoint trong một transaction; checkpoint chỉ tiến sau ACK | ✅ | — |
+| UNIQUE(source, source_ad_id), UNIQUE(job_id, batch_id) | **Không có**: chống trùng chỉ dựa vào tra cứu dưới `ingest_lock` | `uq_ads_source_external`, `uq_ad_sources_source_ad`, `uq_ingest_batches_job_batch`. Migration đếm bản ghi trùng trước, có trùng thì **bỏ qua kèm cảnh báo, không xoá**. DB thật: 0 trùng trên 26 777 ads / 27 266 ad_sources. Cùng (job, batch) dưới khoá khác → 409. Không dùng `INSERT … ON CONFLICT` vì việc tra cứu dưới khoá đã tuần tự; UNIQUE là lưới an toàn |
+| Bảo toàn ID anh em và `collation_count` | ✅ (`meta_collations`, `AdSource`, `Ad.variants`) | — |
+| Outbox IndexedDB, ACK từng batch, không bỏ sau 3 lần lỗi, backoff mũ | ✅ | **jitter ±20%**; giới hạn **5 000 batch** (đầy thì từ chối rõ ràng, không âm thầm bỏ); popup hiện số batch chờ/bị từ chối và nút **"Gửi lại ngay"** |
+| Bảng trạng thái `complete/partial/rate_limited/schema_changed/auth_required/blocked/failed/cancelled` | Một phần (health, `page_status`) | `crawl_runs.outcome`. `complete` chỉ khi mọi cursor đều hết trang; `cancelled` = mất lease; lỗi ánh xạ theo health. Hiện trên tab Giám sát |
+
+Test: `tests/test_meta_p1_envelope.py` (16), `test_outbox.js` (+3: jitter, đầy, gửi lại), `test_injected.js` (+1: `end_cursor`). Hai test trong `test_cluster_phase1.py` đã đổi sang trường hợp thực tế: cùng ID Facebook đến từ nguồn thứ hai. Việc gom cụm nhận diện trùng theo network, nên UNIQUE theo source vẫn cho phép trường hợp này.
+
+## 8. P3 — fingerprint video có version
+
+- **`creatives.video_fp_v2`** (JSON) gồm `{algorithm: "cellmean-dhash", version: 2, grid: [9, 8], frame_positions: [0.2, 0.5, 0.8], frame_hashes, duration, source, observed_at, confidence}`. Mỗi khung chia lưới 9×8, lấy độ sáng trung bình mỗi ô rồi so các ô cạnh nhau, được 64 bit. Cách này khác v1 (PIL thu nhỏ rồi so pixel) và độc lập với cách thu nhỏ của PIL.
+- **Tính ở đâu:** từ chính các khung đã giải mã cho v1, lúc video được lưu. Không bao giờ ghi đè `video_fp` (v1) hay `phash` (ảnh bìa).
+- **So sánh:** `same_video_v2` chỉ so khi cùng thuật toán + version, khác thì trả `None`. Khi gom family video, dùng v2 nếu cả hai đều có, nếu không thì v1 với v1; **không bao giờ so v1 với v2**. Family video không gộp sản phẩm.
+- **`efg`:** `creatives.media_claims` = `{age_claim_days, xpv_asset_id, duration_s, claimed_at, evidence_type: "efg_url_metadata", confidence: "unverified"}`. Parse có giới hạn (≤ 4 KB, kiểm tra kiểu, không bao giờ raise). **Không** phải `verified_upload_date`, và không phần chấm điểm nào đọc.
+- **Không tải video hàng loạt:** chỉ backfill từ file **đã lưu** của ToolSpy (`python -m app.media --fingerprint-v2 N`), không tải từ nguồn, không re-encode, có giới hạn số video mỗi lần.
+- **Bench FP/FN:** `scripts/bench_video_fp.py pairs.csv` chạy trên **cặp video do người gán nhãn**. Repo chưa có bộ nhãn nào, nên **chưa có số FP/FN thật**.
+- **Ngưỡng `V2_DISTANCE = 10`/64 bit** được chọn từ fixture tự tạo; cần bench thật để chỉnh.
+- **Chưa giải quyết:** video bị cắt đầu làm lệch vị trí 20/50/80% nên có thể không khớp.
+
+Test: `tests/test_video_fp_v2.py` (20). Fixture là ảnh tự vẽ qua các biến đổi: nén lại, thu nhỏ, đổi tỉ lệ, chèn chữ, cắt viền, khung khác nhau. Có thêm video tạo bằng ffmpeg: bản render khác, chèn chữ, đổi tỉ lệ, một video khác, video đen.
+
+## 9. P4 — insight tái sử dụng video/creative
+
+- **Bảng `creative_reuse_observations`:** mỗi dòng là một (family, ad) với page, nhà quảng cáo, thị trường, nguồn, thời điểm ta *thấy* đầu/cuối (từ `AdSource`, không phải ngày delivery của Meta), và bằng chứng (`video_fp_v2` > `video_fp_v1` > `poster_phash`, độ tin cậy, link Ad Library). Worker làm mới mỗi `REUSE_EVERY_MIN` (60 phút); chạy lại nhiều lần không sinh dòng trùng.
+- **Chỉ số thử nghiệm** `ad_count`, `collation_variants`, `distinct_pages`, `distinct_shop_id`, `new_distinct_pages_7d`, `reuse_velocity_7d`, `earliest_observed_video_at`. Định nghĩa nằm trong docstring của `app/creative_reuse.py`, để không nhầm 4 bộ đếm. Bộ chấm điểm không đọc các chỉ số này; có test xác nhận điểm và khuyến nghị của sản phẩm không đổi.
+- **API và giao diện:** `GET /api/products/{id}/creative-reuse`, và thẻ "Video được tái sử dụng (thử nghiệm)" trong tab Creative Library (bằng chứng, độ tin cậy, link Ad Library, thời điểm quan sát).
+- **Theo dõi đối thủ theo Page ID:** đã có sẵn. Feed của MKT không đổi.
+
+Test: `tests/test_creative_reuse.py` (6).
+
+## 10. P5 — bảo mật và vận hành
+
+| Yêu cầu | Kết quả |
+|---|---|
+| SSRF trước khi worker đọc URL | **Audit: đã có.** Mọi URL lấy từ dữ liệu (media, trang đích, trang sản phẩm EU/giá) đi qua `netsafe` (http(s), IP public, kiểm tra lại ở từng bước redirect, giới hạn dung lượng và thời gian). Các lời gọi `httpx` khác tới endpoint cố định của nhà cung cấp. Không cần sửa |
+| Cách ly dữ liệu lỗi | **Mới:** bảng `ingest_quarantine` (bản ghi bị kiểm tra dữ liệu hoặc DB từ chối, đã lọc credential, ≤ 20 KB, TTL 30 ngày) |
+| Không lưu token/cookie/bearer trong raw batch hay log | **Mới:** `storage.scrub()` bỏ các khoá cookie / authorization / fb_dtsg / lsd / token / sessionid…, và che tham số `access_token=` / `api_key=` trong URL. Áp dụng cho raw lake và bản ghi cách ly. Header TikTok tự thu thập vốn chỉ nằm trong bộ nhớ |
+| Mã hoá thông tin đăng nhập | **Mới:** `app/secrets_box.py` (Fernet, thư viện `cryptography`). Có `CREDENTIALS_KEY` thì các trường secret được niêm phong khi ghi và chỉ mở trong `ConnectorFactory.get`. Không có khoá thì hành vi y như cũ, và KPI `credentials_unencrypted` báo số secret còn để nguyên văn |
+| Lease, heartbeat, SKIP LOCKED, phục hồi sau crash | Đã có (Phase 3) |
+| Hạn mức tốc độ chung và theo thị trường | **Mới:** `MARKET_RPM` (mặc định 10 request/phút cho mỗi nước) dùng chung cho mọi crawl trong tiến trình, chồng lên bucket chung của adapter. Giới hạn theo tiến trình: API và worker mỗi bên có bucket riêng |
+| Giám sát | **Mới:** độ tươi dữ liệu theo nguồn, ad/trang, tỉ lệ trùng, outbox extension (gửi kèm mỗi batch và loại khỏi mã băm payload), độ lệch vân tay v1/v2, số bản ghi bị cách ly, số secret chưa mã hoá. Sự kiện `SOURCE_ZERO_RESULTS` khi nguồn âm thầm trả 0. Các chỉ số đã có: số trang, vòng cursor, độ khả dụng video, job lỗi |
+
+Test: `tests/test_meta_p5_security_ops.py` (10).
+
+## 11. Việc còn mở sau P0–P5
+
+- **Bench FP/FN trên video thật:** cần bộ cặp video do người gán nhãn. Ngưỡng v2 chưa được chỉnh theo dữ liệu thật.
+- **Chạy với Meta thật và extension cài trong Chrome thật:** chưa thử. Chưa chạy tải 24–72 giờ, nên **chưa gọi là sẵn sàng production**.
+- **Mã hoá secret:** chỉ có hiệu lực khi đặt `CREDENTIALS_KEY` và chạy `--seal-existing`. Mất khoá thì phải nhập lại secret.
+- **Hạn mức tốc độ:** hiện theo từng tiến trình. Muốn dùng chung giữa API và worker thì cần một bộ đếm trong DB hoặc Redis.
+- **Cảnh báo:** hiện qua health, bảng `events` và tab Giám sát; chưa gửi ra email hay Slack.
 
