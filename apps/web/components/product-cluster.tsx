@@ -11,7 +11,6 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, fmt, useAction, useApi } from "@/lib/api";
-import { getUser } from "@/lib/realtime";
 
 const AD_TYPE: Record<string, string> = {
   PRODUCT_AD: "Sản phẩm", MULTI_PRODUCT_AD: "Nhiều SP", SERVICE_AD: "Dịch vụ", CONTENT_AD: "Giải trí", BRAND_AD: "Thương hiệu", UNKNOWN: "Chưa rõ",
@@ -24,11 +23,10 @@ export function ProductCluster({ p, ads, onChange }: { p: any; ads: any[]; onCha
   const [target, setTarget] = useState("");
   const merges = useApi(`/products/${p.id}/merges`);
   const act = useAction();
-  const user = () => getUser().name || null;
   const toggle = (id: number) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   const split = () => act.run(async () => {
-    const r = await api(`/products/${p.id}/split`, { method: "POST", body: JSON.stringify({ ad_ids: [...sel], name: splitName || null, user: user() }) });
+    const r = await api(`/products/${p.id}/split`, { method: "POST", body: JSON.stringify({ ad_ids: [...sel], name: splitName || null }) });
     toast.success(`Đã tách ${sel.size} ad sang sản phẩm mới`, { action: { label: "Mở", onClick: () => window.open(`/products/${r.new_id}`, "_blank") } });
     if (r.duplicate) toast.message(`Tên trùng với ${r.duplicate.name} (${r.duplicate.product_code}) — có thể gộp`);
     setSel(new Set()); setSplitName(""); onChange(); merges.reload();
@@ -38,12 +36,12 @@ export function ProductCluster({ p, ads, onChange }: { p: any; ads: any[]; onCha
     const found = /^\d+$/.test(q) ? { id: Number(q) } : (await api(`/products?q=${encodeURIComponent(q)}&country=ALL&limit=1`)).rows?.[0];
     if (!found) throw new Error(`Không thấy sản phẩm "${q}"`);
     if (!window.confirm(`Gộp sản phẩm này vào #${found.id}${found.name ? ` (${found.name})` : ""}? Có thể hoàn tác ở sản phẩm đích.`)) return;
-    await api(`/products/merge`, { method: "POST", body: JSON.stringify({ source_id: p.id, target_id: found.id, user: user() }) });
+    await api(`/products/merge`, { method: "POST", body: JSON.stringify({ source_id: p.id, target_id: found.id }) });
     toast.success("Đã gộp — mở sản phẩm đích để hoàn tác nếu cần");
     window.location.href = `/products/${found.id}`;
   });
   const undo = (eid: number) => act.run(async () => {
-    await api(`/products/${p.id}/merges/${eid}/undo`, { method: "POST", body: JSON.stringify({ user: user() }) });
+    await api(`/products/${p.id}/merges/${eid}/undo`, { method: "POST" });
     toast.success("Đã hoàn tác"); onChange(); merges.reload();
   });
 

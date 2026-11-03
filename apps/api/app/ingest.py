@@ -22,7 +22,8 @@ from .collector.contract import AdRecord, validate
 from .events import publish
 from .db import read_only
 from .markets import known_country
-from .models import Ad, AdSource, Creative, Product
+from .models import Ad, AdSource, Creative, MetaCollation, Product
+from sqlalchemy.exc import DataError, IntegrityError
 from .platforms import channel_of, network_of
 from .services import content_filter
 from .services import enrichment as E
@@ -155,13 +156,14 @@ def cross_source_key(rec: AdRecord) -> str | None:
 
 
 # ------------------------------------------------------------ main entry
-def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None, allow_llm: bool = True) -> dict:
+def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None, allow_llm: bool = True, *, atomic: bool = False) -> dict:
     stats = {"received": len(records), "new_ads": 0, "updated_ads": 0, "merged_cross_source": 0, "invalid": 0,
              "new_products": 0, "creatives_queued": 0, "excluded_entertainment": 0, "errors": []}
     # short drama / movie / streaming / podcast ads: dropped before the raw batch, the LLM pass and product clustering
     records, stats["excluded_entertainment"] = content_filter.screen(db, records)
     if not records:
-        db.commit()  # keep the new exclusion rows
+        if not atomic:
+            db.commit()  # keep the new exclusion rows
         return {**stats, "product_ids": [], "ad_ids": [], "listing_ids": []}
     by_source: dict[str, list[dict]] = {}
     for r in records:
@@ -171,7 +173,8 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
     # optional LLM pass: product name + "is this a physical product?" for NEW ads without a usable product URL
     # (a refresh keeps its name — calling the LLM for every re-seen ad burned the quota, audit §4)
     known: set[tuple[str, str]] = set()
-    db.commit()  # end any open transaction: the lookup below must not take the write lock…
+    if not atomic:
+        db.commit()  # end any open transaction: the lookup below must not take the write lock…
     with read_only():  # …and the LLM call after it (network, up to minutes) must run with no SQLite lock held at all
         for src in by_source:  # ponytail: one IN() per source, batches are a few hundred ids at most
             ids = [r.source_ad_id for r in records if r.source == src]
@@ -179,11 +182,12 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
             known |= {(src, i) for i in db.scalars(select(Ad.external_id).where(Ad.source == src, Ad.external_id.in_(ids)))}
             for plat in {r.platform for r in records if r.source == src and r.platform in MARKETPLACE_ITEM_IDS}:
                 known |= {(src, i) for i in db.scalars(select(Ad.external_id).where(Ad.platform == plat, Ad.external_id.in_(ids)))}
-    db.commit()
+    if not atomic:
+        db.commit()
     hints: dict[int, dict] = {}
     # model pass only for NEW ads the rules cannot name (no listing title / product URL / product noun in the copy)
     weak = [i for i, r in enumerate(records) if (r.source, r.source_ad_id) not in known and not naming.best(naming_input(r))["name"]]
-    if weak and allow_llm:
+    if weak and allow_llm and not atomic:
         ex = E.extract_products([{"text": records[i].ad_text, "title": records[i].title, "url": records[i].landing_page} for i in weak])
         if ex:
             hints = {i: e for i, e in zip(weak, ex)}
@@ -210,6 +214,10 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
             with db.begin_nested():
                 ad, created, product_created = _upsert_ad(db, rec, raw_keys.get(rec.source), saved_by, now, stats, price_source,
                                                           (h or {}).get("product_name") if (h or {}).get("is_physical_product", True) else None)
+                group = str((rec.raw_source or {}).get("collation_id") or "") if rec.source == "meta_library" else ""
+                if group and not db.get(MetaCollation, (rec.source, rec.page_id or "", group)):
+                    db.add(MetaCollation(source=rec.source, page_id=rec.page_id or "", collation_id=group, ad_id=ad.id))
+                    db.flush()
                 mq = (rec.matched_query or "").lower().strip()
                 # No keyword tag on search_text. A source's own matching is loose: Meta matches each word ("kính mắt" → window-glass
                 # ads), AliExpress / 1688 return unrelated listings for a foreign-language keyword. Tagging every hit with the
@@ -225,6 +233,10 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
                 new_creatives += _attach_creatives(db, ad, rec)
                 db.flush()
         except Exception as e:
+            # atomic batch: a record the DB rejects (its savepoint rolled back) is skipped like before — re-fetching the page
+            # would hit it again forever; anything else (lost connection, disk, bug) aborts the batch and its checkpoint
+            if atomic and not isinstance(e, (IntegrityError, DataError, ValueError)):
+                raise
             stats["errors"].append(f"{rec.source}:{rec.source_ad_id}: {type(e).__name__}: {e}")
     db.flush()
     from .services import adsignals
@@ -233,10 +245,12 @@ def ingest_ads(db: Session, records: list[AdRecord], saved_by: str | None = None
     from .services.cluster_membership import sync as sync_clusters
     sync_clusters(db, ad_ids)
     stats["creatives_queued"] = len(new_creatives)
-    db.commit()
-    from . import media
-
-    media.enqueue(new_creatives)
+    if atomic:
+        db.info.setdefault("collector_media", set()).update(new_creatives)
+    if not atomic:
+        db.commit()
+        from . import media
+        media.enqueue(new_creatives)
     stats["errors"] = stats["errors"][:20]
     return {**stats, "product_ids": sorted(product_ids), "ad_ids": ad_ids, "listing_ids": listing_ids}
 
@@ -248,9 +262,16 @@ def _count(v) -> int | None:
 
 def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | None, now: datetime, stats: dict,
                price_source: str | None = None, llm_name: str | None = None):
+    group = str((rec.raw_source or {}).get("collation_id") or "") if rec.source == "meta_library" else ""
+    group_key = (rec.source, rec.page_id or "", group)
+    collation = db.get(MetaCollation, group_key) if group else None
     prov = db.scalar(select(AdSource).where(AdSource.source == rec.source, AdSource.source_ad_id == rec.source_ad_id))
     ad = db.get(Ad, prov.ad_id) if prov else None
-    if ad is not None and ad.source == rec.source and ad.external_id != rec.source_ad_id:
+    if ad is not None and not group and rec.source == "meta_library":
+        # A refresh may omit collation metadata; retain a previously verified source-ID alias.
+        collation = db.scalar(select(MetaCollation).where(MetaCollation.ad_id == ad.id,
+            MetaCollation.source == rec.source, MetaCollation.page_id == (rec.page_id or "")).limit(1))
+    if ad is not None and ad.source == rec.source and ad.external_id != rec.source_ad_id and not (collation and collation.ad_id == ad.id):
         db.delete(prov)  # wrongly merged into another ad of the same source (old fingerprint rule): give it its own row
         db.flush()
         prov = ad = None
@@ -258,6 +279,8 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
         ad = db.scalar(select(Ad).where(Ad.source == rec.source, Ad.external_id == rec.source_ad_id))
     if ad is None and rec.platform in MARKETPLACE_ITEM_IDS:  # marketplace item id is global: the same offer from another
         ad = db.scalar(select(Ad).where(Ad.platform == rec.platform, Ad.external_id == rec.source_ad_id).limit(1))  # provider
+    if ad is None and collation:
+        ad = db.get(Ad, collation.ad_id)
     xkey = cross_source_key(rec)
     if ad is None and xkey:  # same source + different ad id = a different ad (other video / audience), never merge
         ad = db.scalar(select(Ad).where(Ad.creative_fingerprint == xkey, Ad.source != rec.source,  # same network only:
@@ -279,7 +302,13 @@ def _upsert_ad(db: Session, rec: AdRecord, raw_key: str | None, saved_by: str | 
             if ad.product_id and (p := db.get(Product, ad.product_id)) and not p.country:
                 p.country = cc
         ad.last_seen_at = max(ad.last_seen_at, min(last, now))
-        if rec.active is not None:
+        # first seen through a dateless source (TikTok Top Ads = collection day), a source with a start date may go earlier
+        if (first := _dt(rec.first_seen)) and min(first, now) < ad.first_seen_at:
+            ad.first_seen_at = min(first, now)
+            if ad.product_id and (p := db.get(Product, ad.product_id)) and ad.first_seen_at < p.first_seen_at:
+                p.first_seen_at = ad.first_seen_at
+        # a collation sibling (alias id) may confirm the group is running, never stop it: its own status is not the card's
+        if rec.active is not None and not (rec.active is False and ad.source == rec.source and ad.external_id != rec.source_ad_id):
             if rec.active and not ad.is_active:  # seen running again after we marked it stopped
                 ad.reactivated_at, ad.inactive_at = now, None
                 publish("AD_REACTIVATED", {"ad_id": ad.id}, product_id=ad.product_id, db=db)

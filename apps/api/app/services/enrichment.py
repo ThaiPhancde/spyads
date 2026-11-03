@@ -289,9 +289,9 @@ FX_TO_USD = {"SAR": 0.27, "AED": 0.27, "KWD": 3.25, "QAR": 0.27, "OMR": 2.6, "BH
 
 
 def price_segment(price: float | None, currency: str | None) -> str | None:
-    if not price:
+    usd = to_usd(price, currency) if price else None
+    if usd is None:
         return None
-    usd = price * FX_TO_USD.get((currency or "USD").upper(), 1)
     if usd < 15:
         return "budget (<$15)"
     if usd < 35:
@@ -301,10 +301,33 @@ def price_segment(price: float | None, currency: str | None) -> str | None:
     return "premium (>$70)"
 
 
+_LIVE_USD: dict[str, float] = {}  # ECB-derived USD per unit, loaded by refresh_rates(); FX_TO_USD stays the fallback
+
+
+def refresh_rates(db) -> int:
+    """Load the ECB reference rates the scheduler already stores (eu_fx_rates, units per EUR, ~30 currencies incl. JPY / INR /
+    KRW / PHP / CNY) as USD per unit. SAR / AED / EGP … are not ECB currencies and keep the static rate. Called at API start
+    and before every daily re-score; a failure keeps whatever was loaded before."""
+    try:
+        from ..eu_market.service import fx_table
+
+        table = fx_table(db)
+    except Exception:  # noqa: BLE001 — no table yet / EU module unavailable: static rates only
+        return 0
+    usd_per_eur = (table.get("USD") or (None,))[0]
+    if not usd_per_eur:
+        return 0
+    _LIVE_USD.clear()
+    _LIVE_USD.update({cur: usd_per_eur / rate for cur, (rate, _) in table.items() if rate})
+    _LIVE_USD["USD"] = 1.0
+    return len(_LIVE_USD)
+
+
 def to_usd(price: float | None, currency: str | None) -> float | None:
-    if price is None:
-        return None
-    return price * FX_TO_USD.get((currency or "USD").upper(), 1)
+    """None for an unknown currency — never ×1. A missing currency is read as USD. ECB rate when loaded, else static."""
+    cur = (currency or "USD").upper()
+    rate = _LIVE_USD.get(cur) or FX_TO_USD.get(cur)
+    return None if price is None or rate is None else price * rate
 
 
 def classify_market(country: str | None, platform: str | None, category: str | None, price: float | None,

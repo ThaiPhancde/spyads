@@ -27,4 +27,4 @@ if ($env:DISABLE_SCHEDULER -in "1","true") {
 }
 Start-Process -WindowStyle Hidden -WorkingDirectory $web -FilePath "npm.cmd" -ArgumentList "run","dev"
 Write-Host "API: http://localhost:8000/docs   Web: http://localhost:3000/login"
-Write-Host "ADMIN ban dau: cd apps/api; .venv/Scripts/python.exe -m app.workspace.cli create-admin"
+Write-Host "Tao tai khoan MKT: cd apps/api; .venv/Scripts/python.exe -m app.workspace.cli create-user"

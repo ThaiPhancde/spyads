@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ReactNode, useState } from "react";
 import { Check, ExternalLink, History, ImageOff, Megaphone, ScanSearch, Tag, X } from "lucide-react";
 import { toast } from "sonner";
+import { EU_VISIBLE } from "@/components/layout/nav";
 import { SimpleSelect } from "@/components/simple-select";
 import { Card, Empty, Pill, type Tone } from "@/components/ui";
 import { Badge } from "@/components/ui/badge";
@@ -25,7 +26,7 @@ export const MODES: [string, string, string][] = [
   ["same_product", "Cùng sản phẩm", "Trùng ảnh hoặc rất giống + trùng metadata (sản phẩm / EAN) — không suy đoán cùng SKU chỉ vì giống hình"],
   ["similar_product", "Sản phẩm tương tự", "Giống về hình nhưng không khẳng định cùng SKU"],
   ["ads_match", "Quảng cáo dùng ảnh", "Chỉ quảng cáo (Meta / TikTok) có ảnh trùng hoặc giống"],
-  ["find_suppliers", "Tìm nguồn hàng", "Listing nguồn hàng TQ (AliExpress / 1688 / Taobao) và nhà cung cấp B2B EU"],
+  ["find_suppliers", "Tìm nguồn hàng", "Listing nguồn hàng TQ (AliExpress / 1688 / Taobao)"],
   ["compare_prices", "So sánh giá", "Mọi offer có giá thật, tách cùng-SKU và tương-tự"],
 ];
 export const TIER: Record<string, [string, Tone, string]> = {
@@ -33,7 +34,8 @@ export const TIER: Record<string, [string, Tone, string]> = {
   LIKELY_SAME_PRODUCT: ["Có thể cùng SP", "info", "Rất giống + trùng metadata (cùng sản phẩm / EAN / family) — cần xác nhận"],
   VISUALLY_SIMILAR: ["Giống về hình", "neutral", "Giống hình dáng theo CLIP / hash — chưa chắc cùng sản phẩm"],
 };
-export const KINDS: [string, string][] = [["ad", "Quảng cáo"], ["listing", "Nguồn hàng TQ"], ["eu_listing", "EU Market"]];
+// eu_listing rows are mostly pictures saved from Google Lens results ("Lưu"), so they stay searchable while EU Market is hidden
+export const KINDS: [string, string][] = [["ad", "Quảng cáo"], ["listing", "Nguồn hàng TQ"], ["eu_listing", EU_VISIBLE ? "EU Market" : "Listing đã lưu"]];
 const KIND_LABEL: Record<string, string> = { ...Object.fromEntries(KINDS), web: "Web (Google Lens)" };
 const COUNTRIES = ["PH", "SA", "AE", "KW", "QA", "EG", "US", "GB", "DE", "FR", "IT", "ES", "NL", "BE", "AT", "PL", "CZ", "SE", "RO", "AU", "NZ", "VN"];
 export const SORTS: [string, string][] = [["similarity", "Độ giống"], ["price", "Giá thấp → cao"], ["observed", "Mới quan sát"]];
@@ -145,8 +147,8 @@ export function ProductImageCard({ r, reviewFor, onReviewed }: { r: any; reviewF
           {r.url && <Button variant="outline" size="xs" asChild><a href={r.url} target="_blank" rel="noreferrer" title={r.url}>Mở <ExternalLink /></a></Button>}
           {(r.creative_id || r.eu_listing_id) && <Button variant="ghost" size="xs" asChild><Link href={visualHref(r.creative_id ? { creative_id: r.creative_id } : { eu_listing_id: r.eu_listing_id })} title="Tìm tiếp bằng ảnh này"><ScanSearch /></Link></Button>}
           {r.product_id && <Button variant="outline" size="xs" asChild><Link href={`/products/${r.product_id}`} title={r.product_name || ""}><Tag /> SP</Link></Button>}
-          {r.eu_product_id && <Button variant="outline" size="xs" asChild><Link href={`/eu-market/products/view?id=${r.eu_product_id}`}><Tag /> EU</Link></Button>}
-          {r.price_history_url && <Button variant="ghost" size="xs" asChild><Link href={`/eu-market/products/view?id=${r.eu_product_id}`} title="Lịch sử giá"><History /></Link></Button>}
+          {EU_VISIBLE && r.eu_product_id && <Button variant="outline" size="xs" asChild><Link href={`/eu-market/products/view?id=${r.eu_product_id}`}><Tag /> EU</Link></Button>}
+          {EU_VISIBLE && r.price_history_url && <Button variant="ghost" size="xs" asChild><Link href={`/eu-market/products/view?id=${r.eu_product_id}`} title="Lịch sử giá"><History /></Link></Button>}
           {r.creative_id && <Button variant="ghost" size="xs" asChild><Link href={visualHref({ creative_id: r.creative_id, mode: "ads_match" })} title="Quảng cáo liên quan"><Megaphone /></Link></Button>}
           {reviewFor && r.tier !== "EXACT" && (reviewed ? <span className="text-muted-foreground">{reviewed === "confirmed" ? "✓ cùng SP" : "✗ khác SP"}</span> : (
             <span className="ml-auto flex gap-0.5">
@@ -244,7 +246,7 @@ export function PriceComparisonTable({ data }: { data: any }) {
       <TableCell className={cn("text-xs whitespace-nowrap", r.stale && "text-warning")}>{fmt.dt(r.observed_at)}{r.stale ? " · cũ" : ""}</TableCell>
       <TableCell className="whitespace-nowrap">
         {r.url && <Button variant="ghost" size="xs" asChild><a href={r.url} target="_blank" rel="noreferrer" title="Listing gốc"><ExternalLink /></a></Button>}
-        {r.eu_product_id && <Button variant="ghost" size="xs" asChild><Link href={`/eu-market/products/view?id=${r.eu_product_id}`} title="Lịch sử giá"><History /></Link></Button>}
+        {EU_VISIBLE && r.eu_product_id && <Button variant="ghost" size="xs" asChild><Link href={`/eu-market/products/view?id=${r.eu_product_id}`} title="Lịch sử giá"><History /></Link></Button>}
         {r.product_id && <Button variant="ghost" size="xs" asChild><Link href={`/products/${r.product_id}`} title="Lịch sử giá / sản phẩm"><History /></Link></Button>}
         {(r.creative_id || r.eu_listing_id) && <Button variant="ghost" size="xs" asChild><Link href={visualHref(r.creative_id ? { creative_id: r.creative_id, mode: "ads_match" } : { eu_listing_id: r.eu_listing_id, mode: "ads_match" })} title="Quảng cáo liên quan"><Megaphone /></Link></Button>}
       </TableCell>
@@ -286,7 +288,7 @@ export function IndexCoverage({ st }: { st: any }) {
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       <ScanSearch className="size-3.5" />
-      <span>Chỉ mục nội bộ: <b>{fmt.n(c.indexed)}</b>/{fmt.n(c.with_thumbnail)} ảnh quảng cáo & nguồn hàng ({pct}%), <b>{fmt.n(e.indexed)}</b>/{fmt.n(e.with_thumbnail)} listing EU</span>
+      <span>Chỉ mục nội bộ: <b>{fmt.n(c.indexed)}</b>/{fmt.n(c.with_thumbnail)} ảnh quảng cáo & nguồn hàng ({pct}%){EU_VISIBLE && <>, <b>{fmt.n(e.indexed)}</b>/{fmt.n(e.with_thumbnail)} listing EU</>}</span>
       <span>· engine: hash{st.engine?.embedding?.enabled ? ` + CLIP (${fmt.n(st.embeddings)} vector)` : " (CLIP tắt)"}</span>
       {limited && <Pill tone="warn">Limited coverage</Pill>}
       <span>· tìm trong kho SpyAds, không tìm live trên marketplace</span>

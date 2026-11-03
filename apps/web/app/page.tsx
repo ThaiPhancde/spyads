@@ -1,24 +1,18 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
-import { AlertCircle, ArrowRight, Gem, Play } from "lucide-react";
+import { ArrowRight, Gem } from "lucide-react";
 import { TrendChart } from "@/components/charts";
 import { REGION_CHIPS } from "@/components/MarketPicker";
 import { SimpleSelect } from "@/components/simple-select";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
 import { Card, Loading, PageHeader, ProductTable, RecBadge, Stat } from "@/components/ui";
-import { api, fmt, qs, useAction, useApi } from "@/lib/api";
+import { fmt, qs, useApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export default function DailyPulse() {
   const [country, setCountry] = useState("");
   const meta = useApi("/meta");
-  const { data, error, reload } = useApi(`/dashboard/pulse${qs({ country })}`);
-  const act = useAction();
-  const running = act.busy;
-  const runPipeline = () => act.run(async () => { await api("/pipeline/run", { method: "POST" }); reload(); });
+  const { data, error } = useApi(`/dashboard/pulse${qs({ country })}`);  // the daily pipeline runs in the worker (system), no button
   if (!data) return <Loading error={error} />;
   const k = data.kpis;
   const hw = data.top_hidden_winners[0];
@@ -29,11 +23,7 @@ export default function DailyPulse() {
     <div className="space-y-4">
       <PageHeader title={`Today — ${country || "thị trường mục tiêu"}`} subtitle="Hôm nay thị trường thay đổi gì">
         <SimpleSelect value={country} onChange={setCountry} options={markets} placeholder="Mọi thị trường mục tiêu" />
-        <Button size="sm" onClick={runPipeline} disabled={running}>
-          {running ? <Spinner /> : <Play />}{running ? "Đang chạy pipeline…" : "Chạy pipeline hôm nay"}
-        </Button>
       </PageHeader>
-      {act.error && <Alert variant="destructive"><AlertCircle /><AlertTitle>Lỗi</AlertTitle><AlertDescription>{act.error}</AlertDescription></Alert>}
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         <Stat label="Products monitored" value={fmt.n(k.products_monitored)} />
@@ -80,7 +70,7 @@ export default function DailyPulse() {
         </Card>
       </div>
 
-      <Card title="Top opportunities" action={<Link href="/products" className="inline-flex items-center gap-1 text-xs text-link">Product Explorer <ArrowRight className="size-3" /></Link>} pad={false}>
+      <Card title="Top opportunities" action={<Link href="/radar?view=table" className="inline-flex items-center gap-1 text-xs text-link">Bảng xếp hạng <ArrowRight className="size-3" /></Link>} pad={false}>
         <ProductTable rows={data.top_opportunities} compact />
       </Card>
     </div>

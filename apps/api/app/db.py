@@ -10,7 +10,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from starlette.requests import Request
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./market_intel.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+if not DATABASE_URL:  # never fall back silently to the stale apps/api/market_intel.db (pre-Postgres data)
+    if os.getenv("ALLOW_SQLITE", "") != "1":
+        raise SystemExit("DATABASE_URL is not set (root .env or environment). Set it to the Postgres URL, "
+                         "or ALLOW_SQLITE=1 to use ./market_intel.db on purpose.")
+    DATABASE_URL = "sqlite:///./market_intel.db"
 
 IS_SQLITE = DATABASE_URL.startswith("sqlite")
 WRITE_LOCK_WARN_S = float(os.getenv("WRITE_LOCK_WARN_S", "5"))
@@ -93,6 +98,37 @@ def ingest_lock():
                 conn.commit()
 
 
+def scheduler_lock():
+    """One scheduler per database: a Postgres advisory lock on a connection kept open for the process lifetime.
+    Returns that connection (keep a reference), None when another process already runs the scheduler, True on SQLite.
+    ponytail: if Postgres restarts the session lock is gone until this process restarts; re-acquire per tick if that bites."""
+    if IS_SQLITE:
+        return True
+    from sqlalchemy import text
+
+    conn = engine.connect()
+    if conn.execute(text("SELECT pg_try_advisory_lock(727003)")).scalar():
+        conn.commit()
+        return conn
+    conn.close()
+    return None
+
+
+def migrate_all():
+    """Every additive startup migration — shared by the API (main._startup) and the worker so both see one schema."""
+    from .cluster_migrate import migrate as migrate_clusters
+    from .meta_collector_migrate import migrate as migrate_meta_collector
+    from .personalization_migrate import migrate as migrate_personalization
+    from .similar import migrate as migrate_similar
+    from .workspace.migrate import migrate
+
+    migrate()
+    migrate_clusters()
+    migrate_similar()
+    migrate_personalization()
+    migrate_meta_collector()
+
+
 @contextmanager
 def read_only():
     """Pure-read work outside a request (scheduler scans, media queue): don't take the SQLite write lock."""
@@ -126,6 +162,7 @@ def get_db(request: Request = None):
     if request is not None and getattr(request.state, "user", None):
         db.info["user_id"] = request.state.user["id"]
         db.info["role"] = request.state.user["role"]
+        db.info["user_name"] = request.state.user["name"]
     try:
         yield db
     finally:

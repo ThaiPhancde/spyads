@@ -175,17 +175,17 @@ def claim(db, user_id, pid):
         insert = sqlite_insert if db.bind.dialect.name == "sqlite" else pg_insert
         db.execute(insert(ProductCluster).values(id=root, revision=0, created_at=datetime.utcnow()).on_conflict_do_nothing())
     held = owners(db, products)
-    other = next((a for _, a in held if a.user_id != user_id), None)
-    if other is not None:
-        taken(db, user_id, pid, other.status)
-    mine = {a.id: a for _, a in held}
-    if len(mine) == 1:  # already mine: idempotent, and pick up products that joined the cluster since
-        a = next(iter(mine.values()))
+    mine = {a.id: a for _, a in held if a.user_id == user_id}
+    if mine:  # already mine: idempotent, and pick up free products that joined the cluster since
+        # (a cluster merged before the allocation_conflict guard can also hold another MKT's lock: keep my own, don't 409)
+        a = next((a for a in mine.values() if a.product_id == pid), next(iter(mine.values())))
         missing = products - {p for p, _ in held}
         if missing:
             lock(db, a, missing)
             audit(db, a, user_id, "extend", a.status, a.user_id, products=sorted(missing))
         return a
+    if held:
+        taken(db, user_id, pid, held[0][1].status)
     now = datetime.utcnow()
     a = ProductAllocation(user_id=user_id, product_id=pid, cluster_id=root, scope=scope, status="reserved",
                           reserved_until=now + ttl(), created_at=now, updated_at=now)

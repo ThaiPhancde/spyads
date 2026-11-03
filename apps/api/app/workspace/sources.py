@@ -53,7 +53,7 @@ def fetch(db, advertiser):
     limit = max(10, min(int(os.getenv("COMPETITOR_MAX_ADS", "200")), 1000))
     max_pages = max(1, min(int(os.getenv("COMPETITOR_MAX_PAGES", "10")), 50))
     pid = advertiser.source_advertiser_id
-    records, seen = [], set()
+    records = []
     if advertiser.source == "meta_library":
         from ..collector.adapters.meta import MetaLibraryConnector
         connector = MetaLibraryConnector(config)
@@ -64,10 +64,9 @@ def fetch(db, advertiser):
             if any(str(r.page_id) != pid for r in page):
                 raise ConnectorError("Nguồn trả Ads của advertiser khác; không ghi nhận lượt quét thành công")
             records.extend(page)
-            seen.update(state.get("siblings") or [])
-            if state.get("done") or len(records) >= limit:
+            if state.get("done") or state.get("page_status") == "partial" or len(records) >= limit:
                 break
-        return ScanResult(records[:limit], bool(state.get("done")) and len(records) <= limit, seen)
+        return ScanResult(records[:limit], bool(state.get("done")) and len(records) <= limit)
     if advertiser.source == "meta_graph":
         from ..collector.adapters.meta import MetaGraphConnector
         connector = MetaGraphConnector(config)

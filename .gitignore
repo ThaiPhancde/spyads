@@ -23,14 +23,15 @@ __pycache__/
 
 # --- node / next ---
 node_modules/
-.next/
-.next-workspace-test/
-.next-validation/
+.next*/
+*.tsbuildinfo
 out/
 next-env.d.ts
 
 # --- logs / os / editor ---
 *.log
+*.out
+demotheme/ui/
 .DS_Store
 Thumbs.db
 .vscode/

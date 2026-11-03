@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, func, literal, not_, or_, select
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,7 @@ from ..markets import REGION_LABEL, REGIONS, ad_scope_filter, product_in_scope, 
 from ..models import (Ad, AdSource, Advertiser, Connector, Creative, Event, Product, ProductAlias, SearchJob,
                       TrackedQuery, Vote)
 from ..services import lexicon, naming, query_intent
+from ..services.adsignals import verified_live
 from ..services.discovery import VOTE_REASONS, VOTE_VALUE, market_dna
 from ..storage import BACKEND, DATA_DIR, store
 from ..workspace.filters import ad_filter, has_ad_filter
@@ -732,9 +733,21 @@ def search_jobs(db: Session = Depends(get_db)):
 
 
 # ============================================================ Creative Vault
+def _video_of(db: Session, cids) -> tuple[dict[int, str], dict[str, int]]:
+    """Same-video groups (app/videos.py: cover pHash ≤ 6 bits, works without downloading the video — the old dHash family
+    only formed for downloaded files): ({creative_id: video_key}, {video_key: creatives on that key})."""
+    from ..visual.models import ProductImage
+
+    key = dict(db.execute(select(ProductImage.source_id, ProductImage.video_key).where(
+        ProductImage.source == "creative", ProductImage.source_id.in_(list(cids)), ProductImage.video_key.is_not(None))).all())
+    size = dict(db.execute(select(ProductImage.video_key, func.count()).where(ProductImage.video_key.in_(set(key.values())))
+                           .group_by(ProductImage.video_key)).all()) if key else {}
+    return key, size
+
+
 @router.get("/api/creatives")
 def list_creatives(product_id: int | None = None, type: str | None = None, status: str | None = None, q: str | None = None,
-                   country: str | None = None, funnel: str | None = None, family_id: int | None = None,
+                   country: str | None = None, funnel: str | None = None, video_key: str | None = None,
                    limit: int = Query(60, le=300), offset: int = 0, db: Session = Depends(get_db)):
     cq = select(Creative, Ad).join(Ad, Ad.id == Creative.ad_id, isouter=True).order_by(Creative.id.desc())
     if product_id:
@@ -743,8 +756,10 @@ def list_creatives(product_id: int | None = None, type: str | None = None, statu
         cq = cq.where(Creative.type == type)
     if status:
         cq = cq.where(Creative.status == status)
-    if family_id:
-        cq = cq.where(Creative.family_id == family_id)
+    if video_key:
+        from ..visual.models import ProductImage
+        cq = cq.where(Creative.id.in_(select(ProductImage.source_id).where(ProductImage.source == "creative",
+                                                                          ProductImage.video_key == video_key)))
     _f = ad_scope_filter(country)
     if _f is not None:
         cq = cq.where(_f)
@@ -754,10 +769,10 @@ def list_creatives(product_id: int | None = None, type: str | None = None, statu
         cq = cq.where(Ad.search_text.contains(q.lower()))
     rows = db.execute(cq.offset(offset).limit(limit)).all()
     advs = {a.id: a.name for a in db.scalars(select(Advertiser).where(Advertiser.id.in_({ad.advertiser_id for _, ad in rows if ad})))}
-    fam = dict(db.execute(select(Creative.family_id, func.count(Creative.id)).group_by(Creative.family_id)).all())
+    vkey, vsize = _video_of(db, [c.id for c, _ in rows])
     stats = dict(db.execute(select(Creative.status, func.count(Creative.id)).group_by(Creative.status)).all())
-    return {"rows": [creative_dict(c, ad, advs.get(ad.advertiser_id) if ad else None) | {"family_size": fam.get(c.family_id, 1)}
-                     for c, ad in rows], "stats": stats}
+    return {"rows": [creative_dict(c, ad, advs.get(ad.advertiser_id) if ad else None)
+                     | {"video_key": vkey.get(c.id), "video_size": vsize.get(vkey.get(c.id), 1)} for c, ad in rows], "stats": stats}
 
 
 @router.get("/api/creatives/{cid}/download")
@@ -836,13 +851,13 @@ def product_discovery(pid: int, db: Session = Depends(get_db)):
     advs = {a.id: a.name for a in db.scalars(select(Advertiser).where(Advertiser.id.in_({a.advertiser_id for a in ads.values()})))}
     votes = db.scalars(select(Vote).where(Vote.product_id == pid, Vote.user_id == db.info.get("user_id")).order_by(Vote.id.desc())).all()
     prov = Counter(s for (s,) in db.execute(select(AdSource.source).join(Ad, Ad.id == AdSource.ad_id).where(Ad.product_id == pid)))
-    fams = Counter(c.family_id for c in creatives if c.family_id)
+    vkey, vsize = _video_of(db, [c.id for c in creatives])
     return {
         "potential": p.potential or {}, "classification": p.classification, "market_scores": p.market_scores or {},
         "funnel_mix": p.funnel_mix or {}, "sources": dict(prov),
         "creatives": [creative_dict(c, ads.get(c.ad_id), advs.get(ads[c.ad_id].advertiser_id) if c.ad_id in ads else None)
-                      | {"family_size": fams.get(c.family_id, 1)} for c in creatives],
-        "families": len(fams),
+                      | {"video_key": vkey.get(c.id), "video_size": vsize.get(vkey.get(c.id), 1)} for c in creatives],
+        "families": len(set(vkey.values())),
         "votes": [{"user": v.user, "team": v.team, "market": v.market, "decision": v.decision, "reasons": v.reasons,
                    "note": v.note, "at": v.created_at} for v in votes],
         "vote_summary": dict(Counter(v.decision for v in votes)),
@@ -862,14 +877,20 @@ class VoteIn(BaseModel):
 def vote(pid: int, body: VoteIn, db: Session = Depends(get_db)):
     if body.decision not in VOTE_VALUE:
         raise HTTPException(400, f"decision ∈ {list(VOTE_VALUE)}")
+    uid = db.info.get("user_id")
+    if uid:  # each vote rescores the product synchronously; before the first query (SQLite: own write transaction)
+        from ..workspace.auth import rate_limit
+        rate_limit(f"vote:{uid}", 120, 3600)
     if not db.get(Product, pid):
         raise HTTPException(404)
-    body.user = str(db.info.get("user_id") or "admin-integration")
-    old = db.scalar(select(Vote).where(Vote.product_id == pid, Vote.user_id == db.info.get("user_id"), Vote.market == body.market))
+    body.user = str(uid or "admin-integration")
+    # one vote per (product, user): `market` is stored but not part of the key, so it can't stack votes (audit C3)
+    old = db.scalar(select(Vote).where(Vote.product_id == pid, Vote.user_id == uid).order_by(Vote.id.desc()).limit(1))
     if old:
-        old.decision, old.reasons, old.note, old.team, old.created_at = body.decision, body.reasons, body.note, body.team, datetime.utcnow()
+        old.decision, old.reasons, old.note, old.team, old.market, old.created_at = (body.decision, body.reasons, body.note, body.team,
+                                                                                     body.market, datetime.utcnow())
     else:
-        db.add(Vote(product_id=pid, user_id=db.info.get("user_id"), **body.model_dump()))
+        db.add(Vote(product_id=pid, user_id=uid, **body.model_dump()))
     db.flush()
     from ..services.engine import ScoreContext, rescore_products
 
@@ -885,6 +906,7 @@ def discovery_meta():
 
 
 TABS = {
+    "video_win": "Video Win", "video_scale": "Video Scale", "potential_tiktok": "Tiềm năng (TikTok)", "cash_cow": "Bò sữa",
     "new": "New Discoveries", "hidden": "Hidden Products", "novelty": "High Novelty", "wave": "High Wave",
     "creative": "Creative Goldmine", "favorites": "MKT Favorites", "experimental": "Experimental Opportunities",
     "breakout": "Breakout Products", "scaling": "Recently Scaling", "risk": "High Risk", "saved": "Saved By Team",
@@ -905,7 +927,13 @@ def fits_funnel(p: Product, funnel: str | None) -> bool:
 def discovery_tab(tab: str, country: str | None = None, funnel: str | None = None, limit: int = Query(60, le=500), db: Session = Depends(get_db)):
     if tab not in TABS:
         raise HTTPException(404)
-    return cached(("tab", tab, country, funnel, limit), lambda: _discovery_tab(tab, country, funnel, limit, db))
+    # favorites / saved list the caller's own products → uid in the key (audit C1); every other tab is one shared result
+    # (~3-5 s over 12k products) and only the per-viewer "loved_untested" flag is added after the cache
+    uid = db.info.get("user_id")
+    out = cached(("tab", tab, country, funnel, limit, uid if tab in ("favorites", "saved") else None),
+                 lambda: _discovery_tab(tab, country, funnel, limit, db))
+    loved = {pid for (pid,) in db.execute(select(Vote.product_id).where(Vote.user_id == uid, Vote.decision.in_(["LOVE", "TEST"])))}
+    return out | {"rows": [r | {"loved_untested": r["id"] in loved} for r in out["rows"]]}
 
 
 def _discovery_tab(tab: str, country: str | None, funnel: str | None, limit: int, db: Session) -> dict:
@@ -916,7 +944,25 @@ def _discovery_tab(tab: str, country: str | None, funnel: str | None, limit: int
     from ..workspace.models import AdInteraction
     loved = {pid for (pid,) in db.execute(select(Vote.product_id).where(Vote.user_id == db.info.get("user_id"), Vote.decision.in_(["LOVE", "TEST"])))}
     saved = set(db.scalars(select(Ad.product_id).join(AdInteraction, Ad.id == AdInteraction.ad_id).where(AdInteraction.user_id == db.info.get("user_id"), AdInteraction.saved.is_(True))))
+    # Channel tabs (design §2.5) on stored features (daily + on ingest), never per-product queries. features.active_ads /
+    # advertiser_count count only ads a source re-confirmed within ACTIVE_GRACE_DAYS, so "live" = verified live.
+    #   Video Win     Meta, ≥3 live pages, strongest live ad ≥7 days (the video is at least that old)
+    #   Video Scale   Meta, ≥3 creatives (or live ads), ≥1 page new this week
+    #   Tiềm năng     TikTok, first seen ≤14 days ago, 1–5 live pages
+    #   Bò sữa        a live ad running ≥30 days, momentum < 55 (the radar's "rising" line: steady, not spiking)
+    # ponytail: networks = every ad of the product, not only live ones; per-network live counts if a mixed product misfiles
+    ft = lambda p: p.features or {}
+    live = lambda p: ft(p).get("active_ads", 0) > 0
+    on = lambda p, net: net in (ft(p).get("ad_networks") or [])
     fx = {
+        "video_win": (lambda p: live(p) and on(p, "meta") and ft(p).get("advertiser_count", 0) >= 3 and ft(p).get("longevity_days", 0) >= 7,
+                      lambda p: ft(p).get("force_top", 0)),
+        "video_scale": (lambda p: live(p) and on(p, "meta") and ft(p).get("creative_count", 0) >= 3 and ft(p).get("new_advertisers_7d", 0) >= 1,
+                        lambda p: ft(p).get("new_ads_7d", 0)),
+        "potential_tiktok": (lambda p: live(p) and on(p, "tiktok") and ft(p).get("data_days", 99) <= 14 and 1 <= ft(p).get("advertiser_count", 0) <= 5,
+                             lambda p: vec(p, "opportunity")),
+        "cash_cow": (lambda p: live(p) and ft(p).get("longevity_days", 0) >= 30 and ft(p).get("ads_running_30d", 0) >= 1 and vec(p, "momentum") < 55,
+                     lambda p: ft(p).get("longevity_days", 0)),
         "new": (lambda p: p.first_seen_at and p.first_seen_at > now - timedelta(days=7), lambda p: p.first_seen_at),
         "hidden": (lambda p: (p.features or {}).get("advertiser_count", 99) <= 10 and vec(p, "wave_potential") >= 45, lambda p: vec(p, "opportunity")),
         "novelty": (lambda p: vec(p, "novelty") >= 65, lambda p: vec(p, "novelty")),
@@ -934,9 +980,10 @@ def _discovery_tab(tab: str, country: str | None, funnel: str | None, limit: int
     }
     flt, key = fx[tab]
     rows = sorted([p for p in products if flt(p)], key=lambda p: key(p) or 0, reverse=True)[:limit]
-    cov, lp = covers(db, rows), landing_links(db, rows)
-    return {"tab": tab, "title": TABS[tab], "rows": [product_card(p, cov.get(p.id)) | {"loved_untested": p.id in loved,
-                                                                                       "landing_url": lp.get(p.id)}
+    from ..services.checklist import checklists
+
+    cov, lp, chk = covers(db, rows), landing_links(db, rows), checklists(db, rows, now)
+    return {"tab": tab, "title": TABS[tab], "rows": [product_card(p, cov.get(p.id)) | {"landing_url": lp.get(p.id), "win_checklist": chk[p.id]}
                                                      for p in rows], "tabs": TABS}
 
 
@@ -1144,9 +1191,9 @@ def connector_test(cid: int, db: Session = Depends(get_db)):
 
 
 @router.post("/api/collector/connectors/{cid}/sync")
-def connector_sync(cid: int, bg: BackgroundTasks):
-    bg.add_task(realtime.run_connector, cid)
-    return {"queued": True}
+def connector_sync(cid: int):
+    started = realtime.start_crawl(cid)
+    return {"queued": started, "already_running": not started}
 
 
 class QueryIn(BaseModel):
@@ -1179,13 +1226,14 @@ def del_query(qid: int, db: Session = Depends(get_db)):
 
 
 @router.post("/api/collector/queries/{qid}/run")
-def run_query(qid: int, bg: BackgroundTasks, db: Session = Depends(get_db)):
+def run_query(qid: int, db: Session = Depends(get_db)):
     q = db.get(TrackedQuery, qid)
     if not q:
         raise HTTPException(404)
+    db.expunge(q)
     db.commit()  # end the request's write transaction: the background run opens its own session and would wait on it
-    bg.add_task(realtime.run_connector, q.connector_id, q)
-    return {"queued": True}
+    started = realtime.start_crawl(q.connector_id, q)
+    return {"queued": started, "already_running": not started}
 
 
 @router.post("/api/collector/export-upload")
@@ -1203,7 +1251,7 @@ async def export_upload(source: str = Form(...), country: str | None = Form(None
                       config={"source": src, "country": country}, enabled=True, every_minutes=5, tier=2, status="ready")
         db.add(c)
     db.commit()  # also ends the read transaction when the connector already existed (see run_query)
-    bg.add_task(realtime.run_connector, c.id)
+    realtime.start_crawl(c.id)  # already running: the file waits in the watch folder for the next run
     return {"connector_id": c.id, "queued": True}
 
 
@@ -1309,25 +1357,36 @@ def list_ads(q: str | None = None, country: str | None = None, funnel: str | Non
 
 # ============================================================ Ingest from the browser extension (no API needed)
 class MetaItemsIn(BaseModel):
-    items: list[dict]  # raw Ad Library items (collated_results[]) captured from the page the user is browsing
+    items: list[dict] = Field(max_length=500)
     country: str | None = None
     saved_by: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 @router.post("/api/ingest/meta-library", dependencies=[Depends(require_token)])
 def ingest_meta_library(body: MetaItemsIn, db: Session = Depends(get_db)):
-    """The extension forwards what Meta's own Ad Library page loaded for the user. Mapped with the same
-    code path as the server-side connector, so ads dedupe against it (same ad_archive_id)."""
     from ..collector.adapters.meta import map_library_ad
+    from ..collector.batches import ingest_batch, digest, BatchConflict
 
-    recs = []
-    for it in body.items[:500]:
-        if isinstance(it, dict) and it.get("ad_archive_id"):
-            recs.append(map_library_ad(it, "meta_library", (body.country or "").upper() or None))
-    with ingest_lock():  # serialize writers (see realtime.py)
-        stats = ingest_ads(db, recs, saved_by=body.saved_by)
+    payload = body.model_dump(exclude={"idempotency_key"})
+    key = "extension:" + (body.idempotency_key or digest(payload))
+    valid = [it for it in body.items if it.get("ad_archive_id")]
+    if not valid:  # nothing to store: a permanent rejection, the extension stops retrying this batch
+        raise HTTPException(422, "No item has an ad_archive_id")
+    recs = [map_library_ad(it, "meta_library", (body.country or "").upper() or None) for it in valid]
+    with ingest_lock():
+        try:
+            stats = ingest_batch(db, recs, key, saved_by=body.saved_by, payload=payload)
+            db.commit()
+        except BatchConflict as e:
+            db.rollback()
+            raise HTTPException(409, str(e)) from e
+        except Exception:
+            db.rollback()
+            raise
     realtime.after_business_events(db, set(stats["product_ids"]))
-    return stats
+    # items without an id are skipped (as before the outbox), counted, never a reason to refuse the rest of the batch
+    return {**stats, "invalid": stats["invalid"] + len(body.items) - len(valid), "idempotency_key": key.removeprefix("extension:")}
 
 
 # ============================================================ Storage retention
@@ -1374,13 +1433,15 @@ def markets_live(window: int = 7, funnel: str | None = None, db: Session = Depen
     now = datetime.utcnow()
     w, w2 = now - timedelta(days=window), now - timedelta(days=2 * window)
     q = select(Ad.id, Ad.country, Ad.countries, Ad.is_active, Ad.first_seen_at, Ad.advertiser_id, Ad.product_id, Ad.funnel,
-               Ad.force_score, Ad.last_verified_at).where(Ad.is_internal.is_(False), ADS_ONLY)
+               Ad.force_score, Ad.last_verified_at, Ad.last_seen_at).where(Ad.is_internal.is_(False), ADS_ONLY)
     if funnel:
         q = q.where(Ad.funnel == funnel)
     cats = dict(db.execute(select(Product.id, Product.category)).all())
     tgt = set(targets()) | {"ALL"}
     per: dict[str, dict] = {}
-    for _id, c1, cs, active, first, adv, pid, fn, force, ver in db.execute(q):
+    for r in db.execute(q):
+        _id, c1, cs, active, first, adv, pid, fn, force, ver, _seen = r
+        active = verified_live(r, now)
         for m in set((cs or []) + ([c1] if c1 else [])):
             d = per.setdefault(m, {"active": 0, "adv": set(), "prod": set(), "new": 0, "prev": 0, "funnel": Counter(),
                                    "cat": Counter(), "strong": 0, "verified": None, "total": 0})
@@ -1457,7 +1518,7 @@ def _product_radar_rows(scope: str | None, window: int, funnel: str | None, sort
         p = prods.get(pid)
         if not p or p.category == "non_product":
             continue
-        live = [a for a in ads if a.is_active]
+        live = [a for a in ads if verified_live(a, now)]
         if not live:
             continue
         new = sum(1 for a in ads if a.first_seen_at and a.first_seen_at > w)
@@ -1510,12 +1571,26 @@ def run_liveness(max_advertisers: int = 12):
     return realtime.verify_liveness(max_advertisers=max(1, min(max_advertisers, 50)))
 
 
+@router.get("/api/collector/kpis")
+def collector_kpis(hours: int = Query(24, ge=1, le=24 * 30), db: Session = Depends(get_db)):
+    """Data & Connectors monitoring: pages, accepted / duplicate / invalid ads, cursor, retry, health, media availability."""
+    from ..browser_worker import capacity
+    from ..collector.kpis import collector_kpis as kpis
+
+    return {**kpis(db, hours), "browser_capacity": capacity()}
+
+
 @router.get("/api/collector/scheduler")
 def scheduler_status(db: Session = Depends(get_db)):
     """What the background scheduler is doing right now and what is overdue."""
     now = datetime.utcnow()
     overdue = [q for q in db.scalars(select(TrackedQuery).where(TrackedQuery.enabled.is_(True)))
                if not q.last_run_at or (now - q.last_run_at).total_seconds() / 60 >= q.every_minutes]
-    return {"running": sorted(realtime._running), "max_parallel": realtime.MAX_PARALLEL_JOBS,
-            "overdue_queries": len(overdue), "last_liveness": realtime._last_liveness, "last_cleanup": realtime._last_cleanup,
-            "last_full_rescore": realtime._last_daily}
+    # DISABLE_SCHEDULER=1: the scheduler runs in `python -m app.worker`, so this process's RAM knows nothing — read its heartbeat
+    in_api = os.getenv("DISABLE_SCHEDULER", "").lower() not in ("1", "true")
+    hb = realtime.heartbeat_state() if in_api else (realtime.read_heartbeat(db) or {})
+    last = hb.get("last", {})
+    return {"running": hb.get("running", []), "max_parallel": hb.get("max_parallel", realtime.MAX_PARALLEL_JOBS),
+            "overdue_queries": len(overdue), "last_liveness": last.get("liveness"), "last_cleanup": last.get("cleanup"),
+            "last_full_rescore": last.get("daily"), "last": last, "heartbeat_at": hb.get("at"),
+            "heartbeat_age_s": 0.0 if in_api else hb.get("age_s"), "process": "api" if in_api else "worker"}

@@ -2,12 +2,13 @@
 
 Scheduled syncs, tracked queries, liveness, spy scans, media queue, retention and the 6-hourly re-score run
 here, so a heavy tick never competes with user requests (live searches stay in the API process).
-Run exactly one worker: the scheduler keeps its "what is due / running" state in memory.
+Exactly one scheduler runs per database (Postgres advisory lock, db.scheduler_lock); a second worker exits.
+Its state is published every tick as a heartbeat in app_settings (realtime.write_heartbeat).
 """
 import asyncio
 import logging
 
-from .db import auto_migrate
+from .db import migrate_all, scheduler_lock
 from .media import requeue_lost
 from .realtime import scheduler_loop
 
@@ -16,12 +17,14 @@ for noisy in ("httpx", "httpcore"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 if __name__ == "__main__":
-    from .workspace.migrate import migrate
+    log = logging.getLogger("app.worker")
+    _lock = scheduler_lock()  # held (connection open) for the whole process lifetime
+    if _lock is None:
+        log.error("another scheduler already holds the lock (worker, or API without DISABLE_SCHEDULER=1) — exiting")
+        raise SystemExit(1)
+    migrate_all()
     from .workspace.worker import tracker_loop
-    migrate()
-    from .cluster_migrate import migrate as migrate_clusters
-    migrate_clusters()
-    logging.getLogger("app.worker").info("media: %s lost creatives re-queued", requeue_lost())
+    log.info("media: %s lost creatives re-queued", requeue_lost())
     from .preferences import loop as preference_loop
     from .recommend import loop as recommendation_loop
     async def run():

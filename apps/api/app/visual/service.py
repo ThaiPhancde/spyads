@@ -8,17 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import io
-import ipaddress
 import logging
 import os
-import socket
 import statistics
 import threading
 import time
 from datetime import datetime
-from urllib.parse import urlparse
 
-import httpx
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 from sqlalchemy import func, select
@@ -29,6 +25,7 @@ from ..eu_market.models import EUListing
 from ..eu_market.service import fx_table, to_eur
 from ..media import _thumb_jpeg
 from ..models import Ad, Advertiser, Creative, Product
+from ..netsafe import FetchError as ImageError, check_public_host, read_capped, safe_stream  # noqa: F401 — re-exported
 from ..platforms import NETWORKS
 from ..storage import store
 from .models import ProductImage
@@ -47,12 +44,8 @@ WHOLESALE_NETWORKS = {"1688"}  # China source listed per piece at MOQ — wholes
 COMMERCE_NETWORKS = {k for k, v in NETWORKS.items() if v[1] == "commerce"}
 
 
-class ImageError(ValueError):
-    """code = stable machine-readable reason (spec §9: clear error codes)."""
-
-    def __init__(self, code: str, detail: str = ""):
-        super().__init__(detail or code)
-        self.code = code
+# ImageError (code = stable machine-readable reason, spec §9) is netsafe.FetchError: fetch errors and image errors
+# share one class so every `except ImageError` also catches the SSRF guard's codes.
 
 
 # ------------------------------------------------------------------ normalise + hash
@@ -117,47 +110,16 @@ class QueryImage:
 
 
 # ------------------------------------------------------------------ SSRF-safe fetch
-def _is_private(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified
-
-
-def check_public_host(host: str):
-    """Every resolved address must be public (spec §9: no internal / private targets)."""
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        raise ImageError("url_unresolvable", host)
-    for *_, sa in infos:
-        if _is_private(ipaddress.ip_address(sa[0])):
-            raise ImageError("url_private_address", host)
-
-
 def fetch_image(url: str, max_bytes: int = MAX_UPLOAD_BYTES, timeout: float = FETCH_TIMEOUT, max_redirects: int = 3) -> bytes:
-    """Download one picture: http(s) only, public addresses only (re-checked on every redirect hop), ≤ max_redirects,
-    byte cap enforced while streaming, image/* content-type. ponytail: DNS is resolved twice (check + httpx) — a
-    rebinding race is theoretical here; pin the IP via a custom transport if this ever faces the open internet."""
-    for _ in range(max_redirects + 1):
-        u = urlparse(url)
-        if u.scheme not in ("http", "https") or not u.hostname:
-            raise ImageError("url_invalid", url[:120])
-        check_public_host(u.hostname)
-        with httpx.Client(follow_redirects=False, timeout=timeout, headers={"User-Agent": UA, "Accept": "image/*,*/*;q=0.5"}) as c:
-            with c.stream("GET", url) as r:
-                if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
-                    url = str(httpx.URL(url).join(r.headers["location"]))
-                    continue
-                if r.status_code != 200:
-                    raise ImageError("url_http_error", f"HTTP {r.status_code}")
-                ct = r.headers.get("content-type", "").split(";")[0].strip().lower()
-                if ct and not ct.startswith("image/") and ct != "application/octet-stream":
-                    raise ImageError("url_not_image", ct)
-                buf = bytearray()
-                for chunk in r.iter_bytes(65536):
-                    buf += chunk
-                    if len(buf) > max_bytes:
-                        raise ImageError("too_large", f"> {max_bytes // 1048576} MB")
-                return bytes(buf)
-    raise ImageError("url_too_many_redirects")
+    """Download one picture via netsafe (public addresses only, re-checked on every redirect hop), byte cap enforced
+    while streaming, image/* content-type."""
+    with safe_stream(url, timeout=timeout, headers={"User-Agent": UA, "Accept": "image/*,*/*;q=0.5"}, max_redirects=max_redirects) as r:
+        if r.status_code != 200:
+            raise ImageError("url_http_error", f"HTTP {r.status_code}")
+        ct = r.headers.get("content-type", "").split(";")[0].strip().lower()
+        if ct and not ct.startswith("image/") and ct != "application/octet-stream":
+            raise ImageError("url_not_image", ct)
+        return read_capped(r.iter_bytes(65536), max_bytes)
 
 
 # ------------------------------------------------------------------ in-process hash index
@@ -469,8 +431,10 @@ def index_pending(limit: int = INDEX_BATCH, eu_limit: int = EU_FETCH_BATCH) -> d
             if (done + failed) % 100 == 0:
                 db.commit()
         db.commit()
+        from .. import videos
+        keyed = videos.assign(db)  # new covers join an existing video or start one
     eu = index_eu_listings(eu_limit) if eu_limit else {}
-    return {"creatives": done, "failed": failed, **eu}
+    return {"creatives": done, "failed": failed, "video_keyed": keyed, **eu}
 
 
 def _eu_row(lid: int, url: str, seen) -> ProductImage:

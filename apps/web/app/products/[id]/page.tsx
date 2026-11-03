@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { Fragment, ReactNode, useEffect, useState } from "react";
-import { ArrowRight, BadgeEuro, Camera, MessageCircle, RefreshCw, Share2, Sparkles, ThumbsDown, ThumbsUp, Play, Truck } from "lucide-react";
+import { BadgeEuro, Camera, MessageCircle, RefreshCw, Share2, ThumbsDown, ThumbsUp, Play, Truck } from "lucide-react";
 import { visualHref } from "@/components/visual/global-image-search";
 import { toast } from "sonner";
 import { BarList, Breakdown, Funnel, TrendChart } from "@/components/charts";
@@ -21,9 +21,10 @@ import { ProductCluster } from "@/components/product-cluster";
 import { ProductName } from "@/components/product-name";
 import { PriceTag } from "@/components/pricing/price-tag";
 import { usePrice } from "@/lib/prices";
+import { WinChecklist } from "@/components/win-checklist";
 
 /** Where else the product shows up: networks, China-source / store listings (price / reviews / sold) and the
- *  supplier-price margin estimate (AliExpress price × 1.6 ≈ landed cost: shipping + fees not included). */
+ *  supplier-price margin estimate (lowest 1688 / Taobao / AliExpress price × 1.6 ≈ landed cost: shipping + fees not included). */
 function CrossPlatformCard({ productId, f }: { productId: number; f: any }) {
   const { byKey } = usePlatforms();
   const { data } = useApi(`/ads?product_id=${productId}&channel=commerce&sort=price&limit=50`);
@@ -37,7 +38,7 @@ function CrossPlatformCard({ productId, f }: { productId: number; f: any }) {
         {f.reviews_total ? <span><b>{fmt.n(f.reviews_total)}</b> đánh giá{f.rating_avg ? ` · ★ ${f.rating_avg}` : ""}</span> : null}
         {f.sold_total ? <span><b>{fmt.n(f.sold_total)}</b> đã bán</span> : null}
         {f.organic_views ? <span><b>{fmt.n(f.organic_views)}</b> view viral</span> : null}
-        {f.supplier_price_usd ? <span title="Giá AliExpress thấp nhất — mốc giá nhập">Giá nhập ~<b>${f.supplier_price_usd}</b></span> : null}
+        {f.supplier_price_usd ? <span title="Giá nguồn thấp nhất (1688 / Taobao / AliExpress) — mốc giá nhập">Giá nhập ~<b>${f.supplier_price_usd}</b></span> : null}
         {margin !== null && <span title="1 − giá nhập × 1.6 / giá bán (chưa gồm ads, COD, hoàn)">Biên gộp ước tính <b className={cn(margin > 0.5 && "text-good-text")}>{Math.round(margin * 100)}%</b></span>}
       </div>
       {rows.length > 0 ? (
@@ -163,26 +164,68 @@ function MktCard({ m, c, productId, onChange }: { m: any; c: any; productId: num
   );
 }
 
+/** Video identity (design §2.2): the product's video run by the most pages — first sighting on any page (stopped ads
+ *  included), pages a source re-confirmed, and who came in when. */
+function VideoCard({ vf }: { vf: any }) {
+  const v = vf?.primary;
+  return (
+    <Card title="Video">
+      {!v ? <div className="text-sm text-muted-foreground">Chưa nhận diện được video (ảnh bìa creative chưa được hash hoặc là khung chung).</div> : (
+        <>
+          <div className="mb-3 grid grid-cols-3 gap-3 text-sm">
+            <div><div className="text-[11px] text-muted-foreground">Thấy lần đầu</div><div className="tnum font-semibold">{fmt.date(v.video_first_seen)}</div></div>
+            <div><div className="text-[11px] text-muted-foreground">Page đang chạy</div><div className="tnum font-semibold">{v.verified_live_pages} / {v.pages}</div></div>
+            <div><div className="text-[11px] text-muted-foreground">Page mới 7 ngày</div><div className="tnum font-semibold">{v.new_pages_7d}</div></div>
+          </div>
+          <ScrollArea className="max-h-48 overflow-y-auto">
+            <ol className="divide-y text-xs">
+              {(v.entrants || []).map((e: any) => (
+                <li key={e.page} className="flex items-center justify-between gap-2 py-1">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    {e.advertiser_id ? <Link href={`/competitors/${e.advertiser_id}`} className="truncate hover:underline">{e.name || e.page}</Link> : <span className="truncate">{e.name || e.page}</span>}
+                    {e.new_this_week && <Badge variant="secondary" className="shrink-0 px-1.5 text-[10px]">mới tuần này</Badge>}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">{fmt.date(e.first_seen)} · {e.verified_live ? "đang chạy" : "chưa xác minh"}</span>
+                </li>
+              ))}
+            </ol>
+          </ScrollArea>
+          {vf.count > 1 && <div className="mt-2 text-[11px] text-muted-foreground">Sản phẩm có {vf.count} video · đang hiện video nhiều page nhất.</div>}
+        </>
+      )}
+    </Card>
+  );
+}
+
+/** Store page age (design §2.3): platform + published date read from the landing; red flag when the page is more than
+ *  14 days older than the video (someone sold it before). */
+function StorePageCard({ stores }: { stores: any[] }) {
+  const rows = stores.filter((s) => (s.page_platform && s.page_platform !== "unknown") || s.page_published_at);
+  return (
+    <Card title="Trang bán">
+      {!rows.length ? <div className="text-sm text-muted-foreground">Chưa đọc được trang bán nào. Bấm “Quét giá & review đối thủ” để đọc nền tảng và ngày đăng.</div> : (
+        <ul className="divide-y text-xs">
+          {rows.map((s) => (
+            <li key={s.domain} className="py-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <a href={`https://${s.domain}`} target="_blank" rel="noreferrer" className="truncate hover:underline">{s.domain}</a>
+                <span className="shrink-0 text-muted-foreground">{s.page_platform || "chưa rõ nền tảng"} · {s.page_published_at ? `đăng ${fmt.date(s.page_published_at)}` : "chưa biết ngày đăng"}</span>
+              </div>
+              {s.page_age?.flag && <Badge variant="destructive" className="mt-1 text-[10px]">⚠ Trang bán cũ hơn video {s.page_age.days_older} ngày (người khác đã bán trước)</Badge>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
 const TABS = ["Video & Discovery", "Overview", "Market & Ads", "Creative Library", "Comments"];
 
 export default function Product360({ params }: { params: { id: string } }) {
   const { data, error, reload } = useApi(`/products/${params.id}`);
-  const [explain, setExplain] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [lcMsg, setLcMsg] = useState("");
   if (!data) return <Loading error={error} />;
   const p = data.product, f = data.features, b = data.breakdown;
-
-  const doExplain = async () => {
-    setBusy(true);
-    try { setExplain((await api(`/products/${p.id}/explain`, { method: "POST" })).explanation); }
-    catch (e: any) { toast.error("Không giải thích được", { description: e.message }); }
-    finally { setBusy(false); }
-  };
-  const move = async (to: string) => {
-    try { await api(`/products/${p.id}/lifecycle`, { method: "POST", body: JSON.stringify({ to, reason: "manual" }) }); setLcMsg(""); toast.success(`Lifecycle → ${to}`); reload(); }
-    catch (e: any) { setLcMsg(e.message); toast.error("Không chuyển được lifecycle", { description: e.message }); }
-  };
 
   return (
     <div>
@@ -204,6 +247,12 @@ export default function Product360({ params }: { params: { id: string } }) {
         <Stat label="Confidence" value={`${fmt.n(p.confidence_score)}%`} sub={p.confidence_label} />
       </div>
 
+      <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <Card title="Checklist win — thiếu một vế là chưa win"><WinChecklist items={data.win_checklist} /></Card>
+        <VideoCard vf={data.video_facts} />
+        <StorePageCard stores={data.stores || []} />
+      </div>
+
       <MktCard m={data.mkt} c={data.comments} productId={p.id} onChange={reload} />
 
       <Tabs defaultValue={TABS[0]} className="gap-4">
@@ -219,10 +268,7 @@ export default function Product360({ params }: { params: { id: string } }) {
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
             <Card title="Decision engine">
               <div className="mb-2 flex items-center gap-2"><RecBadge rec={p.recommendation} /><span className="text-sm text-ink2">Opportunity {fmt.n(p.opportunity_score)} · Confidence {p.confidence_label}</span></div>
-              <ul className="mb-4 list-disc space-y-1 pl-5 text-sm">{(p.reasons || []).map((r: string) => <li key={r}>{r}</li>)}</ul>
-              <Button className="w-full" onClick={doExplain} disabled={busy}><Sparkles />{busy ? "Đang giải thích…" : "AI giải thích vì sao ra điểm này"}</Button>
-              {explain && <div className="mt-3 rounded-md bg-muted p-3 text-sm leading-relaxed whitespace-pre-wrap">{explain}</div>}
-              <div className="mt-2 text-[11px] text-muted-foreground">AI chỉ giải thích — điểm số do công thức tính từ database.</div>
+              <ul className="list-disc space-y-1 pl-5 text-sm">{(p.reasons || []).map((r: string) => <li key={r}>{r}</li>)}</ul>
             </Card>
             <Card title="Saturation — breakdown"><Breakdown parts={b.saturation} /></Card>
             {f.hidden_verdict && <Card title="Hidden Winner — bằng chứng">
@@ -236,11 +282,7 @@ export default function Product360({ params }: { params: { id: string } }) {
               <Breakdown parts={b.confidence} />
               <div className="mt-3 text-xs text-ink2">Growth velocity {fmt.n(data.derived.growth_velocity)} · Market fit {fmt.n(data.derived.market_fit)} · Margin potential {fmt.n(data.derived.margin_potential)}</div>
             </Card>
-            <Card title="Lifecycle">
-              <div className="mb-3 flex flex-wrap gap-1.5">
-                {data.lifecycle.allowed.map((s: string) => <Button key={s} variant="outline" size="xs" onClick={() => move(s)}><ArrowRight />{s}</Button>)}
-              </div>
-              {lcMsg && <div className="mb-2 text-xs text-critical">{lcMsg}</div>}
+            <Card title="Lifecycle">{/* transitions are system work (decision engine / service token): history only */}
               <ScrollArea className="max-h-48 overflow-y-auto">
                 <ol className="space-y-1.5 text-xs">
                   {data.lifecycle.events.map((e: any, i: number) => (

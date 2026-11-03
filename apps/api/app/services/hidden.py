@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, load_only
 from ..markets import ad_scope_filter
 from ..models import ADS_ONLY, Ad, Creative, Product, ProductDailySnapshot
 from ..visual.models import ProductImage
-from .adsignals import days_running
+from .adsignals import days_running, verified_live, verified_live_sql
 from .product_evidence import advertiser_groups, activity_momentum, creative_replication, external_ads
 
 RULE_VERSION = 3
@@ -24,7 +24,7 @@ STATUS_LABELS = {"CONFIRMED": "Hidden Winner đã xác nhận", "WATCH": "Chưa 
 def assess(p, ads, *, snapshots=(), creatives=(), images=None, now=None):
     now = now or datetime.utcnow()
     ads = external_ads(ads)
-    active = [a for a in ads if a.is_active]
+    active = [a for a in ads if verified_live(a, now)]
     advertisers, unknown = advertiser_groups(ads)
     max_days = max((days_running(a, now) for a in active), default=0)
     mom = activity_momentum(snapshots, ads, now)
@@ -72,11 +72,12 @@ def compute(db: Session, scope=None, include_unconfirmed=False):
     now = datetime.utcnow()
     by_p, cs, history, ims = defaultdict(list), defaultdict(list), defaultdict(list), {}
     q = select(Ad).options(load_only(Ad.id, Ad.product_id, Ad.external_id, Ad.network, Ad.platform, Ad.channel,
-        Ad.is_internal, Ad.is_active, Ad.advertiser_id, Ad.page_id, Ad.first_seen_at, Ad.countries, Ad.country))
+        Ad.is_internal, Ad.is_active, Ad.advertiser_id, Ad.page_id, Ad.first_seen_at, Ad.countries, Ad.country,
+        Ad.last_seen_at, Ad.last_verified_at, Ad.inactive_at))
     q = q.where(Ad.product_id.is_not(None), ADS_ONLY, Ad.is_internal.is_(False))
     if (flt := ad_scope_filter(scope)) is not None:
         # Scope chooses visible products; advertiser/creative evidence stays on the whole product cluster.
-        scoped_products = select(Ad.product_id).where(ADS_ONLY, Ad.is_internal.is_(False), Ad.is_active.is_(True), flt).correlate(None)
+        scoped_products = select(Ad.product_id).where(ADS_ONLY, Ad.is_internal.is_(False), verified_live_sql(now), flt).correlate(None)
         q = q.where(Ad.product_id.in_(scoped_products))
     for a in db.scalars(q):
         by_p[a.product_id].append(a)
@@ -84,7 +85,7 @@ def compute(db: Session, scope=None, include_unconfirmed=False):
         return []
     products = list(db.scalars(select(Product).where(Product.id.in_(by_p))))
     eligible = [p.id for p in products if p.recommendation != "SKIP" and p.category != "non_product"]
-    active_ids = [a.id for pid in eligible for a in by_p[pid] if a.is_active]
+    active_ids = [a.id for pid in eligible for a in by_p[pid] if verified_live(a, now)]
     for c in db.scalars(select(Creative).options(load_only(Creative.id, Creative.ad_id, Creative.product_id, Creative.phash,
                       Creative.sha256, Creative.family_id, Creative.source_url)).where(Creative.product_id.in_(eligible), Creative.ad_id.in_(active_ids))):
         cs[c.product_id].append(c)

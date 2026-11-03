@@ -13,8 +13,9 @@ import httpx
 
 from ..eu_market.connectors import jsonld
 from ..ingest import parse_price
+from ..netsafe import FetchError, check_url, safe_get
 from ..services import spy
-from ..visual.service import UA, check_public_host
+from ..visual.service import UA
 
 
 class ExtractError(Exception):
@@ -24,20 +25,20 @@ class ExtractError(Exception):
 
 
 def _fetch(url: str) -> tuple[str, str]:
-    u = urlparse(url)
-    if u.scheme not in ("http", "https") or not u.hostname:
-        raise ExtractError("bad_url")
     try:
-        check_public_host(u.hostname)
-    except ValueError as e:
-        raise ExtractError("access_restricted", str(e))
-    with httpx.Client(follow_redirects=True, timeout=15, headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"}, max_redirects=4) as c:
+        check_url(url)
+    except FetchError as e:
+        raise ExtractError("bad_url" if e.code == "url_invalid" else "access_restricted", str(e))
+    headers = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"}
+    with httpx.Client(follow_redirects=False, timeout=15, headers=headers) as c:  # a redirected robots.txt is not followed (= allowed)
         if not jsonld.robots_allows(c, url):
             raise ExtractError("access_restricted", "robots.txt")
-        try:
-            r = c.get(url)
-        except httpx.HTTPError as e:
-            raise ExtractError("temporarily_unavailable", type(e).__name__)
+    try:
+        r = safe_get(url, max_bytes=10 * 1024 * 1024, timeout=15, headers=headers, max_redirects=4)  # every hop SSRF-checked
+    except FetchError as e:
+        raise ExtractError("access_restricted" if e.code.startswith("url_") else "bad_response", str(e))
+    except httpx.HTTPError as e:
+        raise ExtractError("temporarily_unavailable", type(e).__name__)
     if r.status_code in (401, 403):
         raise ExtractError("blocked", f"HTTP {r.status_code}")
     if r.status_code == 404:
@@ -46,13 +47,7 @@ def _fetch(url: str) -> tuple[str, str]:
         raise ExtractError("rate_limited", "HTTP 429")
     if r.status_code >= 400:
         raise ExtractError("bad_response", f"HTTP {r.status_code}")
-    final = str(r.url)
-    if urlparse(final).hostname != u.hostname:
-        try:
-            check_public_host(urlparse(final).hostname or "")
-        except ValueError:
-            raise ExtractError("access_restricted", "redirect to private host")
-    return r.text[:3 * 1024 * 1024], final
+    return r.text[:3 * 1024 * 1024], r.url
 
 
 def parse_html(html: str, url: str) -> dict | None:
@@ -81,7 +76,7 @@ def shopify_json(url: str) -> dict | None:
         return None
     path = re.sub(r"\.json$", "", u.path.rstrip("/")) + ".json"
     try:
-        r = httpx.get(f"{u.scheme}://{u.netloc}{path}", timeout=12, headers={"User-Agent": UA}, follow_redirects=True)
+        r = safe_get(f"{u.scheme}://{u.netloc}{path}", max_bytes=5 * 1024 * 1024, timeout=12, headers={"User-Agent": UA})
         if r.status_code != 200 or "json" not in r.headers.get("content-type", ""):
             return None
         j = r.json()

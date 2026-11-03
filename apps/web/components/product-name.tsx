@@ -9,7 +9,6 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api, useAction } from "@/lib/api";
-import { getUser } from "@/lib/realtime";
 import { cn } from "@/lib/utils";
 
 /** Naming (docs/PRODUCT_NAMING.md): product name ≠ advertiser / CTA. Status says how sure we are and who said so. */
@@ -42,7 +41,7 @@ export function ProductName({ p, onChanged, href, className, big }: { p: any; on
     if (r.duplicate) toast.message(`Đã có sản phẩm trùng tên: ${r.duplicate.name} (${r.duplicate.product_code})`,
       { description: "Mở sản phẩm để gộp nếu đúng là một.", action: { label: "Mở", onClick: () => window.open(`/products/${r.duplicate.id}`, "_blank") } });
   };
-  const confirm = () => act.run(async () => done(await api(`/products/${cur.id}/name/confirm`, { method: "POST", body: JSON.stringify({ user: getUser().name || null }) }), "Đã xác nhận tên"));
+  const confirm = () => act.run(async () => done(await api(`/products/${cur.id}/name/confirm`, { method: "POST" }), "Đã xác nhận tên"));
   const undo = () => act.run(async () => done(await api(`/products/${cur.id}/name/undo`, { method: "POST" }), "Đã hoàn tác tên"));
   const title = unknown && !cur.name_provisional ? UNKNOWN_LABEL : cur.name;
   const nameEl = <span className={cn("leading-snug font-semibold", big && "text-xl", unknown && "font-normal text-muted-foreground italic")}>{title}</span>;
@@ -77,7 +76,7 @@ function EditName({ p, onSaved }: { p: any; onSaved: (r: any) => void }) {
   const [orig, setOrig] = useState(p.canonical_name || p.name_hint || "");
   const act = useAction();
   const save = () => act.run(async () => {
-    const r = await api(`/products/${p.id}/name`, { method: "PATCH", body: JSON.stringify({ name_vi: vi, name: orig || null, user: getUser().name || null }) });
+    const r = await api(`/products/${p.id}/name`, { method: "PATCH", body: JSON.stringify({ name_vi: vi, name: orig || null }) });
     setOpen(false);
     onSaved(r);
   });

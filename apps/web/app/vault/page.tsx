@@ -39,16 +39,16 @@ export default function Vault() {
   const [q, setQ] = useState("");
   const [qd, setQd] = useState("");  // q debounced 300 ms: one request per pause, not per keystroke
   useEffect(() => { const t = setTimeout(() => setQd(q), 300); return () => clearTimeout(t); }, [q]);
-  const [family, setFamily] = useState<number | null>(null);
+  const [video, setVideo] = useState<string | null>(null);
   const [status, setStatus] = useState("stored");
-  const { rows, total, last, loading, error, hasMore, loadMore, reload } = usePaged(`/creatives${qs({ type, funnel, country, q: qd, status, family_id: family })}`, 36);
+  const { rows, total, last, loading, error, hasMore, loadMore, reload } = usePaged(`/creatives${qs({ type, funnel, country, q: qd, status, video_key: video })}`, 36);
   useEvents((e) => { if (e.type === "CREATIVE_STORED") reload(); });
   const act = useAction();
   const retry = (id: number) => act.run(async () => { await api(`/creatives/${id}/retry`, { method: "POST" }); reload(); });
 
   return (
     <div>
-      <PageHeader title="Creative Vault" subtitle="Mọi video / ảnh quảng cáo đã thu thập — lưu vĩnh viễn trong kho (link CDN gốc sẽ hết hạn), xem & tải về, gom theo creative family">
+      <PageHeader title="Creative Vault" subtitle="Ảnh bìa + thông tin quảng cáo được giữ lâu; video chỉ giữ trong ngày (mở link gốc khi cần), Ghim 📌 để giữ lại">
         <Input className="h-8 w-56" placeholder="Từ khoá trong ad copy…" value={q} onChange={(e) => setQ(e.target.value)} />
         <Filter value={type} onChange={setType} options={TYPES} />
         <Filter value={funnel} onChange={setFunnel} options={FUNNELS} />
@@ -58,10 +58,10 @@ export default function Vault() {
       {last && (
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
           {Object.entries(last.stats).map(([k, v]) => <Pill key={k} tone={k === "stored" ? "good" : k === "pending" ? "info" : "bad"}>{k}: {v as number}</Pill>)}
-          {family && (
+          {video && (
             <Badge variant="outline" className="gap-1 pr-1">
-              Family #{family}
-              <button type="button" aria-label="Bỏ lọc family" onClick={() => setFamily(null)} className="rounded-full hover:bg-muted"><X className="size-3" /></button>
+              Cùng video #{video}
+              <button type="button" aria-label="Bỏ lọc cùng video" onClick={() => setVideo(null)} className="rounded-full hover:bg-muted"><X className="size-3" /></button>
             </Badge>
           )}
         </div>
@@ -90,7 +90,7 @@ export default function Vault() {
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
                   <DownloadButton c={c} small />
                   <PinButton c={c} />
-                  {c.family_size > 1 && <Button variant="outline" size="xs" onClick={() => setFamily(c.family_id)}><Layers /> Family · {c.family_size}</Button>}
+                  {c.video_size > 1 && <Button variant="outline" size="xs" onClick={() => setVideo(c.video_key)} title="Cùng ảnh bìa video trên mọi page (kể cả bản re-upload)"><Layers /> Cùng video · {c.video_size}</Button>}
                   {c.product_id && <Button asChild variant="outline" size="xs"><Link href={`/products/${c.product_id}`}>Sản phẩm <ArrowRight /></Link></Button>}
                   {c.ad?.snapshot_url && <Button asChild variant="outline" size="xs"><a href={c.ad.snapshot_url} target="_blank" rel="noreferrer">Ad gốc <ExternalLink /></a></Button>}
                   {c.ad?.landing_url && <Button asChild variant="outline" size="xs"><a href={c.ad.landing_url} target="_blank" rel="noreferrer">Landing <ExternalLink /></a></Button>}

@@ -168,26 +168,31 @@ def fetch_product(url: str) -> dict:
         check_public_host(u.hostname)
     except ValueError as e:
         raise ConnectorError(ACCESS_RESTRICTED, str(e))
-    with httpx.Client(follow_redirects=True, timeout=15, headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"}, max_redirects=3) as c:
+    from ...netsafe import FetchError, safe_stream
+
+    headers = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"}
+    with httpx.Client(follow_redirects=False, timeout=15, headers=headers) as c:  # robots.txt on the already-checked host
         if not robots_allows(c, url):
             raise ConnectorError(ACCESS_RESTRICTED, "robots.txt disallows this path")
-        try:
-            with c.stream("GET", url) as r:
-                if r.status_code in (401, 403):
-                    raise ConnectorError(ACCESS_RESTRICTED, f"HTTP {r.status_code}")
-                if r.status_code == 429:
-                    raise ConnectorError("rate_limited", "HTTP 429")
-                if r.status_code >= 400:
-                    raise ConnectorError(UNAVAILABLE if r.status_code >= 500 else BAD_RESPONSE, f"HTTP {r.status_code}")
-                buf = bytearray()
-                for chunk in r.iter_bytes(65536):
-                    buf += chunk
-                    if len(buf) > MAX_HTML:
-                        break
-                html = bytes(buf).decode(r.encoding or "utf-8", "replace")
-                final = str(r.url)
-        except httpx.HTTPError as e:
-            raise ConnectorError(UNAVAILABLE, type(e).__name__)
+    try:  # every redirect hop is re-checked for a public IP (a public page could 302 to 169.254.169.254)
+        with safe_stream(url, timeout=15, headers=headers, max_redirects=3) as r:
+            if r.status_code in (401, 403):
+                raise ConnectorError(ACCESS_RESTRICTED, f"HTTP {r.status_code}")
+            if r.status_code == 429:
+                raise ConnectorError("rate_limited", "HTTP 429")
+            if r.status_code >= 400:
+                raise ConnectorError(UNAVAILABLE if r.status_code >= 500 else BAD_RESPONSE, f"HTTP {r.status_code}")
+            buf = bytearray()
+            for chunk in r.iter_bytes(65536):
+                buf += chunk
+                if len(buf) > MAX_HTML:
+                    break
+            html = bytes(buf).decode(r.encoding or "utf-8", "replace")
+            final = str(r.url)
+    except FetchError as e:
+        raise ConnectorError(ACCESS_RESTRICTED, str(e))
+    except httpx.HTTPError as e:
+        raise ConnectorError(UNAVAILABLE, type(e).__name__)
     it = parse_product(html, final)
     if not it or it.get("price") is None:  # JSON-LD without a usable Offer price → try the page's price meta tags
         it = parse_meta(html, final) or it

@@ -4,7 +4,6 @@ from __future__ import annotations
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -17,10 +16,6 @@ from ..services import naming as N
 
 router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 _impure: dict = {"at": 0.0, "rows": []}   # detect_impure walks every multi-ad product: cached 15 min
-
-
-class ByIn(BaseModel):
-    user: str | None = None
 
 
 def visible_links():
@@ -77,7 +72,7 @@ def candidates(status: str = "pending", product_id: int | None = None, limit: in
 
 
 @router.post("/candidates/{lid}/accept")
-def accept(lid: int, body: ByIn, db: Session = Depends(get_db)):
+def accept(lid: int, db: Session = Depends(get_db)):
     CM.lock(db)
     link = db.get(ProductLink, lid)
     if not link or link.status != "pending":
@@ -85,13 +80,16 @@ def accept(lid: int, body: ByIn, db: Session = Depends(get_db)):
     try:
         tgt, ev = clustering.accept(db, link, str(db.info.get("user_id") or "admin-integration"))
     except ValueError as e:
+        if str(e) == "allocation_conflict":
+            raise HTTPException(409, "Hai sản phẩm đang được hai MKT khác nhau nhận nên không gộp được. "
+                                     "Gộp lại sau khi một bên trả sản phẩm.")
         raise HTTPException(400, str(e))
     db.commit()
     return {"ok": True, "target_id": tgt, "cluster_id": tgt, "event_id": ev}
 
 
 @router.post("/candidates/{lid}/reject")
-def reject(lid: int, body: ByIn, db: Session = Depends(get_db)):
+def reject(lid: int, db: Session = Depends(get_db)):
     CM.lock(db)
     link = db.get(ProductLink, lid)
     if not link or link.status not in ("pending", "blocked", "similar"):
@@ -107,7 +105,7 @@ def stats(db: Session = Depends(get_db)):
 
 
 @router.post("/events/{eid}/undo")
-def undo(eid: int, body: ByIn, db: Session = Depends(get_db)):
+def undo(eid: int, db: Session = Depends(get_db)):
     CM.lock(db)
     event = db.get(Event, eid)
     if not event or event.type != "PRODUCT_CLUSTERED":

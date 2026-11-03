@@ -69,10 +69,17 @@ def publish(type_: str, data: dict | None = None, product_id: int | None = None,
             with SessionLocal() as s:
                 s.add(Event(type=type_, product_id=product_id, data=data or {}))
                 s.commit()
+    if db is not None and db.info.get("collector_atomic"):
+        db.info.setdefault("collector_events", []).append(payload)
+        return
+    deliver(payload)
+
+
+def deliver(payload):
     _fanout(payload)
     for cb in list(listeners):
         try:
-            cb(type_)
+            cb(payload["type"])
         except Exception:
             pass
 

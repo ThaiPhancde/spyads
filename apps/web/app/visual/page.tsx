@@ -14,6 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { takeStashedImage } from "@/components/visual/global-image-search";
 import { CropBox, ImageCropDialog, ImageInput, ImagePreview, ImageUploadDropzone, usePasteImage } from "@/components/visual/image-input";
+import { EU_VISIBLE } from "@/components/layout/nav";
 import { DEFAULT_FILTERS, Filters, ImageSearchProgress, IndexCoverage, PriceComparisonTable, ProductImageCard, SimilarAdsPanel, VisualSearchFilters } from "@/components/visual/results";
 import { QuotaPanel, WebResultCard } from "@/components/visual/web-results";
 import { WatchImageDialog } from "@/components/visual/watch-dialog";
@@ -136,6 +137,7 @@ function VisualPage() {
       const fd = await imageForm(inp, c);
       if (f.keywords.length) fd.append("keywords", f.keywords.join("|"));
       if (jobId) fd.append("lens_job_id", String(jobId));
+      if (f.sources.length) fd.append("sources", f.sources.join(","));
       setPrices(await api("/products/compare-prices-by-image", { method: "POST", body: fd }));
     } catch (e: any) { setErr(String(e.message || e)); } finally { setPricesBusy(false); }
   };
@@ -195,7 +197,7 @@ function VisualPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader title="Tìm bằng ảnh" subtitle="Một ảnh bất kỳ — kể cả chưa từng có trong SpyAds: tìm trong kho (ads, nguồn hàng, EU) và trên Internet (Google Lens), xem shop, giá, link thật; so sánh giá; lưu sản phẩm mới vào kho.">
+      <PageHeader title="Tìm bằng ảnh" subtitle="Một ảnh bất kỳ — kể cả chưa từng có trong SpyAds: tìm trong kho (ads, nguồn hàng) và trên Internet (Google Lens), xem shop, giá, link thật; so sánh giá; lưu sản phẩm mới vào kho.">
         <IndexCoverage st={status.data} />
       </PageHeader>
       <QuotaPanel q={quota.data} onRefresh={quota.reload} />
@@ -223,7 +225,7 @@ function VisualPage() {
               <Button type="button" onClick={() => apply(filters)} disabled={!input || busy || webRunning}>{busy || webRunning ? <><Spinner /> Đang tìm…</> : <><Search /> Tìm</>}</Button>
               {data && <span className="text-xs text-muted-foreground">Trong kho: {data.total} kết quả ({data.took_ms} ms, {data.query?.embedding ? "hash + CLIP" : "hash"})</span>}
               {web && <span className="text-xs text-muted-foreground">· Internet: {web.status === "running" ? "đang tìm…" : `${web.total_listings} listing (${web.cached ? "cache" : "live"}, ${web.with_price} có giá, ${web.discovered} mới)`}</span>}
-              {result && <Button type="button" variant="outline" size="sm" onClick={() => setWatchOpen(true)} disabled={!data?.query}><Eye /> Theo dõi</Button>}
+              {EU_VISIBLE && result && <Button type="button" variant="outline" size="sm" onClick={() => setWatchOpen(true)} disabled={!data?.query}><Eye /> Theo dõi</Button>}
             </div>
             {webMsg && (webMsg.code === "not_cached"
               ? <div className="flex flex-wrap items-center gap-2 text-xs"><span className="text-muted-foreground">{webMsg.text}</span>

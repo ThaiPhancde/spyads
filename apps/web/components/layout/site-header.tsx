@@ -16,7 +16,7 @@ export function SiteHeader() {
       <div className="flex w-full items-center gap-1 px-4 lg:gap-2 lg:px-6">
         <SidebarTrigger className="-ml-1" />
         <Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" />
-        <h1 className="text-base font-medium">{titleFor(path)}</h1>
+        <p className="text-base font-medium">{titleFor(path)}</p>
         <div className="ml-auto flex items-center gap-2">
           <GlobalImageSearch variant="ghost" size="icon-sm" iconOnly className="size-8" />
           <Badge variant="outline" className="hidden gap-1.5 sm:inline-flex">

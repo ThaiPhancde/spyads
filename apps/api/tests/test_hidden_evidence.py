@@ -141,7 +141,9 @@ def test_market_filter_keeps_global_advertiser_count(tmp_path):
         p = product(product_code="scope-test")
         db.add(p)
         db.flush()
-        ads = [ad(i, advertiser_id=None, page_id=f"page{i}", country="PH" if i == 1 else "US") for i in range(1, 5)]
+        # compute() runs on the real clock: a sighting at the fixed NOW would be outside ACTIVE_GRACE_DAYS (not live)
+        ads = [ad(i, advertiser_id=None, page_id=f"page{i}", country="PH" if i == 1 else "US", last_seen_at=datetime.utcnow())
+               for i in range(1, 5)]
         db.add_all(ads)
         db.commit()
         rows = compute(db, "PH", include_unconfirmed=True)

@@ -27,6 +27,7 @@ import httpx
 from sqlalchemy import or_, select
 
 from .models import Ad, Creative, Product
+from .netsafe import FetchError, safe_stream
 from .services import llm
 from .services.creative_text import ad_text_evidence, needs_text
 from .services.enrichment import classify_creative
@@ -146,7 +147,7 @@ def _clip(c: Creative) -> tuple[bytes, str] | None:
         return None
     try:
         buf = bytearray()
-        with httpx.stream("GET", url, timeout=30, follow_redirects=True) as r:
+        with safe_stream(url, timeout=30) as r:  # every redirect hop SSRF-checked
             if r.status_code in (403, 404, 410):
                 return b"", ""  # signed CDN link expired: never coming back
             if r.status_code != 200:
@@ -158,6 +159,8 @@ def _clip(c: Creative) -> tuple[bytes, str] | None:
                 if len(buf) > MAX_CLIP:
                     return b"", ""
         return bytes(buf), (r.headers.get("content-type") or "video/mp4").split(";")[0]
+    except FetchError:
+        return b"", ""  # private / non-http address: decided, never fetched
     except httpx.HTTPError:
         return None
 

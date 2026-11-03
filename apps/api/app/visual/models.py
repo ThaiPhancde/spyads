@@ -23,6 +23,7 @@ class ProductImage(Base):
     image_sha256: Mapped[str | None] = mapped_column(String(64), index=True)  # of the thumbnail bytes
     phash: Mapped[str | None] = mapped_column(String(16), index=True)  # imagehash.phash, 64 bit hex
     dhash: Mapped[str | None] = mapped_column(String(16), index=True)  # imagehash.dhash, 64 bit hex
+    video_key: Mapped[str | None] = mapped_column(String(16), index=True)  # creatives only: same cover frame ≤ 6 bits (app/videos.py)
     embedding: Mapped[bytes | None] = mapped_column(LargeBinary)  # float16[dim], L2-normalised (embed.py)
     emb_model: Mapped[str | None] = mapped_column(String(48))
     width: Mapped[int | None] = mapped_column(Integer)

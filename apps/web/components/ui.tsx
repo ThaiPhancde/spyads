@@ -127,7 +127,7 @@ export function Loading({ error, rows = 3 }: { error?: string | null; rows?: num
       <Alert variant="destructive">
         <AlertCircle />
         <AlertTitle>Không tải được dữ liệu</AlertTitle>
-        <AlertDescription>{error} — kiểm tra API đang chạy.</AlertDescription>
+        <AlertDescription>{error}{/fetch|network|50\d|timeout/i.test(error) ? " — kiểm tra API đang chạy." : ""}</AlertDescription>
       </Alert>
     );
   }

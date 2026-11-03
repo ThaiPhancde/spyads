@@ -1,14 +1,16 @@
+importScripts("outbox.js");
 const DEFAULTS = { api: "http://localhost:8000", token: "", user: "" };
 
 async function cfg() { return chrome.storage.sync.get(DEFAULTS); }
 const base = (c) => c.api.replace(/\/+$/, "");
 
-async function post(path, body) {
+async function post(path, body, endpoint) {
   const c = await cfg();
+  if (endpoint && endpoint !== base(c)) throw new Error("API changed; restore original API to retry this batch");
   const headers = { "Content-Type": "application/json" };
   if (c.token) headers["X-Ingest-Token"] = c.token;
-  const r = await fetch(base(c) + path, { method: "POST", headers, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 160));
+  const r = await fetch(base(c) + path, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
+  if (!r.ok) throw Object.assign(new Error(r.status + " " + (await r.text()).slice(0, 160)), { status: r.status });
   return r.json();
 }
 
@@ -17,10 +19,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     try {
       const c = await cfg();
       if (msg.type === "ads") {
-        const res = await post("/api/ingest/meta-library", { items: msg.items, country: msg.country, saved_by: c.user || null });
-        const st = await chrome.storage.local.get({ total: 0 });
-        await chrome.storage.local.set({ total: st.total + (res.new_ads || 0) });
-        sendResponse({ ok: true, result: res });
+        const id = msg.idempotency_key || crypto.randomUUID();
+        await ToolSpyOutbox.store.enqueue({ id, endpoint: base(c), attempts: 0, nextAt: 0,
+          body: { items: msg.items, country: msg.country, saved_by: c.user || null, idempotency_key: id } });
+        sendResponse({ ok: true, queued: true, idempotency_key: id });
+        void drainOutbox();
       } else if (msg.type === "product") {
         const res = await post("/api/ingest/products", Object.assign({}, msg.payload, { saved_by: c.user || null }));
         sendResponse({ ok: true, result: res });
@@ -36,3 +39,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true; // keep the channel open for the async response
 });
+
+let draining = null;
+function drainOutbox() {
+  if (draining) return draining;
+  draining = ToolSpyOutbox.drain(ToolSpyOutbox.store, async (row) => {
+    const res = await post("/api/ingest/meta-library", row.body, row.endpoint);
+    if (res.idempotency_key !== row.id) throw new Error("Missing batch acknowledgement; upgrade API");
+    const counters = await chrome.storage.local.get({ total: 0, lastCountedBatch: "" });
+    if (counters.lastCountedBatch !== row.id) await chrome.storage.local.set({
+      total: counters.total + (res.new_ads || 0), lastCountedBatch: row.id });
+  }).catch(console.error).finally(() => { draining = null; });
+  return draining;
+}
+chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === "toolspy-outbox") void drainOutbox(); });
+chrome.runtime.onStartup.addListener(() => { void drainOutbox(); });
+chrome.runtime.onInstalled.addListener(() => { void drainOutbox(); });
+// Recreate on every service-worker start; alarms survive ordinary worker suspension.
+chrome.alarms.create("toolspy-outbox", { periodInMinutes: 1 });
+void drainOutbox();

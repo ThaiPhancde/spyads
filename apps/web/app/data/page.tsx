@@ -29,7 +29,12 @@ const HEALTH: Record<string, [Tone, string]> = {
   degraded: ["warn", "Degraded"], unknown: ["neutral", "Chưa chạy"],
   waiting_file: ["neutral", "Chờ file"],
   configured: ["neutral", "Đủ cấu hình"],
+  blocked: ["bad", "Bị chặn (cần xác minh)"], rate_limited: ["warn", "Rate limited"],
 };
+const JOB: Record<string, [Tone, string]> = {
+  idle: ["good", "Sẵn sàng"], running: ["info", "Đang chạy"], retry_wait: ["warn", "Chờ thử lại"], error: ["bad", "Lỗi"], blocked: ["bad", "Bị chặn"],
+};
+const when = (d?: string | null) => (d ? new Date(d + "Z").toLocaleString("vi-VN") : "—");
 
 function ConnectorRow({ c, onChange, byKey }: { c: any; onChange: () => void; byKey: any }) {
   const [open, setOpen] = useState(false);
@@ -43,7 +48,7 @@ function ConnectorRow({ c, onChange, byKey }: { c: any; onChange: () => void; by
   });
   const toggle = () => act.run(async () => { await api(`/collector/connectors/${c.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !c.enabled }) }); onChange(); });
   const test = () => act.run(async () => { setMsg("Đang kiểm tra…"); const r = await api(`/collector/connectors/${c.id}/test`, { method: "POST" }); setMsg(JSON.stringify(r)); onChange(); });
-  const sync = () => act.run(async () => { await api(`/collector/connectors/${c.id}/sync`, { method: "POST" }); setMsg("Đã đưa vào hàng đợi — kết quả hiện ở feed realtime"); toast(`Đã xếp hàng sync ${c.name}`); });
+  const sync = () => act.run(async () => { const r = await api(`/collector/connectors/${c.id}/sync`, { method: "POST" }); const busy = r?.already_running; setMsg(busy ? "Đang chạy sẵn (worker hoặc lần bấm trước) — chờ kết quả ở feed realtime" : "Đã đưa vào hàng đợi — kết quả hiện ở feed realtime"); toast(busy ? `${c.name} đang chạy sẵn` : `Đã xếp hàng sync ${c.name}`); });
   const [tone, label] = HEALTH[c.health] || HEALTH.unknown;
   const id = `conn-${c.id}`;
   return (
@@ -242,6 +247,110 @@ function StorageCard() {
   );
 }
 
+function MonitoringCard({ byKey }: { byKey: any }) {
+  const [hours, setHours] = useState("24");
+  const { data, error, reload } = useApi(`/collector/kpis?hours=${hours}`);
+  if (!data) return <Loading error={error} />;
+  const t = data.totals;
+  const media = Object.entries(data.media || {}) as [string, any][];
+  return (
+    <>
+      <Card title={"Thu thập — " + data.window_hours + " giờ qua"} className="mb-4">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Select value={hours} onValueChange={setHours}>
+            <SelectTrigger size="sm" className="w-32"><SelectValue /></SelectTrigger>
+            <SelectContent>{[["1", "1 giờ"], ["24", "24 giờ"], ["168", "7 ngày"], ["720", "30 ngày"]].map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent>
+          </Select>
+          <Button variant="outline" size="sm" onClick={reload}><RefreshCw />Làm mới</Button>
+          <span className="text-xs text-muted-foreground">Trình duyệt chạy song song tối đa: {data.browser_capacity}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+          <Metric label="Trang đã lấy" value={fmt.n(t.pages)} sub={fmt.n(t.empty_pages) + " trang rỗng"} />
+          <Metric label="Bản ghi nhận" value={fmt.n(t.fetched)} sub={"+ " + fmt.n(t.live_fetched) + " từ tìm kiếm"} />
+          <Metric label="Ads chấp nhận" value={fmt.n(t.accepted)} sub={fmt.n(t.new_ads) + " mới"} />
+          <Metric label="Trùng" value={fmt.n(t.duplicates)} sub="ad đã có, chỉ cập nhật" />
+          <Metric label="Không hợp lệ" value={fmt.n(t.invalid)} sub={fmt.n(t.excluded) + " bị lọc nội dung"} />
+          <Metric label="Lượt chạy" value={fmt.n(t.runs)} sub={t.ok + " ok · " + t.error + " lỗi · " + t.lost + " mất lease"} />
+          <Metric label="Đang chờ thử lại" value={fmt.n(t.retry_wait)} sub={t.blocked_jobs + " job bị chặn"} />
+          <Metric label="Nguồn không khoẻ" value={fmt.n(t.unhealthy)} />
+        </div>
+      </Card>
+      <Card title="Theo nguồn" pad={false} className="mb-4">
+        <ScrollArea className="w-full">
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>Nguồn</TableHead><TableHead>Health</TableHead><TableHead className="text-right">Trang</TableHead>
+              <TableHead className="text-right">Nhận</TableHead><TableHead className="text-right">Chấp nhận</TableHead>
+              <TableHead className="text-right">Trùng</TableHead><TableHead className="text-right">Không hợp lệ</TableHead>
+              <TableHead className="text-right">Tìm kiếm</TableHead><TableHead>Job · cursor · retry</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {data.connectors.map((c: any) => {
+                const [tone, label] = HEALTH[c.health] || HEALTH.unknown;
+                const s = c.scheduled;
+                return (
+                  <TableRow key={c.id} className={cn(!c.enabled && "opacity-60")}>
+                    <TableCell className="max-w-56"><div className="flex items-center gap-2"><NetworkBadge network={c.network} byKey={byKey} small /><span className="truncate font-medium">{c.name}</span></div>
+                      <div className="text-xs text-muted-foreground">sync gần nhất {when(c.last_sync_at)}</div></TableCell>
+                    <TableCell><Tooltip><TooltipTrigger asChild><span><Pill tone={tone}>{label}</Pill></span></TooltipTrigger>{c.last_error && <TooltipContent className="max-w-sm">{c.last_error}</TooltipContent>}</Tooltip></TableCell>
+                    <TableCell className="tnum text-right">{fmt.n(s.pages)}{s.empty_pages ? <span className="text-xs text-muted-foreground"> ({s.empty_pages} rỗng)</span> : null}</TableCell>
+                    <TableCell className="tnum text-right">{fmt.n(s.fetched)}</TableCell>
+                    <TableCell className="tnum text-right">{fmt.n(s.accepted)}<span className="text-xs text-muted-foreground"> · {fmt.n(s.new_ads)} mới</span></TableCell>
+                    <TableCell className="tnum text-right">{fmt.n(s.duplicates)}</TableCell>
+                    <TableCell className="tnum text-right">{fmt.n(s.invalid)}{s.excluded ? <span className="text-xs text-muted-foreground"> + {s.excluded} lọc</span> : null}</TableCell>
+                    <TableCell className="tnum text-right">{c.live_search ? <>{fmt.n(c.live_search.fetched)}<span className="text-xs text-muted-foreground"> · {c.live_search.jobs} lượt</span></> : "—"}</TableCell>
+                    <TableCell className="min-w-64 text-xs">
+                      {c.jobs.length === 0 && <span className="text-muted-foreground">Chưa chạy theo lịch</span>}
+                      {c.jobs.map((j: any) => {
+                        const [jt, jl] = JOB[j.status] || JOB.idle;
+                        return (
+                          <div key={j.key} className="flex flex-wrap items-center gap-1.5 py-0.5">
+                            <Pill tone={jt}>{jl}</Pill>
+                            <span className="text-muted-foreground">{j.key.startsWith("q:") ? "truy vấn" : "sync"}</span>
+                            {j.cursor && <span>cursor {j.cursor.resumable}/{j.cursor.countries} nước còn trang · {j.cursor.done} xong</span>}
+                            {j.retry_count > 0 && j.next_retry_at && <span className="text-warning">thử lại #{j.retry_count} lúc {when(j.next_retry_at)}</span>}
+                            {j.status === "running" && <span className="text-muted-foreground">{j.lease_owner} · nhịp {when(j.heartbeat_at)}</span>}
+                            {j.last_error && j.status !== "idle" && <span className="truncate text-critical" title={j.last_error}>{j.last_error.slice(0, 80)}</span>}
+                          </div>
+                        );
+                      })}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </ScrollArea>
+      </Card>
+      <Card title="Media có thể xem" pad={false}>
+        {media.length === 0 && <Empty>Chưa có creative.</Empty>}
+        {media.length > 0 && (
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>Nền tảng</TableHead><TableHead className="text-right">Tổng</TableHead><TableHead className="text-right">Đã lưu file</TableHead>
+              <TableHead className="text-right">Có ảnh bìa</TableHead><TableHead className="text-right">Chờ</TableHead><TableHead className="text-right">Hết hạn / lỗi / bỏ qua</TableHead>
+              <TableHead className="w-48">Xem được</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {media.map(([net, m]) => (
+                <TableRow key={net}>
+                  <TableCell><NetworkBadge network={net} byKey={byKey} small /></TableCell>
+                  <TableCell className="tnum text-right">{fmt.n(m.total)}</TableCell>
+                  <TableCell className="tnum text-right">{fmt.n(m.stored || 0)}</TableCell>
+                  <TableCell className="tnum text-right">{fmt.n(m.thumb)}</TableCell>
+                  <TableCell className="tnum text-right">{fmt.n(m.pending || 0)}</TableCell>
+                  <TableCell className="tnum text-right">{fmt.n(m.expired || 0)} / {fmt.n(m.failed || 0)} / {fmt.n(m.skipped || 0)}</TableCell>
+                  <TableCell><div className="flex items-center gap-2"><Progress value={m.available_pct ?? 0} className="h-2 bg-muted" /><span className="tnum w-12 text-right text-xs">{m.available_pct ?? "—"}%</span></div></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </Card>
+    </>
+  );
+}
+
 const INGEST_DOC = `POST /api/ingest/ads        {"records":[{"source":"pipiads","source_ad_id":"123","platform":"tiktok","country":"SA",
                               "advertiser":"ABC Store","ad_text":"…","cta_type":"SHOP_NOW","landing_page":"https://…",
                               "media":[{"type":"video","url":"https://…mp4","preview_url":"https://…jpg"}],
@@ -302,6 +411,7 @@ export default function Collector() {
       <Tabs defaultValue="sources" className="mt-3">
         <TabsList className="mb-3 flex-wrap">
           <TabsTrigger value="sources">Nguồn & connector</TabsTrigger>
+          <TabsTrigger value="monitor">Giám sát</TabsTrigger>
           <TabsTrigger value="storage">Dung lượng</TabsTrigger>
           <TabsTrigger value="track">Theo dõi & Upload</TabsTrigger>
           <TabsTrigger value="ingest">Ingest API</TabsTrigger>
@@ -318,6 +428,10 @@ export default function Collector() {
               </div>
             ))}
           </Card>
+        </TabsContent>
+
+        <TabsContent value="monitor">
+          <MonitoringCard byKey={byKey} />
         </TabsContent>
 
         <TabsContent value="storage">
@@ -373,7 +487,7 @@ export default function Collector() {
                         <TableCell className="text-xs">{t.last_error ? <span className="text-critical">{t.last_error.slice(0, 80)}</span> : `${t.last_count} ads · ${t.last_new} mới`}</TableCell>
                         <TableCell className="whitespace-nowrap">
                           <div className="flex gap-1">
-                            <Button variant="outline" size="xs" onClick={async () => { await api(`/collector/queries/${t.id}/run`, { method: "POST" }); toast("Đã chạy — xem feed realtime"); }}><Play />Chạy</Button>
+                            <Button variant="outline" size="xs" onClick={async () => { const r = await api(`/collector/queries/${t.id}/run`, { method: "POST" }); toast(r?.already_running ? "Truy vấn này đang chạy sẵn" : "Đã chạy — xem feed realtime"); }}><Play />Chạy</Button>
                             <AlertDialog>
                               <AlertDialogTrigger asChild><Button variant="outline" size="xs"><Trash2 />Xoá</Button></AlertDialogTrigger>
                               <AlertDialogContent>

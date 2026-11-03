@@ -133,6 +133,9 @@ class Store(Base):
     estimated_traffic: Mapped[float] = mapped_column(Float, default=0)
     traffic_growth: Mapped[float] = mapped_column(Float, default=0)  # % (Similarweb)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # landing page age (spy.fetch_landing): shopify / shoplazza / ladipage / woocommerce / unknown + Shopify published_at
+    page_platform: Mapped[str | None] = mapped_column(String(32))
+    page_published_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class Ad(Base):
@@ -283,6 +286,8 @@ class Creative(Base):
     height: Mapped[int | None] = mapped_column(Integer)
     duration_sec: Mapped[float | None] = mapped_column(Float)
     family_id: Mapped[int | None] = mapped_column(Integer, index=True)  # creative family (discovery §6)
+    video_fp: Mapped[str | None] = mapped_column(String(50))  # dHash at 20/50/80 % "h20:h50:h80" (media.video_fingerprint)
+    video_fp_confidence: Mapped[float | None] = mapped_column(Float)  # usable frames / 3
     transcript: Mapped[str | None] = mapped_column(Text)
     ocr_text: Mapped[str | None] = mapped_column(Text)
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -310,6 +315,9 @@ class TrackedQuery(Base):
     last_count: Mapped[int] = mapped_column(Integer, default=0)
     last_new: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
+    # Meta Ad Library paging state per country ({country: {cursor, sid, tok, done, at}}): the next run continues deeper
+    # instead of re-reading the same first `limit` ads (every re-run of a query used to return 40 known ads → 0 new)
+    cursor: Mapped[dict | None] = mapped_column(JSON)
 
 
 class SearchJob(Base):
@@ -546,3 +554,20 @@ from . import behavior  # noqa: E402,F401 — Phase 3 per-MKT behavior history (
 from . import preferences  # noqa: E402,F401 — Phase 4 MKT preference profiles
 from . import recommend  # noqa: E402,F401 — Phase 5 personalized recommendation cache
 from . import interest  # noqa: E402,F401 — app_settings (soft-dedup penalty knobs)
+from . import crawl_queue  # noqa: E402,F401 — Phase 3 persistent crawl jobs (crawl_jobs / crawl_runs)
+
+
+class IngestBatch(Base):
+    __tablename__ = "collector_ingest_batches"
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    result: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class MetaCollation(Base):
+    __tablename__ = "meta_collations"
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    page_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    collation_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    ad_id: Mapped[int] = mapped_column(ForeignKey("ads.id", ondelete="CASCADE"), index=True)

@@ -14,13 +14,13 @@ import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Ad, Comment, Product
+from ..models import Ad, Comment, Product, Store
 
 log = logging.getLogger(__name__)
 
@@ -109,14 +109,69 @@ def parse_landing(html: str, url: str) -> dict:
     return out
 
 
-def _get(url: str):
-    from curl_cffi import requests as cr  # dependency of meta-ads-collector; plain httpx gets 429 from Shopify's bot wall
+PAGE_AGE_FLAG_DAYS = 14  # landing page older than the first video by more than this → someone sold it before
 
-    return cr.get(url, impersonate="chrome", timeout=TIMEOUT, allow_redirects=True)
+
+def detect_platform(html: str) -> str:
+    """Store platform from HTML markers (Shoplazza serves its images from img.staticdj.com)."""
+    h = html.lower()
+    if "cdn.shopify.com" in h or "shopify.theme" in h:
+        return "shopify"
+    if "shoplazza" in h or "staticdj.com" in h:
+        return "shoplazza"
+    if "ladicdn" in h or "ladipage" in h:
+        return "ladipage"
+    if "wp-content" in h and "woocommerce" in h:
+        return "woocommerce"
+    return "unknown"
+
+
+def shopify_published_at(product: dict) -> datetime | None:
+    """Shopify /products/<handle>.json `product` → published_at (fallback created_at) as naive UTC, like the rest of the DB."""
+    for k in ("published_at", "created_at"):
+        try:
+            d = datetime.fromisoformat(str(product.get(k) or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return d.astimezone(timezone.utc).replace(tzinfo=None) if d.tzinfo else d
+    return None
+
+
+def shoplazza_published_at(html: str, handle: str) -> datetime | None:
+    """Shoplazza product IDs are random UUID v4 (no date inside), but the product page embeds the product's own JSON with
+    published_at / created_at (checked on live stores 2026-10-26). Taken from the object of THIS handle, never a
+    recommended product's."""
+    def first(anchor: str, keys: str, span: int):
+        i = html.find(anchor)
+        if i < 0:
+            return None
+        w = html[i:i + span]  # stop where the next product object starts (recommended products follow)
+        cut = [k for k in (w.find('"handle":"', 1), w.find(r'"url":"\/products\/', 1)) if k > 0]
+        m = re.search(rf'"(?:{keys})":"([0-9T:\-]{{19}}Z?)"', w[:min(cut)] if cut else w, flags=re.I)
+        return shopify_published_at({"published_at": m.group(1).upper()}) if m else None
+
+    dates = [d for d in (first(f'"handle":"{handle}"', "published_at|created_at", 4000),  # the product object
+                         first(rf'"url":"\/products\/{handle}"', "published_at", 800)) if d]  # its storefront card
+    return min(dates) if dates else None
+
+
+def page_age_flag(store, video_first_seen: datetime | None) -> dict:
+    """How many days the store's landing page predates the first video; flag when > PAGE_AGE_FLAG_DAYS."""
+    if not store.page_published_at or not video_first_seen:
+        return {"days_older": None, "flag": False}
+    days = (video_first_seen - store.page_published_at).days
+    return {"days_older": days, "flag": days > PAGE_AGE_FLAG_DAYS}
+
+
+def _get(url: str):
+    from ..netsafe import safe_get
+
+    # curl_cffi chrome impersonation: plain httpx gets 429 from Shopify's bot wall. Every redirect hop SSRF-checked.
+    return safe_get(url, max_bytes=8 * 1024 * 1024, timeout=TIMEOUT, impersonate="chrome")
 
 
 def fetch_landing(url: str) -> dict:
-    """One store page → {price, currency, compare_at, rating, review_count, reviews, ok, status}."""
+    """One store page → {price, currency, compare_at, rating, review_count, reviews, page_platform, page_published_at, ok, status}."""
     out = {"ok": False, "status": None}
     try:
         r = _get(url)
@@ -124,14 +179,22 @@ def fetch_landing(url: str) -> dict:
         if r.status_code >= 400:
             return out
         out.update(parse_landing(r.text, url))
-        pu = urlparse(str(r.url))
-        if out.get("price") is None and "/products/" in pu.path:  # Shopify: the product JSON always has the variants
+        out["page_platform"] = detect_platform(r.text)
+        pu = urlparse(r.url)
+        # Shopify: the product JSON has the variants and the page's published_at (also tried when a headless theme hides the markers)
+        if "/products/" in pu.path and (out["page_platform"] == "shopify" or out.get("price") is None):
             rj = _get(urlunparse(pu._replace(path=re.sub(r"\.json$", "", pu.path.rstrip("/")) + ".json", query="", fragment="")))
             if rj.status_code == 200 and "json" in rj.headers.get("content-type", ""):
-                vs = [v for v in rj.json().get("product", {}).get("variants", []) if _num(v.get("price"))]
-                if vs:
+                prod = rj.json().get("product") or {}
+                if prod:
+                    out["page_platform"] = "shopify"
+                    out["page_published_at"] = shopify_published_at(prod)
+                vs = [v for v in prod.get("variants", []) if _num(v.get("price"))]
+                if vs and out.get("price") is None:
                     out["price"] = min(_num(v["price"]) for v in vs)
                     out["compare_at"] = max((_num(v.get("compare_at_price")) or 0 for v in vs), default=None) or None
+        if out["page_platform"] == "shoplazza" and (m := re.search(r"/products/([^/?#]+)", pu.path)):
+            out["page_published_at"] = shoplazza_published_at(r.text, m.group(1))
         out["ok"] = out.get("price") is not None or bool(out.get("reviews"))
     except Exception as e:  # network / parse — never let one bad store stop the batch
         out["error"] = f"{type(e).__name__}: {str(e)[:120]}"
@@ -204,7 +267,7 @@ def scan(db: Session, product_id: int | None = None, limit: int = 40, review_lis
 
     now = datetime.utcnow()
     stale = now - timedelta(days=RECHECK_DAYS)
-    stats = {"text_priced": 0, "urls_fetched": 0, "landing_priced": 0, "landing_failed": 0, "reviews_added": 0, "listings_fetched": 0}
+    stats = {"text_priced": 0, "urls_fetched": 0, "landing_priced": 0, "landing_failed": 0, "landing_no_price": 0, "reviews_added": 0, "listings_fetched": 0}
     touched: set[int] = set()
     spy = select(Ad).where(or_(Ad.channel == "ads", Ad.channel.is_(None)), Ad.is_internal.is_(False))
     if product_id:
@@ -242,8 +305,8 @@ def scan(db: Session, product_id: int | None = None, limit: int = 40, review_lis
     for k, res in results.items():
         rows = [a for a in db.scalars(select(Ad).where(Ad.landing_url.like(f"%{urlparse(k).netloc}%"), or_(Ad.channel == "ads", Ad.channel.is_(None)))).all()
                 if norm_url(a.landing_url) == k]
-        if not res.get("ok"):
-            stats["landing_failed"] += 1
+        if not res.get("ok"):  # failed = blocked / HTTP error / network; no_price = page loaded but sells nothing priced
+            stats["landing_failed" if res.get("error") or (res.get("status") or 0) >= 400 else "landing_no_price"] += 1
         for a in rows:
             a.landing_checked_at = now
             if res.get("price") and (a.price is None or a.price_source in (None, "ad_text", "landing")):
@@ -253,6 +316,11 @@ def scan(db: Session, product_id: int | None = None, limit: int = 40, review_lis
                 touched.add(a.product_id)
             if res.get("rating"):
                 a.rating, a.review_count = res["rating"], res.get("review_count") or a.review_count
+        if res.get("page_platform") and rows:  # page age onto the Store row(s) of this landing (Store key = domain + product)
+            for st in db.scalars(select(Store).where(Store.domain == urlparse(k).netloc, Store.product_id.in_([a.product_id for a in rows]))):
+                if res["page_platform"] != "unknown" or not st.page_platform:
+                    st.page_platform = res["page_platform"]
+                st.page_published_at = res.get("page_published_at") or st.page_published_at
         if res.get("reviews") and rows:
             lead = rows[0]
             new = _add_comments(db, [{**r, "external_id": f"lp:{hashlib.sha1((k + r['text']).encode()).hexdigest()[:16]}", "created_at": r.get("date")}

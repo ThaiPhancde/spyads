@@ -27,6 +27,14 @@ class AuthExpired(ConnectorError):
     pass
 
 
+class Blocked(ConnectorError):
+    """The source showed an access challenge (CAPTCHA / verify page) or denied the page: needs a person, never bypassed."""
+
+
+class RateLimited(ConnectorError):
+    """The source said slow down (HTTP 429 / rate-limit payload): retry later with backoff."""
+
+
 @dataclass
 class RateLimit:
     requests_per_minute: float = 30

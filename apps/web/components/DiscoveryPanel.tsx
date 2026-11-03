@@ -43,7 +43,7 @@ export function DiscoveryPanel({ productId, onChange }: { productId: number; onC
 
   return (
     <div className="space-y-4">
-      <Card title={`Video & creative (${videos.length} video · ${images.length} ảnh · ${data.families} creative family)`}>
+      <Card title={`Video & creative (${videos.length} video · ${images.length} ảnh · ${data.families} video khác nhau)`}>
         {data.creatives.length === 0 ? <Empty>Chưa có media cho sản phẩm này.</Empty> : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {[...videos, ...images].slice(0, 24).map((c: any) => (
@@ -52,7 +52,7 @@ export function DiscoveryPanel({ productId, onChange }: { productId: number; onC
                 <div className="flex flex-wrap gap-x-2 text-[11px] text-ink2">
                   <span className="font-medium">{c.ad?.advertiser}</span>
                   <span>{c.ad?.country}</span><span>{c.ad?.days_running ?? "—"} ngày</span>
-                  {c.ad?.funnel && <span>funnel {c.ad.funnel}</span>}{c.family_size > 1 && <span>family ×{c.family_size}</span>}
+                  {c.ad?.funnel && <span>funnel {c.ad.funnel}</span>}{c.video_size > 1 && <span>cùng video ×{c.video_size}</span>}
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   <DownloadButton c={c} small />
