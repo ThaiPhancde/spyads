@@ -1,0 +1,13 @@
+# Lint = real bugs first (syntax, undefined names, unused imports/variables). Style rules are intentionally off:
+# the codebase uses long lines and semicolon-free dense style on purpose (see docs/QUICK_AUDIT_REPORT.md).
+line-length = 160
+target-version = "py311"
+extend-exclude = ["data", ".venv", "_demo_backup", "_stale_backup", "market_intel.db"]
+
+[lint]
+select = ["E9", "F63", "F7", "F82", "F401", "F811", "F841", "B006", "B018"]
+ignore = []
+
+[lint.per-file-ignores]
+"tests/*" = ["F401", "F841"]
+"__init__.py" = ["F401"]

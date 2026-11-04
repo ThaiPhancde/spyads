@@ -309,8 +309,10 @@ def test_older_undo_is_refused_until_latest_grouping_is_undone(db):
 
 
 @pytest.mark.skipif(engine.dialect.name != "postgresql", reason="PostgreSQL pgvector path")
-def test_pgvector_neighbors_are_reused_without_inference(db):
+def test_pgvector_neighbors_are_reused_without_inference(db, monkeypatch):
     from app.visual.models import ProductImage
+    # the next test recreates the tables (the column disappears): the cached "pgvector is ready" flag must not outlive this test
+    monkeypatch.setattr(embed, "_pgv", dict(embed._pgv))
     a, b, x, y = same_product(db)
     db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     db.execute(text("ALTER TABLE product_images ADD COLUMN embedding_vec vector(512)"))
