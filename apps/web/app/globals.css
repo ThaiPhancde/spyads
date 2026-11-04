@@ -67,41 +67,47 @@
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0% 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0% 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0% 0 0);
-  --primary: oklch(0% 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.97 0.01 17);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0% 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-  --surface: oklch(0.98 0 0);
+  --radius: 0.75rem;
+  /* LevelUP Design System V2 (HRM-3P): brand cam + neutral hơi ấm (stone) */
+  --brand-50: #fff7ed; --brand-100: #ffedd5; --brand-400: #f4a93c; --brand-500: #ed8a3a;
+  --brand-600: #e8743c; --brand-700: #d2582e; --flame-500: #e2503a;
+  --gradient-brand: linear-gradient(135deg, #f4a93c 0%, #e8743c 52%, #dd4e3a 100%);
+  --shadow-soft: 0 1px 2px rgba(28, 25, 23, 0.04), 0 4px 12px rgba(28, 25, 23, 0.05);
+  --shadow-brand: 0 8px 20px -6px rgba(232, 116, 60, 0.45);
+  --background: #faf9f7;
+  --foreground: #292524;
+  --card: #ffffff;
+  --card-foreground: #292524;
+  --popover: #ffffff;
+  --popover-foreground: #292524;
+  --primary: var(--brand-600);
+  --primary-foreground: #ffffff;
+  --secondary: #f4f2ef;
+  --secondary-foreground: #3f3b37;
+  --muted: #f4f2ef;
+  --muted-foreground: #78716c;
+  --accent: var(--brand-50);
+  --accent-foreground: var(--brand-700);
+  --destructive: #dc2626;
+  --destructive-foreground: #fef2f2;
+  --border: #e7e3dd;
+  --input: #e7e3dd;
+  --ring: var(--brand-500);
+  --sidebar: #ffffff;
+  --sidebar-foreground: #57534e;
+  --sidebar-primary: var(--brand-600);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--brand-50);
+  --sidebar-accent-foreground: var(--brand-700);
+  --sidebar-border: #e7e3dd;
+  --sidebar-ring: var(--brand-500);
+  --surface: #faf9f7;
   --surface-foreground: var(--foreground);
-  --selection: oklch(0% 0 0);
-  --selection-foreground: oklch(1 0 0);
+  --selection: var(--brand-100);
+  --selection-foreground: #1c1917;
 
   /* ToolSpy: secondary text, links, status colours + categorical dataviz palette (fixed slot order, never cycled) */
-  --ink2: #52514e;
+  --ink2: #57534e;
   --link: #2a78d6;
   --axis: #c3c2b7;
   --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
@@ -112,37 +118,38 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.371 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: #1c1917;
+  --foreground: #f4f2ef;
+  --card: #292524;
+  --card-foreground: #f4f2ef;
+  --popover: #292524;
+  --popover-foreground: #f4f2ef;
+  --primary: var(--brand-500);
+  --primary-foreground: #ffffff;
+  --secondary: #3f3b37;
+  --secondary-foreground: #f4f2ef;
+  --muted: #3f3b37;
+  --muted-foreground: #a8a097;
+  --accent: rgba(232, 116, 60, 0.16);
+  --accent-foreground: #fabf72;
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-foreground: oklch(0.58 0.22 27);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.439 0 0);
-  --surface: oklch(0.2 0 0);
-  --surface-foreground: oklch(0.708 0 0);
-  --selection: oklch(0.922 0 0);
-  --selection-foreground: oklch(0.205 0 0);
+  --border: rgba(231, 227, 221, 0.1);
+  --input: rgba(231, 227, 221, 0.15);
+  --ring: var(--brand-500);
+  --sidebar: #211e1c;
+  --sidebar-foreground: #d4cec5;
+  --sidebar-primary: var(--brand-500);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(232, 116, 60, 0.16);
+  --sidebar-accent-foreground: #fabf72;
+  --sidebar-border: rgba(231, 227, 221, 0.1);
+  --sidebar-ring: var(--brand-500);
+  --surface: #241f1d;
+  --surface-foreground: #a8a097;
+  --selection: var(--brand-600);
+  --selection-foreground: #ffffff;
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.3);
 
   --ink2: #c3c2b7;
   --link: #3987e5;
@@ -162,11 +169,33 @@
   html {
     @apply overscroll-y-none;
   }
+  /* LevelUP V2 treatments: soft cards, gradient primary, active nav bar, glass topbar */
+  [data-slot="card"], .card { box-shadow: var(--shadow-soft); }
+  [data-slot="button"][data-variant="default"], .btn-primary {
+    background-image: var(--gradient-brand);
+    box-shadow: var(--shadow-brand);
+  }
+  [data-slot="button"][data-variant="default"]:hover, .btn-primary:hover { filter: brightness(1.05); }
+  [data-slot="sidebar-menu-button"][data-active="true"] { position: relative; font-weight: 600; }
+  [data-slot="sidebar-menu-button"][data-active="true"] > svg { color: var(--brand-600); }
+  [data-slot="sidebar-menu-button"][data-active="true"]::before {
+    content: ""; position: absolute; left: 0; top: 50%; height: 1.25rem; width: 0.25rem;
+    transform: translateY(-50%); border-radius: 0 999px 999px 0; background-image: var(--gradient-brand);
+  }
+  [data-slot="sidebar-inset"] > header {
+    position: sticky; top: 0; z-index: 30;
+    background: color-mix(in srgb, var(--background) 92%, transparent);
+    backdrop-filter: saturate(180%) blur(12px);
+  }
   body {
     @apply bg-background text-foreground font-sans;
     font-synthesis-weight: none;
     text-rendering: optimizeLegibility;
   }
+}
+
+@utility bg-brand-gradient {
+  background-image: var(--gradient-brand);
 }
 
 @utility tnum {

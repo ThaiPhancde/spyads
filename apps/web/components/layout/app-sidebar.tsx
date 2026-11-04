@@ -24,7 +24,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           <SidebarMenuItem>
             <SidebarMenuButton asChild size="lg" className="data-[slot=sidebar-menu-button]:p-1.5!">
               <Link href="/search">
-                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-brand-gradient text-white shadow-[var(--shadow-brand)]">
                   <ScanSearch className="size-4" />
                 </div>
                 <div className="grid flex-1 text-left leading-tight">
