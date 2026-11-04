@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from ..markets import priority_boost
 from ..models import Ad, Creative, Product, Vote
 from .adsignals import verified_live_sql
+from . import naming
 from .creative_text import CURIOSITY, DEMO, EMOTION, TRANSFORM, UGC, ad_text_evidence, summarize
 from .scoring import lin
 
@@ -224,7 +225,10 @@ def evidence(p: Product, f: dict, ads: list[Ad]) -> dict:
             "advertisers": f.get("advertiser_count", 0), "advertisers_at_primary_market": f.get("advertisers_at_primary_market", 0),
             "variants": f.get("variants", 1), "non_commerce_share": round((mix.get("app", 0) + mix.get("form", 0)) / max(1, sum(mix.values())), 2),
             "non_product": p.category == "non_product",
-            "unnamed": p.name_status == "UNKNOWN" or (p.name_status is None and bool(NO_PRODUCT_NAME.search(p.canonical_name or "")))}
+            # a CTA / delivery promise stored as the name ("توصيل مجاني", SUGGESTED) pools unrelated sellers: never a TEST,
+            # whatever its status. NO_PRODUCT_NAME stays status-gated: it also hits real names ("Skincare Set C").
+            "unnamed": p.name_status == "UNKNOWN" or naming.is_bad_name(p.canonical_name)
+                       or (p.name_status is None and bool(NO_PRODUCT_NAME.search(p.canonical_name or "")))}
 
 
 # placeholder names, CTA strings and ad headlines that ended up as a cluster name ("Chat trong Messenger", "Natural Relief In

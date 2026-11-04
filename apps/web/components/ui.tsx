@@ -98,6 +98,14 @@ export const LIFECYCLE_TONE: Record<string, Tone> = {
   WIN: "good", SCALE: "good", SATURATED: "warn", RETIRE: "neutral",
 };
 
+// Same bands as the backend decision (discovery._sellers, SKIP above 15): 2-10 sellers = validated, not "low saturation".
+export const SELLER_SCOPE = "Số page khác nhau đang chạy ads trên Meta / TikTok Ad Library — không gồm shop Shopee / Lazada / TikTok Shop";
+export function sellerLabel(n?: number | null): string {
+  if (!n) return "Chưa rõ người bán";
+  if (n === 1) return "1 người bán · chưa xác nhận";
+  return `${n} người bán · ${n <= 10 ? "đã xác nhận" : n <= 15 ? "đông" : "bão hoà"}`;
+}
+
 export function ScoreBar({ value, width = 64, label, tone = "bg-series-1" }: { value?: number | null; width?: number; label?: boolean; tone?: string }) {
   if (value === null || value === undefined) return <span className="text-muted-foreground">—</span>;
   const v = Math.max(0, Math.min(100, value));
@@ -179,7 +187,7 @@ export function ProductTable({ rows, compact, renderActions }: { rows: any[]; co
               <TableCell className="tnum text-right">{r.unique_ads ?? r.active_ads}{r.unique_ads != null && r.unique_ads !== r.active_ads && <span className="ml-1 text-[10px] text-muted-foreground" title="dòng ad (trùng nội dung/nước)">/{r.active_ads}</span>}</TableCell>
               <TableCell className={cn("tnum text-right", r.growth_7d >= 0.5 && "text-good-text")}>{fmt.signedPct(r.growth_7d)}</TableCell>
               {!compact && <TableCell><ScoreBar value={r.rarity_score} width={44} /></TableCell>}
-              <TableCell className="text-xs whitespace-nowrap"><ScoreBar value={r.saturation_score} width={44} /><div className="text-muted-foreground">{r.saturation_state}</div></TableCell>
+              <TableCell className="text-xs whitespace-nowrap" title={`${r.saturation_state ?? ""} — ${SELLER_SCOPE}`}><ScoreBar value={r.saturation_score} width={44} /><div className="text-muted-foreground">{sellerLabel(r.advertisers)}</div></TableCell>
               <TableCell className="text-xs whitespace-nowrap">{fmt.n(r.confidence_score)}% <span className="text-muted-foreground">{r.confidence_label}</span></TableCell>
               <TableCell><ScoreBar value={r.opportunity_score} width={44} /></TableCell>
               <TableCell><RecBadge rec={r.recommendation} /></TableCell>

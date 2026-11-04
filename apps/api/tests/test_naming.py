@@ -33,9 +33,19 @@ def product_of(db, i) -> Product:
     ("Click Order Now", "Some Page"), ("TikTok Shop", "TikTok Shop"), ("Blue Light Shopping", "Blue Light Shopping"),
     ("Shop now", None), ("Free Shipping Free Returns", "X"), ("FLASH SALE 50% OFF", "Y"), ("Mua ngay kẻo hết", None),
     ("Shopee", "Shopee"), ("Firm Body or Money Back!", "Sculpiflex"), ("اطلب الآن", None),
+    ("توصيل مجاني", None), ("CASH ON DELIVERY", None), ("Pagamento alla consegna", None), ("60 Off Price Drop Alert", None),
 ])
 def test_cta_shop_platform_is_never_a_name(title, adv):
     assert naming.best({"title": title, "ad_text": title, "advertiser": adv})["name"] is None
+
+
+def test_delivery_promise_is_cut_from_a_name_or_rejects_it():
+    # these pooled 13 / 10 unrelated sellers into one "product" (live DB 2026-11-04)
+    for junk in ("توصيل مجاني", "CASH ON DELIVERY", "الدفع عند الاستلام متوفر", "OMR 5.9 with Free Delivery", "٩٩ ريال توصيل مجاني"):
+        assert naming.is_bad_name(junk), junk
+    assert naming.best({"title": "Hally Nicotinamide Body Lotion - Free Delivery", "advertiser": "X"})["name"] == "Hally Nicotinamide Body Lotion"
+    for real in ("Codeine-free Cough Syrup", "Delivery Bag Insulated", "Vitamin C Serum"):
+        assert not naming.is_bad_name(real), real
 
 
 def test_evidence_order_and_status():
@@ -169,6 +179,8 @@ def test_opportunity_gate_uses_name_status():
     assert discovery.evidence(p, f, [])["unnamed"] is True
     legacy = Product(canonical_name="Acme (chưa đặt tên)", name_status=None)
     assert discovery.evidence(legacy, f, [])["unnamed"] is True
+    cta = Product(canonical_name="توصيل مجاني", name_status="SUGGESTED")  # was the only TEST_NOW, 13 unrelated sellers
+    assert discovery.evidence(cta, f, [])["unnamed"] is True
     v = {"market_demand": 60, "momentum": 30, "compliance_risk": 0, "competition": 20, "market_fit": 70}
     assert discovery.discovery_decision(v, "BREAKOUT", {**discovery.evidence(p, f, []), "longevity_days": 30})[0] == "WATCH"
 
@@ -194,3 +206,43 @@ def test_provisional_shop_label_is_display_only(quiet):
         # a second, different product of the same shop is its own product — never merged under the shop name
         ingest.ingest_ads(db, [rec(82, adv="Acme Home Store", url="https://acme.example/products/acme-bamboo-cutting-board")])
         assert product_of(db, 82).id != a.id and product_of(db, 82).canonical_name == "Acme Bamboo Cutting Board"
+
+
+# ---------------------------------------------------------------- 9. repair_cta_names picks only CTA-named, unverified products
+def test_repair_cta_targets_only_cta_names():
+    from app import repair_cta_names
+
+    with SessionLocal() as db:
+        rows = {name: Product(product_code=f"CTA{i}", canonical_name=name, name_status=st)
+                for i, (name, st) in enumerate([("توصيل مجاني", "SUGGESTED"), ("CASH ON DELIVERY", "AUTO_CONFIRMED"),
+                                                ("Pagamento alla consegna", "VERIFIED"), ("Vitamin C Serum", "SUGGESTED"),
+                                                ("Chưa xác định sản phẩm", "UNKNOWN")])}
+        db.add_all(rows.values())
+        db.flush()
+        picked = {p.canonical_name for p in repair_cta_names.targets(db) if p.product_code.startswith("CTA")}
+        db.rollback()
+    assert picked == {"توصيل مجاني", "CASH ON DELIVERY"}  # MKT-verified, real names and UNKNOWN are left alone
+
+
+def test_repair_cta_groups_keep_clones_split_unrelated_shops():
+    from app import repair_cta_names
+
+    poncho = "Questo poncho irresistibile è ora in offerta!"
+    clones = [Ad(id=i, page_id=f"p{i}", ad_text=poncho, creative_fingerprint="fp1") for i in range(1, 5)]
+    shops = [Ad(id=10, page_id="next", ad_text="Spiderman pyjamas for kids, soft fabrics", landing_url="https://nextdirect.com/kw/products/spiderman-pyjamas"),
+             Ad(id=11, page_id="next", ad_text="Spiderman pyjamas for kids — new prints", landing_url="https://nextdirect.com/kw/products/spiderman-pyjamas"),
+             Ad(id=12, page_id="hose", ad_text="Expandable garden hose 30m, free delivery", landing_url="https://souq.example/products/expandable-garden-hose"),
+             Ad(id=13, page_id="cafe", ad_text="توصيل مجاني !")]
+    parts = repair_cta_names.groups(clones + shops)
+    assert sorted(len(p) for p in parts) == [1, 1, 2, 4]  # 4 clones together, Next's two ads of one page together
+    assert {a.id for a in parts[0]} == {1, 2, 3, 4}
+
+
+def test_repair_cta_groups_never_join_on_the_shop_alone():
+    from app import repair_cta_names
+
+    wa = "https://api.whatsapp.com/send"  # no product page: the shop is not evidence of one product
+    ads = [Ad(id=1, page_id="s", ad_text="Kinoki detox patches, say goodbye to toxins", landing_url=wa),
+           Ad(id=2, page_id="s", ad_text="Glucose meter + blood pressure monitor at home", landing_url=wa),
+           Ad(id=3, page_id="s", ad_text="Kinoki detox patches, say goodbye to toxins", landing_url=wa)]
+    assert sorted(len(p) for p in repair_cta_names.groups(ads)) == [1, 2]
