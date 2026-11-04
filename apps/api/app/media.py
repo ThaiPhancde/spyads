@@ -547,6 +547,16 @@ def assign_family(db, c: Creative) -> int:
     return c.id
 
 
+THUMB_ERROR = "thumb:"  # creatives.error prefix: the cover can never become a thumbnail (a person viewing the card still retries)
+
+
+def _permanent_thumb_failure(e: Exception) -> bool:
+    """Not an image (the link returns HTML / a video) or over the size cap — retrying every tick for a day changes nothing."""
+    from PIL import UnidentifiedImageError
+
+    return isinstance(e, UnidentifiedImageError) or (isinstance(e, FetchError) and e.code == "too_large")
+
+
 def grab_thumb(cid: int) -> str | None:
     """Save one small JPEG (≤480 px) for a creative the moment it is collected: a video's cover frame, an image itself.
     Signed CDN links (Meta / TikTok) die within hours and marketplace CDNs block hotlinking, so this is what the cards
@@ -577,8 +587,16 @@ def grab_thumb(cid: int) -> str | None:
             db.execute(update(Creative).where(Creative.id == cid, Creative.thumb_key.is_(None)).values(thumb_key=tkey))
             db.commit()
         return tkey
-    except Exception as e:  # network blip / not an image: the next enqueue_pending tick tries again
+    except Exception as e:  # network blip: the next enqueue_pending tick tries again
         log.warning("thumb grab failed for creative %s: %s", cid, e)
+        if _permanent_thumb_failure(e):  # never an image / over the size cap: record it once, the tick stops retrying
+            try:
+                with SessionLocal() as db:
+                    db.execute(update(Creative).where(Creative.id == cid, Creative.thumb_key.is_(None), Creative.error.is_(None))
+                               .values(error=f"{THUMB_ERROR} {type(e).__name__}: {str(e)[:120]}"))
+                    db.commit()
+            except Exception:
+                log.exception("thumb failure not recorded for creative %s", cid)
         return None
 
 
@@ -676,7 +694,8 @@ def enqueue_pending(limit: int = 500) -> int:
         # thumbnails still missing, last day only: older signed links are dead, the rest is fetched on view
         # (GET /api/creatives/{id}/thumb) — re-scanning 20k dead rows every tick would starve the fresh ones
         recent = Creative.collected_at >= datetime.utcnow() - timedelta(days=1)
-        ids = list(db.scalars(q.where(Creative.thumb_key.is_(None), recent).limit(limit)))
+        ids = list(db.scalars(q.where(Creative.thumb_key.is_(None), recent,
+                                      or_(Creative.error.is_(None), Creative.error.not_like(f"{THUMB_ERROR}%"))).limit(limit)))
         # videos: one lane per network bucket, interleaved, so a Meta backlog never starves TikTok / Snapchat;
         # lane size grows with the backlog (80 per tick never caught up with 18k pending)
         nets = {b: [n for n in NETWORKS if bucket_of(n) == b] for b in BUCKETS}
