@@ -91,3 +91,42 @@ Lỗi #1, #2 (phần deploy), #4: **đã xử lý**. Còn lại: push hoặc PR 
 **Chưa xác nhận về #5:** `worker.log` cũ bị ghi đè khi khởi động lại, nên không đếm lại được mức lặp của 843 dòng. Kết luận "mỗi creative bị thử lại nhiều lần mỗi ngày" dựa trên đọc code (cửa sổ thử lại 1 ngày, mỗi tick), không phải số đo. Cần quan sát `creatives.error LIKE 'thumb:%'` sau 1–2 ngày để xem có bao nhiêu dòng được đánh dấu.
 
 Còn lại: Phase C (kiểm thử), Phase D (kiểm thử thật), push GitHub.
+
+## 6. Phase C — đã thực hiện (04/11/2026)
+
+| Việc | Kết quả |
+|---|---|
+| Lỗi #6: 2 test PostgreSQL FAIL | **Đã sửa.** Tên: `test_clustering::test_clip_alone_is_never_enough_to_merge` và `::test_stock_picture_hash_shared_by_many_ads_is_ignored`. Nguyên nhân gốc: `test_cluster_phase1::test_pgvector_neighbors_are_reused_without_inference` thêm cột `embedding_vec` rồi để lại cờ cache "pgvector sẵn sàng"; test sau tạo lại bảng (cột mất) nhưng cờ còn, nên truy vấn cột không tồn tại. Là lỗi cô lập test, không phải bug sản phẩm. Sửa bằng cách khôi phục cờ khi test kết thúc. Kết quả: 43 passed khi chạy cùng nhau; toàn bộ PostgreSQL trước khi sửa là 597 passed / 2 failed |
+| Lỗi #7: test bị xoá | Khôi phục 4 script thành pytest (`tests/test_legacy_{scoring_rules,ingest_rules,price_intelligence,media_rules}.py`), có khôi phục biến môi trường. 3 kỳ vọng lỗi thời được cập nhật có chủ đích (khoá của `llm.status()`, `bare_url` không còn giữ host từ `98d85c1`, mọi `/api/*` cần phiên hoặc token). **Không khôi phục:** `search_keywords` (đọc DB thật) và `lens_live` (gọi dịch vụ trả phí); 6 script còn lại (allegro ×2, eu_market, free_sources, image_search, lens) chưa xử lý |
+| Lỗi #9: linter | Python: thêm `apps/api/ruff.toml` (chỉ luật bắt lỗi thật). **0 lỗi nghiêm trọng** (cú pháp, tên chưa định nghĩa); 41 cảnh báo nhẹ chưa sửa (34 import thừa, 5 định nghĩa trùng, 1 biến thừa, 1 biểu thức vô nghĩa). Web: **chưa thêm** vì dự án chưa có eslint (thêm là kéo nhiều dependency); typecheck `tsc` vẫn là lớp kiểm tra duy nhất |
+| Lỗi #8: Groq | Chỉnh chuỗi chưa làm; sau khởi động lại 6 giờ qua toàn bộ lời gọi naming đi qua Cerebras (33 thành công / 0 lỗi), Groq chưa bị dùng đến |
+| Toàn bộ test sau Phase C | SQLite **599 passed**, 4 skipped, 0 failed |
+
+## 7. Phase D — đã thực hiện (04/11/2026)
+
+Môi trường: bản sao DB thật (`toolspy_staging`, khôi phục từ bản sao lưu trước Phase A) cho mọi thao tác ghi; không dùng DB thật; `DISABLE_SCHEDULER=1`; không khoá bên thứ ba trả phí. DB staging đã xoá sau khi xong.
+
+| Kiểm tra | Kết quả |
+|---|---|
+| Migration P1–P5 trên **bản sao dữ liệu thật** (26 798 ads) | **PASS**: API khởi động và migrate trong 16 giây |
+| Đăng nhập `admin@gmail.com` / `admin` bằng Playwright | **PASS**. Tài khoản có vai trò `MKT`, không phải admin |
+| 12 trang chính (dashboard, tìm kiếm, sản phẩm, đặt tên, AI Agent, thư viện ads, đối thủ, gom cụm, vault, hidden winners, thị trường, hồ sơ) | **PASS**: tải được, không lỗi JS, không API ≥ 400 |
+| Trang chi tiết sản phẩm thật + tab Creative Library / Market & Ads | **PASS** |
+| `/data` (Data & Connectors) | **FAIL**: lỗi JS `Cannot read properties of undefined (reading 'backend')` lặp lại. Xác nhận lỗi #10 là **crash thật**, không chỉ là "không truy cập được" |
+| AI Agent: hỏi một câu bằng tài khoản MKT | **FAIL**: `POST /api/agent/ask` → **403** (lỗi mới, #12) |
+| Meta Ad Library thật (1 trang, `MetaLibraryConnector.fetch_page`, không ghi DB) | **PASS**: 10 ads trong 4,5 giây, đủ trường, không báo đổi cấu trúc |
+| Extension trong Chromium thật trên Ad Library công khai, gửi vào API staging | **PASS**: bắt 67 ads, outbox 0 chờ / 0 bị từ chối, 6 biên nhận có `job_id` + `schema_version` + cursor; staging +34 ads mới. Không gặp màn hình đăng nhập chặn dữ liệu |
+| Quan sát hệ thống thật ~50 phút sau khởi động lại | **PASS (ngắn hạn)**: 54 lượt crawl `ok` (51 một phần, 3 đủ), 243 request, 0 đổi cấu trúc, 0 bản ghi cách ly, 9 839 quan sát tái sử dụng video, 0 `Traceback`/`ERROR`. Naming: 675 sản phẩm đã xử lý xong (198 `AUTO_CONFIRMED`, 15 `SUGGESTED`, 416 không phải sản phẩm, 46 chờ MKT duyệt); hàng đợi = 0 |
+| Chạy tải 24–72 giờ | **NOT TESTED** (chỉ quan sát được ~50 phút) |
+
+### Lỗi mới / cập nhật từ Phase D
+
+| # | Mức | Lỗi | Nguyên nhân | File | Phương án |
+|---|---|---|---|---|---|
+| 12 | **Cao** | **AI Agent không dùng được với tài khoản MKT**: trang tải được nhưng mọi câu hỏi trả 403 "Khu vực hệ thống chỉ dành cho dịch vụ nội bộ" | `/api/agent/` nằm trong `SYSTEM` của guard phiên (chỉ token dịch vụ). Ý định ban đầu chỉ là `/api/agent/v1/` (đã có trong `MACHINE` cho bot); tiền tố rộng chặn luôn `/api/agent/ask` | `apps/api/app/workspace/auth.py` (dòng 28, 31) | Thu hẹp `SYSTEM` thành `/api/agent/v1/` hoặc thêm `/api/agent/ask` vào danh sách MKT được ghi. Cần quyết định vì `ask` dùng hạn mức LLM miễn phí chung |
+| 10 | Trung bình (nâng lên) | `/data` crash JS với tài khoản MKT, không chỉ bị chặn | Trang cần dữ liệu `/api/collector` đầy đủ; MKT nhận bản rút gọn nên thiếu `backend` | `apps/web/app/data/page.tsx` | Tối thiểu: trang hiện thông báo "chỉ dành cho vận hành" thay vì crash. Đầy đủ: chờ quyết định vai trò operator |
+
+## 8. Còn lại
+
+- **Cần quyết định:** lỗi #12 (cho MKT dùng AI Agent?), lỗi #10 (operator hay KPI chỉ đọc), push `main` (21 commit) lên GitHub.
+- **Chưa làm:** 6 script test cũ còn lại, sửa 41 cảnh báo ruff, thêm eslint cho web, chạy tải 24–72 giờ.
