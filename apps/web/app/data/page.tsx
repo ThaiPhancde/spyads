@@ -390,6 +390,20 @@ export default function Collector() {
     }
   });
   if (!data) return <Loading error={error} />;
+  // An MKT account gets a reduced /collector payload (no storage, catalogue or queries): the system area is for the internal service
+  if (!data.storage) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title="Data & Connectors" subtitle="Khu vực vận hành hệ thống" />
+        <Card title="Trang này chỉ dành cho vận hành hệ thống">
+          <p className="text-sm text-muted-foreground">
+            Cấu hình nguồn dữ liệu, giám sát crawl và dung lượng được quản lý bởi dịch vụ nội bộ, không mở cho tài khoản MKT.
+            Bạn vẫn dùng bình thường Tìm sản phẩm, Thư viện quảng cáo, Đối thủ và AI Agent. Cần thay đổi nguồn dữ liệu thì liên hệ người vận hành.
+          </p>
+        </Card>
+      </div>
+    );
+  }
   // spy sources grouped by channel (ads / commerce)
   const grouped: Record<string, any[]> = {};
   data.connectors.forEach((c: any) => {

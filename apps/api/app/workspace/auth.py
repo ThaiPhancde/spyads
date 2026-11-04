@@ -28,7 +28,7 @@ PUBLIC = {"/api/health", "/api/auth/csrf", "/api/auth/register", "/api/auth/logi
 MACHINE = ("/api/ingest/", "/api/eu-market/allegro/callback/", "/api/agent/v1/")
 # System areas (connectors / crawler config, storage, agent, EU sync, collector internals): internal service token only.
 # There is no ADMIN account: every person is an MKT and never gets these, not even read access.
-SYSTEM = ("/api/admin/", "/api/storage/", "/api/agent/", "/api/eu-market/", "/api/collector/")
+SYSTEM = ("/api/admin/", "/api/storage/", "/api/agent/v1/", "/api/eu-market/", "/api/collector/")  # /api/agent/ask is the MKT AI Agent (below)
 
 
 def digest(value):
@@ -123,6 +123,7 @@ def mkt_write(path):
             or re.fullmatch(r"/api/clusters/candidates/\d+/(accept|reject)", path)
             or re.fullmatch(r"/api/clusters/events/\d+/undo", path)
             or re.fullmatch(r"/api/allocations/(claim|\d+/(release|status|results))", path)
+            or path == "/api/agent/ask"  # a question over the database (read-only); the bot API /api/agent/v1/ stays system-only
             or path == "/api/behavior/events"
             or path in ("/api/preferences", "/api/preferences/reset", "/api/preferences/refresh")
             or path == "/api/recommendations/refresh"

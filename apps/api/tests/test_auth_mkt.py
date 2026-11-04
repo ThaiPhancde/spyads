@@ -53,3 +53,13 @@ def test_radar_watched_is_per_account():
     assert {r["id"]: r["watched"] for r in cb.get("/api/competitor-radar").json()["rows"]} == {aid: False, other: False}
     assert ca.get(f"/api/competitor-radar/{aid}").json()["advertiser"]["watched"] is True
     assert cb.get(f"/api/competitor-radar/{aid}").json()["advertiser"]["watched"] is False
+
+
+def test_mkt_can_ask_the_ai_agent(monkeypatch):
+    """/api/agent/ask is a read-only question over the database, open to any MKT (it was 403: the whole /api/agent/ prefix was system-only)."""
+    from app.services import llm
+    monkeypatch.setattr(llm, "available", lambda env="LLM_PROVIDERS": False)  # rules parser: no model call in the test
+    users()
+    c = client("mkt-a@example.test")
+    r = write(c, "POST", "/agent/ask", {"question": "top sản phẩm ở Philippines"})
+    assert r.status_code == 200 and r.json()["engine"] == "rules" and r.json()["spec"]["intent"], r.text
