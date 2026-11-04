@@ -5,7 +5,7 @@ import { BadgeEuro, Camera, MessageCircle, RefreshCw, Share2, ThumbsDown, Thumbs
 import { visualHref } from "@/components/visual/global-image-search";
 import { toast } from "sonner";
 import { BarList, Breakdown, Funnel, TrendChart } from "@/components/charts";
-import { Card, Empty, LIFECYCLE_TONE, Loading, PageHeader, Pill, RecBadge, Stat } from "@/components/ui";
+import { Card, Empty, LIFECYCLE_TONE, Loading, PageHeader, Pill, RecBadge, SELLER_SCOPE, sellerLabel, Stat } from "@/components/ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -276,7 +276,7 @@ export default function Product360({ params }: { params: { id: string } }) {
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Opportunity" value={fmt.n(p.opportunity_score)} sub={`Raw ${fmt.n(p.opportunity_raw)} × confidence adj.`} />
         <Stat label="Action" value={<RecBadge rec={p.recommendation} />} sub={(p.reasons || [])[0]} />
-        <Stat label="Saturation" value={fmt.n(p.saturation_score)} sub={p.saturation_state} />
+        <Stat label="Saturation" value={fmt.n(p.saturation_score)} sub={<span title={SELLER_SCOPE}>{sellerLabel(f.advertiser_count)}</span>} />
         <Stat label="Confidence" value={`${fmt.n(p.confidence_score)}%`} sub={p.confidence_label} />
       </div>
 

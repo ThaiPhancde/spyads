@@ -37,7 +37,15 @@ CTA = re.compile(
     r"^(shop|buy|order|click|tap|swipe|get|grab|claim|discover|learn|see|watch|send|message|chat|book|sign|call|try|visit|check|"
     r"add to cart|follow|comment|limited|sale|free|mua|sắm|săn|nhận|đặt|xem|nhắn|inbox|ib|pm|dm|link|bili na|order na|اطلب|تسوق|اشتر)\b"
     r"|% ?off|\bfree ?ship|\bsale\b|\bdeals?\b|\bpromo|\bdiscount|giảm giá|khuyến mãi|ưu đãi|freeship|\bcod\b|\blimited\b|\bbuy \d|"
-    r"\btake \d|\bend(s)? soon\b|\bclearance\b|\b(any|\d+) (pieces?|items?)\b|\boff$|خصم|عرض", re.I)
+    r"\btake \d|\bend(s)? soon\b|\bclearance\b|\b(any|\d+) (pieces?|items?)\b|\boff$|خصم|عرض"
+    r"|\bofferta\b|\boferta\b|price drop", re.I)
+# delivery / payment promises: "توصيل مجاني" (13 sellers) and "Cash On Delivery" (10) became products and pooled unrelated ads.
+# After a separator it is a tail and gets cut ("Hair Color Stick - Free Delivery"); anywhere else the name is rejected.
+DELIVERY = (r"(cash|pay(ment)?) on delivery|free (delivery|shipping|returns?)|fast delivery|same[- ]day delivery|"
+            r"libreng (shipping|delivery|sf)|pagamento alla consegna|contrassegno|consegna gratuita|spedizione gratuita|"
+            r"env[ií]o gratis|contra ?reembolso|توصيل|التوصيل|الدفع عند الا?ستلام|الدفع عند الأستلام|الدفع عند التسليم|شحن مجاني")
+DELIVERY_TAIL = re.compile(rf"\s*(\s[-|+–—]|\s(with|and|&)\s|[|+–—])\s*({DELIVERY}).*$", re.I)
+CTA = re.compile(rf"{CTA.pattern}|{DELIVERY}", re.I)
 PRONOUN = re.compile(r"(?<!\w)(i|i'm|im|you|you're|your|we|we're|our|my|me|us|they|this is|it's|ako|ikaw|mo|ko|natin|kayo|"
                      r"tôi|bạn|mình|chúng|anh|chị|em)(?!\w)", re.I)
 SENTENCE = re.compile(r"(?<!\w)(is|are|was|were|will|can|could|should|would|do|does|did|have|has|had|be|been|get|got|"
@@ -55,7 +63,8 @@ LISTING_FILLER = re.compile(
     r"\b(20\d\d|new|hot ?sale|hot ?selling|hot|wholesale|dropshipping|drop shipping|free shipping|high quality|best ?seller|"
     r"creative|fashion|trendy|popular|personality|cross[- ]border|factory( direct)?|in stock|spot|explosive|"
     r"for (men|women) and (women|men)|unisex)\b", re.I)
-JUNK = re.compile(r"[₱$€£¥]\s?\d[\d.,]*|\d[\d.,]*\s?(php|sar|aed|usd|kwd|egp|aud|gbp|eur|vnd|đ|k)\b|\d{1,3}\s?%", re.I)
+JUNK = re.compile(r"[₱$€£¥]\s?\d[\d.,]*|\d[\d.,]*\s?(php|sar|aed|usd|kwd|egp|omr|qar|bhd|aud|gbp|eur|vnd|đ|k|ريال|درهم|دينار)(?!\w)"
+                  r"|(?<!\w)(php|sar|aed|usd|kwd|egp|omr|qar|bhd|ريال|درهم|دينار)\s?\d[\d.,]*|\d{1,3}\s?%", re.I)
 CJK = re.compile(r"[぀-ヿ㐀-鿿]")
 SLUG_SKIP = {"products", "product", "p", "collections", "shop", "item", "items", "pages", "dp", "vn", "en", "ar", "sa", "view", "detail"}
 MARKETPLACE_HOST = re.compile(r"alibaba|aliexpress|amazon\.|noon\.com|shopee|lazada|temu\.|ebay\.|1688\.com|taobao|tmall|tokopedia", re.I)
@@ -65,6 +74,7 @@ SOCIAL_HOST = re.compile(r"(^|\.)(facebook\.com|fb\.com|fb\.me|instagram\.com|ti
 
 def _clean(s: str | None) -> str:
     s = re.sub(r"https?://\S+|[#@][\w.]+", " ", s or "")
+    s = DELIVERY_TAIL.sub("", s)
     s = JUNK.sub(" ", s)
     s = re.sub(r"[^\w\s&+'./-]|_", " ", s)
     return re.sub(r"\s+", " ", s).strip(" -.,/&+'")
