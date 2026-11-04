@@ -130,3 +130,13 @@ Môi trường: bản sao DB thật (`toolspy_staging`, khôi phục từ bản 
 
 - **Cần quyết định:** lỗi #12 (cho MKT dùng AI Agent?), lỗi #10 (operator hay KPI chỉ đọc), push `main` (21 commit) lên GitHub.
 - **Chưa làm:** 6 script test cũ còn lại, sửa 41 cảnh báo ruff, thêm eslint cho web, chạy tải 24–72 giờ.
+
+## 9. Quyết định và xử lý sau Phase D (04/11/2026)
+
+| Quyết định của chủ dự án | Kết quả |
+|---|---|
+| Cho MKT dùng AI Agent (lỗi #12) | **Đã sửa**, commit `728f606`: `SYSTEM` chỉ còn `/api/agent/v1/` (API của bot), `POST /api/agent/ask` được thêm vào danh sách MKT được ghi. Test: `tests/test_auth_mkt.py::test_mkt_can_ask_the_ai_agent`. Kiểm tra trên hệ thống thật bằng trình duyệt (tài khoản `admin@gmail.com`, vai trò MKT): AI Agent trả lời qua Cerebras, 5 dòng kết quả, 0 lỗi API |
+| `/data` hiện thông báo thay vì crash (lỗi #10) | **Đã sửa**, cùng commit: tài khoản MKT thấy thông báo "Trang này chỉ dành cho vận hành hệ thống". Kiểm tra trên hệ thống thật: thông báo hiện, 0 lỗi JS. Việc cho MKT/operator xem KPI vẫn chưa làm |
+| Push lên `main` | **Đã push**: `origin/main` `98d85c1` → `728f606` (25 commit, fast-forward). Kiểm tra trước khi push: 600 test pass, diff không chứa secret hay file nhạy cảm. Hai file zip SpyWinAds và `TOOLSPY_PROMPT_ADDENDUM.md` vẫn ngoài Git. API thật đã khởi động lại để dùng bản sửa quyền |
+
+Việc còn mở: 6 script test cũ chưa khôi phục, 41 cảnh báo ruff, eslint cho web, chạy tải 24–72 giờ, KPI cho operator.
