@@ -80,3 +80,14 @@ Phạm vi: chạy các bộ test, typecheck và build sẵn có, E2E trình duy�
 | 4. Kiểm tra | Migration trên DB thật: đủ bảng `creative_reuse_observations` và `ingest_quarantine`, đủ cột P1/P2/P3, 3 UNIQUE index đã tạo (không có bản ghi trùng). Crawl job treo được `recover()` ghi nhận (`lost` / `cancelled` → `retry_wait`), 3 crawl mới đang chạy. Worker re-queue 1 259 creative chờ media. Số ads/products không đổi (26 798 / 18 487). Log API/worker: 0 Traceback, 0 ERROR |
 
 Lỗi #1, #2 (phần deploy), #4: **đã xử lý**. Còn lại: push hoặc PR lên GitHub (lỗi #2), Phase B (cần duyệt vì đổi dữ liệu), Phase C, Phase D.
+
+## 5. Phase B — đã thực hiện (04/11/2026)
+
+| Việc | Kết quả |
+|---|---|
+| Lỗi #3: đặt lại `naming_attempts` | 675 sản phẩm (667 in-target; đều `UNKNOWN`, `naming_attempts = 3`, `name_source` trống, không phải tên của MKT) về 0. **Hoàn tác:** `apps/api/data/backups/phaseB_naming_reset_20261104_082502.json` (id + giá trị cũ). Sau ~25 phút Cerebras (6 lần gọi, 0 lỗi): 71 sản phẩm được đặt tên (69 `AUTO_CONFIRMED`, 2 `SUGGESTED`), 82 xác định là không phải sản phẩm (`llm_none`), 2 chờ MKT duyệt. Hàng đợi AI còn 539, đang giảm; ước tính hết sau khoảng 1–2 giờ |
+| Lỗi #5: `thumb grab failed` | Sửa code ([media.py](../apps/api/app/media.py)): cover không phải ảnh hoặc quá 20 MB được ghi 1 lần vào `creatives.error` (tiền tố `thumb:`) và vòng thử lại bỏ qua. Lỗi mạng tạm thời không bị đánh dấu; người xem thẻ vẫn kích hoạt thử lại. Test: `tests/test_thumb_permanent_failure.py` (5, 3 test thất bại trước khi sửa). Toàn bộ test: 595 passed. Worker đã chạy code mới; log mới 0 dòng `thumb grab failed`, 0 `Traceback` |
+
+**Chưa xác nhận về #5:** `worker.log` cũ bị ghi đè khi khởi động lại, nên không đếm lại được mức lặp của 843 dòng. Kết luận "mỗi creative bị thử lại nhiều lần mỗi ngày" dựa trên đọc code (cửa sổ thử lại 1 ngày, mỗi tick), không phải số đo. Cần quan sát `creatives.error LIKE 'thumb:%'` sau 1–2 ngày để xem có bao nhiêu dòng được đánh dấu.
+
+Còn lại: Phase C (kiểm thử), Phase D (kiểm thử thật), push GitHub.
