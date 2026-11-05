@@ -435,6 +435,8 @@ _last_creative = datetime.min
 CLUSTER_EVERY_MIN = float(_os.getenv("CLUSTER_EVERY_MIN", "180"))  # cluster_jobs: merge certain duplicate products, queue the rest for MKT; 0 = off
 _last_cluster = datetime.min
 _last_engagement = datetime.min
+TIKTOK_REFRESH_EVERY_MIN = float(_os.getenv("TIKTOK_REFRESH_EVERY_MIN", "360"))  # media.refresh_tiktok_links: fresh signed links + drop removed ads; 0 = off
+_last_tiktok = datetime.min
 
 _running: set[str] = set()
 MAX_PARALLEL_JOBS = int(_os.getenv("MAX_PARALLEL_JOBS", "2"))
@@ -453,7 +455,7 @@ def _heavy() -> int:
 
 
 async def scheduler_loop():
-    global _last_daily, _last_media, _last_cleanup, _last_liveness, _last_spy, _last_eu, _last_visual, _last_price, _last_naming, _last_creative, _last_cluster, _last_engagement, _last_reuse
+    global _last_daily, _last_media, _last_cleanup, _last_liveness, _last_spy, _last_eu, _last_visual, _last_price, _last_naming, _last_creative, _last_cluster, _last_engagement, _last_reuse, _last_tiktok
     await asyncio.sleep(5)
     while True:
         try:
@@ -521,6 +523,10 @@ async def scheduler_loop():
                 _last_cluster = now
                 _running.add("cluster")
                 asyncio.get_running_loop().run_in_executor(None, _cluster_wrapper)
+            if TIKTOK_REFRESH_EVERY_MIN and now - _last_tiktok >= timedelta(minutes=TIKTOK_REFRESH_EVERY_MIN) and "tiktok" not in _running:
+                _last_tiktok = now
+                _running.add("tiktok")
+                asyncio.get_running_loop().run_in_executor(None, _tiktok_wrapper)
             if now - _last_spy >= timedelta(minutes=SPY_EVERY_MIN) and "spy" not in _running:
                 _last_spy = now
                 _running.add("spy")
@@ -648,6 +654,17 @@ def _reuse_wrapper():
         log.exception("creative reuse refresh failed")
     finally:
         _running.discard("reuse")
+
+
+def _tiktok_wrapper():
+    from .media import refresh_tiktok_links
+
+    try:
+        log.info("tiktok links: %s", refresh_tiktok_links())
+    except Exception:
+        log.exception("tiktok link refresh failed")
+    finally:
+        _running.discard("tiktok")
 
 
 def _cleanup_job():

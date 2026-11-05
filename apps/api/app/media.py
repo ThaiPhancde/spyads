@@ -603,12 +603,20 @@ def grab_thumb(cid: int) -> str | None:
 def refresh_source(c: Creative) -> bool:
     """Signed TikTok links die within hours: ask the source for this ad again by its id (public pages, no cookie / login)
     and swap in the fresh link. False when the source cannot be re-asked by id or no longer has the video."""
-    from .collector.adapters.ad_libraries import TikTokAdLibraryConnector, TikTokTopAdsHeadlessConnector
+    from .collector.adapters.ad_libraries import TikTokAdLibraryConnector, TikTokTopAdsConnector
+    from .collector.base import ConnectorError
 
     if c.type != "video" or not c.source_ad_id:
         return False
     if c.source in ("tiktok_top_ads", "apify_tiktok_top_ads"):  # both carry the Creative Center material id
-        v = TikTokTopAdsHeadlessConnector().video(c.source_ad_id)
+        # /top_ads/v2/detail on harvested headers (one browser launch per 20 min). The public detail page
+        # (/creativecenter/topads/<id>/pc/en) redirects to the list since 2026-11, so it can't be read any more.
+        try:
+            v = TikTokTopAdsConnector()._get("/top_ads/v2/detail", material_id=c.source_ad_id).get("video_info") or {}
+        except ConnectorError as e:
+            if "40004" in str(e):  # "can't find material": the ad left Creative Center
+                return False
+            raise
         urls = v.get("video_url") or {}
         hd = urls.get("720p") or urls.get("1080p") or urls.get("540p") or urls.get("480p") or next(iter(urls.values()), None)
         sd, cover = urls.get("360p"), v.get("cover")
@@ -624,6 +632,46 @@ def refresh_source(c: Creative) -> bool:
     c.source_url, c.sd_source_url = hd, sd
     c.preview_source_url = cover or c.preview_source_url
     return True
+
+
+TIKTOK_REFRESH_SOURCES = ("tiktok_top_ads", "apify_tiktok_top_ads", "tiktok_ad_library")
+
+
+def refresh_tiktok_links(margin_s: int = 3600) -> dict:
+    """Scheduled (realtime.TIKTOK_REFRESH_EVERY_MIN): every TikTok video whose signed link is dead or dies within
+    `margin_s` gets a fresh one by ad id; ads TikTok no longer has are deleted with everything only they used."""
+    from .models import Ad
+    from .purge_removed import plan, purge_ads
+
+    with SessionLocal() as db, read_only():
+        ids = [i for i, u in db.execute(select(Creative.id, Creative.source_url).where(
+            Creative.type == "video", Creative.status != "stored", Creative.source.in_(TIKTOK_REFRESH_SOURCES)))
+            if not source_alive(u, margin_s)]
+    fresh, failed, streak, gone = 0, 0, 0, set()
+    for cid in ids:
+        with SessionLocal() as db:
+            c = db.get(Creative, cid)
+            try:
+                if refresh_source(c):
+                    c.error = None
+                    db.commit()
+                    fresh += 1
+                elif c.ad_id:
+                    gone.add(c.ad_id)
+                streak = 0
+            except Exception as e:
+                failed, streak = failed + 1, streak + 1
+                if streak >= 20:  # session expired / API changed: stop instead of hammering TikTok for hours
+                    log.warning("tiktok refresh: stopped after %s failures in a row: %s", streak, e)
+                    break
+    purged = 0
+    if gone and len(gone) <= max(fresh, 5):  # more "gone" than refreshed = the source answers wrong; never mass-delete on that
+        with SessionLocal() as db:
+            purge_ads(db, plan(db, Ad.id.in_(sorted(gone))))
+        purged = len(gone)
+    elif gone:
+        log.warning("tiktok refresh: %s ads look gone but only %s refreshed — not deleting", len(gone), fresh)
+    return {"checked": len(ids), "fresh": fresh, "failed": failed, "gone_ads_deleted": purged}
 
 
 def enqueue(ids: list[int], force: bool = False):

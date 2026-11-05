@@ -1,0 +1,7 @@
+{$DOMAIN} {
+	encode gzip
+	# Web chuyển /api/* sang API (xem apps/web/next.config.js); SSE cần không buffer
+	reverse_proxy web:3000 {
+		flush_interval -1
+	}
+}

@@ -304,13 +304,6 @@ class TikTokTopAdsHeadlessConnector(BaseConnector):
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
           "Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0")  # default headless UA says "HeadlessChrome"
 
-    def video(self, material_id: str) -> dict:
-        """Fresh signed `video_info` of one ad (CDN links die within hours): the public detail page makes its own
-        /top_ads/v2/detail call — no login, no cookie. ~10 s, in the browser worker (app/browser_worker.py)."""
-        from ...browser_worker import run
-
-        return run("tiktok_video", {"material_id": material_id}) or {}
-
     def _scrape(self, country: str, period: str) -> list[dict]:
         from ...browser_worker import run
 

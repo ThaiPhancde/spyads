@@ -1,0 +1,61 @@
+# Chạy trên VPS:  cd ~/toolspy && docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+# Chỉ Caddy mở cổng ra ngoài (80/443). Postgres, API, Web chỉ nói chuyện trong mạng nội bộ.
+services:
+  db:
+    image: pgvector/pgvector:pg18          # cùng bản PG18 với máy local, đã có sẵn extension vector
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: toolspy
+      POSTGRES_USER: toolspy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?đặt POSTGRES_PASSWORD trong .env}
+    volumes: [pgdata:/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U toolspy -d toolspy"]
+      interval: 5s
+      retries: 20
+
+  api:
+    build: ../apps/api
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://toolspy:${POSTGRES_PASSWORD}@db:5432/toolspy
+      DISABLE_SCHEDULER: "1"
+      DATA_DIR: /data
+    volumes: [appdata:/data]
+    depends_on: {db: {condition: service_healthy}}
+
+  worker:                                    # đúng 1 bản (lịch thu thập, đặt tên, chấm điểm)
+    build: ../apps/api
+    restart: unless-stopped
+    command: python -m app.worker
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://toolspy:${POSTGRES_PASSWORD}@db:5432/toolspy
+      DISABLE_SCHEDULER: "1"
+      DATA_DIR: /data
+    volumes: [appdata:/data]
+    depends_on: {db: {condition: service_healthy}}
+
+  web:
+    build:
+      context: ../apps/web
+      args: {API_URL: "http://api:8000"}
+    restart: unless-stopped
+    environment:
+      API_URL: "http://api:8000"
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-}   # để trống = không khóa
+      BASIC_AUTH_PASS: ${BASIC_AUTH_PASS:-}
+    depends_on: [api]
+
+  caddy:                                     # HTTPS tự động (Let's Encrypt) cho ${DOMAIN}
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment: {DOMAIN: "${DOMAIN:?đặt DOMAIN trong .env}"}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [web]
+
+volumes: {pgdata: {}, appdata: {}, caddy_data: {}}
