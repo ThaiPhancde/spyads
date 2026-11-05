@@ -8,7 +8,8 @@ from pathlib import Path as _Path
 
 
 def _load_dotenv():
-    for p in (_Path(__file__).resolve().parents[3] / ".env", _Path(__file__).resolve().parents[1] / ".env"):
+    up = _Path(__file__).resolve().parents  # in Docker (/app/app/__init__.py) there is no 4th parent: env comes from compose
+    for p in [up[i] / ".env" for i in (3, 1) if i < len(up)]:
         if not p.is_file():
             continue
         for raw in p.read_text(encoding="utf-8").splitlines():

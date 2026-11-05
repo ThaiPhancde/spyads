@@ -25,7 +25,7 @@ from .collector.base import Blocked, ConnectorError, NotConfigured, RateLimited
 log = logging.getLogger(__name__)
 
 RAM_PER_BROWSER_MB = int(os.getenv("BROWSER_RAM_MB", "700"))
-TIMEOUTS = {"health": 60, "tiktok_top_ads": 240, "tiktok_video": 90, "tiktok_cc_headers": 120}  # seconds, whole task
+TIMEOUTS = {"health": 60, "tiktok_top_ads": 240, "tiktok_cc_headers": 120}  # seconds, whole task
 CHANNELS = ("msedge", "chrome")  # the installed browser: no Playwright browser download on the server
 
 
@@ -245,26 +245,6 @@ def _tiktok_top_ads(p, args):
     return seen
 
 
-def _tiktok_video(p, args):
-    from .collector.adapters.ad_libraries import TikTokTopAdsHeadlessConnector as T
-
-    got: dict = {}
-    b = launch(p)
-    try:
-        pg = b.new_context(locale="en-US", user_agent=T.UA).new_page()
-        w = Watch(pg, "/top_ads/v2/detail", lambda j: got.update((j.get("data") or {}).get("video_info") or {}))
-        resp = pg.goto(f"https://ads.tiktok.com/business/creativecenter/topads/{args['material_id']}/pc/en",
-                       wait_until="domcontentloaded", timeout=60000)
-        for _ in range(30):
-            if got:
-                break
-            pg.wait_for_timeout(500)
-        w.check(pg, resp, got)
-    finally:
-        b.close()
-    return got
-
-
 def _tiktok_cc_headers(p, args):
     from .collector.adapters.ad_libraries import CC_PAGE, TIKTOK_PROFILE, TikTokTopAdsHeadlessConnector as T
 
@@ -291,7 +271,7 @@ def _tiktok_cc_headers(p, args):
     return got
 
 
-TASKS = {"health": _health, "tiktok_top_ads": _tiktok_top_ads, "tiktok_video": _tiktok_video, "tiktok_cc_headers": _tiktok_cc_headers}
+TASKS = {"health": _health, "tiktok_top_ads": _tiktok_top_ads, "tiktok_cc_headers": _tiktok_cc_headers}
 
 
 def main(task: str, src: str, dst: str) -> int:
